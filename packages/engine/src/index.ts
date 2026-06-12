@@ -32,3 +32,17 @@ export { TranslationQueue } from "./queue";
 export type { QueueOptions } from "./queue";
 export { ClaudeCliEngine, EngineTurnError } from "./claude-cli-engine";
 export type { ClaudeCliEngineConfig } from "./claude-cli-engine";
+
+// Issue #6 — local LLM fallback tier (PROPOSAL §4 tier 2).
+export { LocalLlmEngine } from "./local-llm-engine";
+export type { LocalLlmEngineConfig } from "./local-llm-engine";
+export { stripNonTranslation } from "./translation-guard";
+export { ensureModel, ModelChecksumError, nodeDownloadFs, nodeRangeFetcher } from "./model-download";
+export type {
+  DownloadFs,
+  RangeFetcher,
+  RangeResponse,
+  EnsureModelOptions,
+} from "./model-download";
+export { QWEN3_4B_Q4_K_M, LLAMA_CPP_RELEASE } from "./pins";
+export type { ModelArtifact, LlamaCppAsset, LlamaCppReleasePin } from "./pins";

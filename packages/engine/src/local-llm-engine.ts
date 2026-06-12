@@ -1,0 +1,251 @@
+// Local LLM fallback engine (issue #6, PROPOSAL §4 tier 2): a llama.cpp server
+// hosting Qwen3-4B behind the SAME TranslationEngine interface as the CLI tier,
+// so #7's auto-fallback can hot-swap mid-meeting. Cost is $0 (local). The
+// binary path, model path, host/port, and base env are injected — the package
+// resolves no platform paths itself.
+
+import { spawn } from "node:child_process";
+import type { ChildProcessWithoutNullStreams } from "node:child_process";
+
+import { buildSummaryMessage, buildSystemPrompt, buildTranslateMessage } from "./prompt";
+import { stripNonTranslation } from "./translation-guard";
+import type {
+  EngineHealth,
+  MeetingBrief,
+  RollingContext,
+  Sentence,
+  Translation,
+  TranslationEngine,
+  Usage,
+} from "./types";
+
+export interface LocalLlmEngineConfig {
+  /** Path to the llama.cpp `llama-server` binary (injected). */
+  bin: string;
+  /** Path to the GGUF model file (injected; see ensureModel). */
+  modelPath: string;
+  /** Port the server listens on (injected). */
+  port: number;
+  /** Host; defaults to 127.0.0.1 (local only). */
+  host?: string;
+  /** Base environment for the child. */
+  env?: Record<string, string | undefined>;
+  /** Context window size passed to llama-server. */
+  ctxSize?: number;
+  /** Extra llama-server args (injected; e.g. -ngl for GPU layers). */
+  extraArgs?: string[];
+  /** Health-poll timeout in ms before start() gives up. Default 60s. */
+  startupTimeoutMs?: number;
+  targetLanguage?: string;
+  glossary?: Record<string, string>;
+  contextPairs?: number;
+  /** Injectable for tests; defaults to global fetch. */
+  fetchImpl?: typeof fetch;
+}
+
+const MAX_STDERR_TAIL = 2000;
+const DEFAULT_HOST = "127.0.0.1";
+const DEFAULT_CTX = 4096;
+const DEFAULT_STARTUP_TIMEOUT = 60_000;
+
+interface ChatResponse {
+  choices?: { message?: { content?: string } }[];
+  usage?: { prompt_tokens?: number; completion_tokens?: number };
+}
+
+export class LocalLlmEngine implements TranslationEngine {
+  private readonly config: LocalLlmEngineConfig;
+  private readonly host: string;
+  private readonly fetchImpl: typeof fetch;
+  private readonly systemPrompt: string;
+  private readonly usageListeners = new Set<(usage: Usage) => void>();
+
+  private child: ChildProcessWithoutNullStreams | null = null;
+  private stderrTail = "";
+  private statusValue: EngineHealth = { status: "stopped" };
+  private latestUsage: Usage = {
+    cumulativeCostUsd: 0,
+    turnCostUsd: 0,
+    inputTokens: 0,
+    outputTokens: 0,
+    cacheReadInputTokens: 0,
+  };
+
+  constructor(config: LocalLlmEngineConfig) {
+    this.config = config;
+    this.host = config.host ?? DEFAULT_HOST;
+    this.fetchImpl = config.fetchImpl ?? fetch;
+    this.systemPrompt = buildSystemPrompt({
+      targetLanguage: config.targetLanguage,
+      glossary: config.glossary,
+    });
+  }
+
+  health(): EngineHealth {
+    return this.statusValue;
+  }
+
+  onUsage(listener: (usage: Usage) => void): () => void {
+    this.usageListeners.add(listener);
+    return () => this.usageListeners.delete(listener);
+  }
+
+  private get baseUrl(): string {
+    return `http://${this.host}:${this.config.port}`;
+  }
+
+  async start(): Promise<void> {
+    if (this.child) return;
+    this.statusValue = { status: "starting" };
+
+    const args = [
+      "--model",
+      this.config.modelPath,
+      "--host",
+      this.host,
+      "--port",
+      String(this.config.port),
+      "--ctx-size",
+      String(this.config.ctxSize ?? DEFAULT_CTX),
+      ...(this.config.extraArgs ?? []),
+    ];
+
+    const child = spawn(this.config.bin, args, {
+      env: this.config.env ? sanitize(this.config.env) : undefined,
+      stdio: ["pipe", "pipe", "pipe"],
+    });
+    this.child = child;
+
+    await new Promise<void>((resolve, reject) => {
+      const onSpawn = () => {
+        child.removeListener("error", onError);
+        resolve();
+      };
+      const onError = (err: Error) => {
+        child.removeListener("spawn", onSpawn);
+        this.statusValue = { status: "error", detail: err.message };
+        this.child = null;
+        reject(err);
+      };
+      child.once("spawn", onSpawn);
+      child.once("error", onError);
+    });
+
+    // Drain stderr (an unread pipe fills and wedges the server); keep a capped
+    // tail for exit diagnostics only, never logged.
+    child.stderr.setEncoding("utf8");
+    child.stderr.on("data", (chunk: string) => {
+      this.stderrTail = (this.stderrTail + chunk).slice(-MAX_STDERR_TAIL);
+    });
+    child.stdout.resume();
+    child.once("exit", (code, signal) => this.onExit(code, signal));
+
+    await this.waitForHealth();
+    this.statusValue = { status: "ready" };
+  }
+
+  async stop(): Promise<void> {
+    const child = this.child;
+    if (!child) return;
+    this.child = null;
+    this.statusValue = { status: "stopped" };
+    child.kill("SIGTERM");
+  }
+
+  async *translate(batch: Sentence[], ctx: RollingContext): AsyncIterable<Translation> {
+    const userMessage = buildTranslateMessage(batch, ctx, this.config.contextPairs);
+    const { content } = await this.chat(userMessage);
+    const text = stripNonTranslation(content, batch.length);
+    yield { sentenceIds: batch.map((s) => s.id), text, done: true };
+  }
+
+  async summarize(transcript: string): Promise<MeetingBrief> {
+    const { content } = await this.chat(buildSummaryMessage(transcript));
+    return { ...parseBrief(content), usage: this.latestUsage };
+  }
+
+  /** One chat-completions round-trip against the local server. */
+  private async chat(userMessage: string): Promise<{ content: string }> {
+    if (!this.child) throw new Error("engine not started");
+    const res = await this.fetchImpl(`${this.baseUrl}/v1/chat/completions`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        messages: [
+          { role: "system", content: this.systemPrompt },
+          { role: "user", content: userMessage },
+        ],
+        temperature: 0,
+        stream: false,
+      }),
+    });
+    if (!res.ok) throw new Error(`local engine HTTP ${res.status}`);
+    const data = (await res.json()) as ChatResponse;
+    this.recordUsage(data.usage);
+    return { content: data.choices?.[0]?.message?.content ?? "" };
+  }
+
+  private async waitForHealth(): Promise<void> {
+    const deadline = Date.now() + (this.config.startupTimeoutMs ?? DEFAULT_STARTUP_TIMEOUT);
+    for (;;) {
+      if (!this.child) throw new Error("server exited before becoming healthy");
+      try {
+        const res = await this.fetchImpl(`${this.baseUrl}/health`);
+        if (res.ok) return;
+      } catch {
+        // server not up yet
+      }
+      if (Date.now() > deadline) {
+        const detail = `local server health timeout${this.stderrTail ? `; stderr tail: ${this.stderrTail.trim()}` : ""}`;
+        this.statusValue = { status: "error", detail };
+        throw new Error(detail);
+      }
+      await delay(100);
+    }
+  }
+
+  private onExit(code: number | null, signal: string | null): void {
+    this.child = null;
+    if (this.statusValue.status !== "stopped") {
+      let detail = `llama-server exited (code=${code ?? "null"}, signal=${signal ?? "null"})`;
+      const tail = this.stderrTail.trim();
+      if (tail !== "") detail += `; stderr tail: ${tail}`;
+      this.statusValue = { status: "error", detail };
+    }
+  }
+
+  private recordUsage(usage: ChatResponse["usage"]): void {
+    // Local inference is free — cost stays 0; tokens are surfaced for telemetry.
+    const next: Usage = {
+      cumulativeCostUsd: 0,
+      turnCostUsd: 0,
+      inputTokens: usage?.prompt_tokens ?? 0,
+      outputTokens: usage?.completion_tokens ?? 0,
+      cacheReadInputTokens: 0,
+    };
+    this.latestUsage = next;
+    for (const listener of this.usageListeners) listener(next);
+  }
+}
+
+function delay(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/** Drop undefined values so spawn gets a clean string env. */
+function sanitize(env: Record<string, string | undefined>): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (const [key, value] of Object.entries(env)) if (typeof value === "string") out[key] = value;
+  return out;
+}
+
+/** Split a summary response into the running paragraph and board lines. */
+function parseBrief(text: string): { summary: string; board: string[] } {
+  const lines = text
+    .split("\n")
+    .map((line) => line.trim())
+    .filter((line) => line !== "");
+  const summary = lines.find((line) => !line.startsWith("[")) ?? "";
+  const board = lines.filter((line) => line.startsWith("["));
+  return { summary, board };
+}
