@@ -16,13 +16,14 @@ import {
   SummaryCadence,
 } from "@livecap/engine";
 import type { ReplyIntent, TranslationEngine, Usage } from "@livecap/engine";
-import { nodeArchiveFs, SessionArchiveWriter } from "@livecap/archive";
+import { nodeArchiveFs, SessionArchiveWriter, sweepOldArchives } from "@livecap/archive";
 import type { BoardData, CaptionEntry } from "@livecap/archive";
 
 import type { Channel, HostInbound, HostOutbound } from "../protocol.ts";
 import { detectClaudeCli } from "./detect-cli.ts";
 import { LazyLocalEngine } from "./local-tier.ts";
 import { SILENCE_THRESHOLD_MS, SilenceWatchdog } from "./silence.ts";
+import { resolveStartConfig } from "./start-config.ts";
 import { TranslationRunner } from "./translation-runner.ts";
 
 const CLI_ENGINE_LABEL = "Claude CLI";
@@ -122,21 +123,29 @@ export class HostSession {
     this.started = true;
     this.startedAtMs = Date.now();
 
+    // Settings → subsystem mapping (#12): language names, gauge config,
+    // router default, archive policy.
+    const resolved = resolveStartConfig(config);
+
     const accountant = new CreditAccountant({
       fs: nodeLedgerFs(),
       ledgerPath: join(config.appDataDir, "credit-ledger.json"),
-      poolUsd: config.poolUsd,
+      poolUsd: resolved.poolUsd,
+      resetDay: resolved.resetDay,
       now: Date.now,
     });
     this.accountant = accountant;
 
     const local = new LazyLocalEngine({
       dataDir: config.appDataDir,
-      targetLanguage: config.targetLanguage,
+      targetLanguage: resolved.targetLanguage,
       onStatus: (detail) => this.emit({ type: "status", detail }),
     });
 
-    const cli = await detectClaudeCli(process.env.PATH);
+    // Engine preference (§8.7 segmented control): "local" leads with the
+    // local tier outright; "cli" detects the CLI and routes through the
+    // fallback router (never a dead end — no CLI still means local).
+    const cli = resolved.enginePref === "cli" ? await detectClaudeCli(process.env.PATH) : null;
     let engineLabel: string;
     if (cli) {
       const cwd = join(config.appDataDir, "cli-session");
@@ -146,17 +155,19 @@ export class HostSession {
         cwd,
         env: process.env,
         includePartialMessages: cli.includePartialMessages,
-        targetLanguage: config.targetLanguage,
+        targetLanguage: resolved.targetLanguage,
       });
       this.router = new FallbackRouter({
         primary,
         fallback: local,
-        startOnFallback: () => accountant.isBelowThreshold(),
+        startOnFallback: () => resolved.autoSwitch && accountant.isBelowThreshold(),
       });
       this.engine = this.router;
       engineLabel = CLI_ENGINE_LABEL;
     } else {
-      this.emit({ type: "status", detail: "no Claude CLI found — using the local model" });
+      if (resolved.enginePref === "cli") {
+        this.emit({ type: "status", detail: "no Claude CLI found — using the local model" });
+      }
       this.engine = local;
       engineLabel = LOCAL_ENGINE_LABEL;
     }
@@ -170,7 +181,9 @@ export class HostSession {
       if (event.type === "gauge") {
         this.emit({ type: "gauge", gauge: event.gauge });
       } else if (event.type === "engine-switch") {
-        this.switchToLocal();
+        // §8.7 auto-switch toggle: when off, the gauge still updates but the
+        // session stays on the CLI tier.
+        if (resolved.autoSwitch) this.switchToLocal();
       } else {
         this.emit({ type: "status", detail: "credit ledger write failed — accounting paused" });
       }
@@ -183,25 +196,38 @@ export class HostSession {
       this.emit({ type: "engineSwitch", engine: LOCAL_ENGINE_LABEL });
     }
 
-    const writer = new SessionArchiveWriter({
-      fs: nodeArchiveFs(),
-      folder: config.archiveDir,
-      meta: {
-        fileNamePrefix: fileNamePrefix(this.startedAtMs),
-        headerDate: new Date(this.startedAtMs).toISOString().slice(0, 10),
-        startClock: clockLabel(this.startedAtMs),
-        sourceLang: config.sourceLangCode,
-        targetLang: config.targetLangCode,
-        engineName: engineLabel,
-      },
-    });
-    writer.open();
-    this.writer = writer;
+    // Retention sweep (§8.9): enforced on every session start, so a Settings
+    // change applies on the next session without an app restart.
+    if (resolved.archiveRetentionDays > 0) {
+      sweepOldArchives({
+        fs: nodeArchiveFs(),
+        folder: config.archiveDir,
+        maxAgeDays: resolved.archiveRetentionDays,
+        nowMs: Date.now(),
+      });
+    }
+
+    if (resolved.archiveAutoSave) {
+      const writer = new SessionArchiveWriter({
+        fs: nodeArchiveFs(),
+        folder: config.archiveDir,
+        meta: {
+          fileNamePrefix: fileNamePrefix(this.startedAtMs),
+          headerDate: new Date(this.startedAtMs).toISOString().slice(0, 10),
+          startClock: clockLabel(this.startedAtMs),
+          sourceLang: resolved.sourceLangCode,
+          targetLang: resolved.targetLangCode,
+          engineName: engineLabel,
+        },
+      });
+      writer.open();
+      this.writer = writer;
+    }
 
     this.extras = new ExtrasPipeline({
       engine,
-      summaryLanguage: config.summaryLanguage,
-      meetingLanguage: config.meetingLanguage,
+      summaryLanguage: resolved.summaryLanguage,
+      meetingLanguage: resolved.meetingLanguage,
     });
 
     this.runner = new TranslationRunner({

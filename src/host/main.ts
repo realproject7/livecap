@@ -5,12 +5,42 @@
 
 import { createInterface } from "node:readline";
 
-import type { HostInbound, HostOutbound } from "../protocol.ts";
+import type { HostInbound, HostOutbound, ProbeRequest } from "../protocol.ts";
+import { runProbe } from "./probe.ts";
 import { HostSession } from "./session.ts";
 
 function emit(event: HostOutbound): void {
   process.stdout.write(`${JSON.stringify(event)}\n`);
 }
+
+// Probe mode (#12): `--probe '<ProbeRequest JSON>'` prints one ProbeResult
+// line and exits — no session, no stdin protocol.
+const probeFlag = process.argv.indexOf("--probe");
+if (probeFlag !== -1) {
+  const raw = process.argv[probeFlag + 1] ?? "";
+  let request: ProbeRequest;
+  try {
+    request = JSON.parse(raw) as ProbeRequest;
+  } catch {
+    process.stdout.write(`${JSON.stringify({ type: "hostError", detail: "unparseable probe request" })}\n`);
+    process.exit(1);
+  }
+  runProbe(request).then(
+    (result) => {
+      process.stdout.write(`${JSON.stringify(result)}\n`);
+      process.exit(0);
+    },
+    (error: unknown) => {
+      const detail = error instanceof Error ? `${error.name}: ${error.message}` : "probe failure";
+      process.stdout.write(`${JSON.stringify({ type: "hostError", detail })}\n`);
+      process.exit(1);
+    },
+  );
+} else {
+  runSessionHost();
+}
+
+function runSessionHost(): void {
 
 const session = new HostSession(emit);
 let exiting = false;
@@ -65,3 +95,4 @@ lines.on("close", () => {
     .catch(() => undefined)
     .finally(() => process.exit(0));
 });
+}

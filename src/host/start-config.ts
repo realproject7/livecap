@@ -1,0 +1,61 @@
+// Pure resolution of the start message (#12): the persisted AppSettings
+// arrive over the protocol as primitives (BCP-47 tag, pool, reset day, …) and
+// this maps them onto what each subsystem consumes — prompt language names,
+// archive header labels, CreditAccountant config, router defaults. Pure and
+// headless so the language/gauge plumbing is unit-testable.
+
+import { languageByCode } from "../languages.ts";
+import type { EnginePref, HostInbound } from "../protocol.ts";
+
+type StartMessage = Extract<HostInbound, { type: "start" }>;
+
+/** The meeting itself is spoken English (PROPOSAL positioning): reply
+ *  suggestions and quick translate output INTO the meeting, and the archive
+ *  header's source label reflects it. Captions themselves are auto-detected
+ *  per sentence by whisper — there is no source-language setting (§8.6). */
+const MEETING_LANGUAGE = "English";
+const SOURCE_LANG_CODE = "EN";
+
+export interface ResolvedStartConfig {
+  /** Translation target for the engine system prompt, e.g. "Korean". */
+  targetLanguage: string;
+  /** Live summary/board output language (§8.4) — the user's language. */
+  summaryLanguage: string;
+  /** Reply suggestions / quick translate output language (§8.5). */
+  meetingLanguage: string;
+  /** Archive header labels (§8.9), e.g. "EN" → "KO". */
+  sourceLangCode: string;
+  targetLangCode: string;
+  enginePref: EnginePref;
+  /** CreditAccountant config (engine package receives these as-is). */
+  poolUsd: number;
+  resetDay: number;
+  autoSwitch: boolean;
+  archiveAutoSave: boolean;
+  archiveRetentionDays: number;
+}
+
+export function resolveStartConfig(message: StartMessage): ResolvedStartConfig {
+  const language = languageByCode(message.targetLanguageCode);
+  return {
+    targetLanguage: language.name,
+    summaryLanguage: language.name,
+    meetingLanguage: MEETING_LANGUAGE,
+    sourceLangCode: SOURCE_LANG_CODE,
+    targetLangCode: language.archiveLabel,
+    enginePref: message.enginePref === "local" ? "local" : "cli",
+    poolUsd: Number.isFinite(message.poolUsd) && message.poolUsd > 0 ? message.poolUsd : 20,
+    resetDay: clampResetDay(message.resetDay),
+    autoSwitch: message.autoSwitch !== false,
+    archiveAutoSave: message.archiveAutoSave !== false,
+    archiveRetentionDays:
+      Number.isFinite(message.archiveRetentionDays) && message.archiveRetentionDays > 0
+        ? Math.floor(message.archiveRetentionDays)
+        : 0,
+  };
+}
+
+function clampResetDay(day: number): number {
+  if (!Number.isFinite(day)) return 1;
+  return Math.min(28, Math.max(1, Math.floor(day)));
+}

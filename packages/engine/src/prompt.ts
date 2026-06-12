@@ -35,7 +35,7 @@ function glossaryLines(glossary: Record<string, string>): string[] {
 export function buildSystemPrompt(options: PromptOptions = {}): string {
   const target = options.targetLanguage ?? DEFAULT_TARGET;
   const lines = [
-    `You are a real-time meeting interpreter. Translate the English sentences you receive into ${target}.`,
+    `You are a real-time meeting interpreter. Translate the sentences you receive into ${target}; the spoken language varies and is detected automatically.`,
     `Output ONLY the ${target} translation, nothing else — no notes, no romanization, no quotes.`,
     "Keep names, numbers, and financial terms accurate. Prefer natural spoken language over literal wording.",
     "If a fragment is untranslatable noise, output an empty line for it.",
@@ -82,7 +82,7 @@ export function buildTranslateMessage(
 
   const recent = ctx.pairs.slice(-contextPairs);
   if (recent.length > 0) {
-    const rendered = recent.map((p) => `EN: ${p.source}\nKO: ${p.target}`).join("\n");
+    const rendered = recent.map((p) => `Source: ${p.source}\nTranslation: ${p.target}`).join("\n");
     blocks.push(`Recent context (do not retranslate):\n${rendered}`);
   }
 

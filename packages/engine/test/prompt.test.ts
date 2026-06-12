@@ -17,6 +17,13 @@ describe("buildSystemPrompt", () => {
     expect(prompt).toContain("FOMC → 연방공개시장위원회");
   });
 
+  it("does not pin the source language — any spoken language translates into the target (#12)", () => {
+    const prompt = buildSystemPrompt({ targetLanguage: "German" });
+    expect(prompt).toContain("into German");
+    expect(prompt).not.toContain("English sentences");
+    expect(prompt).toContain("detected automatically");
+  });
+
   it("carries the [TASK] override clause so extras can reuse the session", () => {
     const prompt = buildSystemPrompt();
     expect(prompt).toContain(TASK_MARKER);

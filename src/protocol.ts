@@ -33,23 +33,32 @@ export interface SessionStatus {
 
 export type ReplyIntentWire = "agree" | "push-back" | "ask" | "suggest";
 
-/** Messages written by Rust to the host's stdin (one JSON per line). */
+/** Engine preference (#12 Settings): which tier the router defaults to. */
+export type EnginePref = "cli" | "local";
+
+/** Messages written by Rust to the host's stdin (one JSON per line). The
+ *  start message carries the persisted AppSettings (settings.json, #12) the
+ *  session must honor; language names/labels derive from the code in the
+ *  host (src/languages.ts). */
 export type HostInbound =
   | {
       type: "start";
       appDataDir: string;
       archiveDir: string;
-      /** Translation target language name, e.g. "Korean". */
-      targetLanguage: string;
-      /** Header labels for the archive, e.g. "EN" / "KO". */
-      sourceLangCode: string;
-      targetLangCode: string;
-      /** Language for reply suggestions / quick translate output (§8.5). */
-      meetingLanguage: string;
-      /** Language for the live summary + board (§8.4). */
-      summaryLanguage: string;
+      /** Translate-into target as a BCP-47 tag, e.g. "ko" (§8.6 screen 2). */
+      targetLanguageCode: string;
+      /** Engine tier to lead with (router default; §8.7 segmented control). */
+      enginePref: EnginePref;
       /** Agent SDK monthly pool in USD (PROPOSAL §6). */
       poolUsd: number;
+      /** Billing reset day of month, 1–28 (§8.7 "resets Jul 1"). */
+      resetDay: number;
+      /** Auto-switch to the local tier when the pool runs low (§8.7). */
+      autoSwitch: boolean;
+      /** Archive group (§8.9 / design 07): auto-save + retention sweep. */
+      archiveAutoSave: boolean;
+      /** Delete archives older than this many days; 0 = keep forever. */
+      archiveRetentionDays: number;
     }
   | { type: "caption"; id: number; channel: Channel; text: string; lowConfidence: boolean; epochMs: number }
   | { type: "quickTranslate"; id: number; text: string }
@@ -99,3 +108,26 @@ export type HostOutbound =
   | { type: "archived"; path: string }
   | { type: "stopped" }
   | { type: "hostError"; detail: string };
+
+/* ---- #12 probe mode (no session) ----------------------------------------
+ * `node dist-host/main.mjs --probe '<ProbeRequest JSON>'` runs real CLI
+ * detection plus a read-only credit-gauge snapshot and prints ONE
+ * ProbeResult JSON line. Used by onboarding screen 3 and the Settings sheet
+ * before any session has populated the live gauge cache. */
+
+export interface ProbeRequest {
+  appDataDir: string;
+  poolUsd: number;
+  resetDay: number;
+}
+
+export interface ProbeCli {
+  bin: string;
+  version: string;
+}
+
+export interface ProbeResult {
+  type: "probe";
+  cli: ProbeCli | null;
+  gauge: GaugeWire;
+}

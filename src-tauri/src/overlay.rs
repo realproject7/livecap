@@ -19,6 +19,7 @@ pub const WINDOW_LABEL: &str = "main";
 /// Events pushed to the webview.
 pub const EVENT_MODE: &str = "shell://mode";
 pub const EVENT_CHROME: &str = "shell://chrome";
+pub const EVENT_SETTINGS: &str = "shell://settings";
 
 /// Magnetic capture distance and snapped edge gap (logical px).
 const SNAP_THRESHOLD: f64 = 18.0;
@@ -272,6 +273,18 @@ pub fn toggle_visibility(app: &AppHandle) {
         } else {
             let _ = window.show();
         }
+    }
+}
+
+/// Tray "Settings…" (#12): the sheet renders inside the Panel window (no
+/// separate window) — surface the Panel, then tell the webview to open it.
+pub fn open_settings(app: &AppHandle) {
+    if app.state::<Shell>().mode() != Mode::Panel {
+        apply_mode(app, Mode::Panel);
+    }
+    if let Some(window) = overlay_window(app) {
+        let _ = window.show();
+        let _ = window.emit(EVENT_SETTINGS, ());
     }
 }
 
