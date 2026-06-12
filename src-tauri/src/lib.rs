@@ -195,6 +195,18 @@ pub fn run() {
             overlay::apply_mode(app.handle(), initial_mode);
             window.show()?;
 
+            // Headless E2E support (also used by #13): start a captioning
+            // session at launch when LIVECAP_AUTOSTART=1 — same code path as
+            // the tray/chrome start, just triggered without UI.
+            if std::env::var("LIVECAP_AUTOSTART").as_deref() == Ok("1") {
+                let handle = app.handle().clone();
+                tauri::async_runtime::spawn(async move {
+                    if let Err(e) = session::start(handle).await {
+                        eprintln!("autostart session failed: {e}");
+                    }
+                });
+            }
+
             for (name, shortcut) in [("Alt+Space", shortcut_toggle()), ("Alt+Shift+Space", shortcut_cycle())]
             {
                 if let Err(e) = app.global_shortcut().register(shortcut) {
