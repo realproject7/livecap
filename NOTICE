@@ -1,0 +1,26 @@
+LiveCap
+Copyright (c) 2026 the LiveCap authors
+
+This product is MIT-licensed (see LICENSE). It downloads and runs the following
+third-party components at runtime. They are NOT distributed with LiveCap; the
+exact artifacts and checksums are pinned in packages/engine/src/pins.ts and
+verified on download.
+
+------------------------------------------------------------------------------
+Qwen3-4B (local translation fallback model)
+  Source : https://huggingface.co/Qwen/Qwen3-4B-GGUF (Qwen3-4B-Q4_K_M.gguf)
+  License: Apache License 2.0
+  Copyright (c) Alibaba Cloud / the Qwen team
+  Used as the bundled-on-first-use local translation engine (PROPOSAL §4 tier 2).
+
+------------------------------------------------------------------------------
+llama.cpp (local inference server)
+  Source : https://github.com/ggml-org/llama.cpp (release b9601)
+  License: MIT License
+  Copyright (c) 2023-2026 The ggml authors
+  The prebuilt `llama-server` binary hosts the local model.
+
+------------------------------------------------------------------------------
+The full text of the Apache License 2.0 is available at
+https://www.apache.org/licenses/LICENSE-2.0 and the MIT License at
+https://opensource.org/licenses/MIT.
