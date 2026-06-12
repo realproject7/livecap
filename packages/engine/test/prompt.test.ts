@@ -2,6 +2,7 @@ import { describe, it, expect } from "vitest";
 
 import {
   asTaskMessage,
+  buildGlossarySetupMessage,
   buildSystemPrompt,
   buildTranslateMessage,
   formatUserMessageLine,
@@ -26,6 +27,19 @@ describe("buildSystemPrompt", () => {
 describe("asTaskMessage", () => {
   it("prefixes the marker on its own line", () => {
     expect(asTaskMessage("do the thing")).toBe("[TASK]\ndo the thing");
+  });
+});
+
+describe("buildGlossarySetupMessage", () => {
+  it("renders glossary terms for stdin delivery (#26 — off argv)", () => {
+    const msg = buildGlossarySetupMessage({ AcmeCorp: "에이콘", FOMC: "연방공개시장위원회" });
+    expect(msg).toContain("AcmeCorp → 에이콘");
+    expect(msg).toContain("FOMC → 연방공개시장위원회");
+  });
+
+  it("is not placed in the static system prompt (which goes on argv)", () => {
+    // buildSystemPrompt with no glossary option carries no user terms.
+    expect(buildSystemPrompt({ targetLanguage: "Korean" })).not.toContain("AcmeCorp");
   });
 });
 

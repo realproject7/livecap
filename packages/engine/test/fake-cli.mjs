@@ -12,9 +12,14 @@
 //
 // When turns are exhausted it stays quiet (the engine will have what it needs).
 
-import { readFileSync } from "node:fs";
+import { readFileSync, writeFileSync } from "node:fs";
 import { createInterface } from "node:readline";
 import process from "node:process";
+
+// Record the exact argv the adapter spawned us with, so a test can assert what
+// did (and did not) reach the command line — e.g. no glossary content (#26).
+const argvOut = process.env.LIVECAP_FAKE_ARGV_OUT;
+if (argvOut) writeFileSync(argvOut, JSON.stringify(process.argv));
 
 // Optional stderr noise, to exercise the adapter's stderr-drain path. A large
 // value (or repeated writes) would otherwise fill the kernel pipe buffer.
