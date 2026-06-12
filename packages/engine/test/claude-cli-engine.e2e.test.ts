@@ -105,4 +105,46 @@ describe("ClaudeCliEngine — real spawn/stdio (fake-cli replay)", () => {
       await engine.stop();
     }
   });
+
+  it("drains child stderr so noise never wedges the session", async () => {
+    const engine = new ClaudeCliEngine({
+      bin: FAKE_CLI,
+      cwd: tmpdir(),
+      env: {
+        ...process.env,
+        LIVECAP_FAKE_FIXTURE: fixturePath("session-without-partials.jsonl"),
+        LIVECAP_FAKE_STDERR: "x".repeat(100_000), // >> the ~64KB pipe buffer
+      },
+      includePartialMessages: false,
+    });
+    await engine.start();
+    try {
+      const final = (await drain(engine)).at(-1);
+      // If stderr were not drained the CLI would block before responding.
+      expect(final?.done).toBe(true);
+      expect(final?.text.length).toBeGreaterThan(0);
+    } finally {
+      await engine.stop();
+    }
+  });
+
+  it("folds a stderr tail into the exit error detail on an unexpected exit", async () => {
+    // No fixture path → fake-cli writes to stderr and exits(1) right after spawn.
+    const engine = new ClaudeCliEngine({
+      bin: FAKE_CLI,
+      cwd: tmpdir(),
+      env: { ...process.env, LIVECAP_FAKE_FIXTURE: undefined },
+      includePartialMessages: false,
+    });
+    await engine.start();
+    // Wait for the child's exit to propagate into health.
+    const deadline = Date.now() + 2000;
+    while (engine.health().status !== "error" && Date.now() < deadline) {
+      await new Promise((r) => setTimeout(r, 10));
+    }
+    const health = engine.health();
+    expect(health.status).toBe("error");
+    expect(health.detail).toContain("LIVECAP_FAKE_FIXTURE not set");
+    await engine.stop();
+  });
 });

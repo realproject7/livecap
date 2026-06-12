@@ -16,6 +16,11 @@ import { readFileSync } from "node:fs";
 import { createInterface } from "node:readline";
 import process from "node:process";
 
+// Optional stderr noise, to exercise the adapter's stderr-drain path. A large
+// value (or repeated writes) would otherwise fill the kernel pipe buffer.
+const stderrNoise = process.env.LIVECAP_FAKE_STDERR;
+if (stderrNoise) process.stderr.write(stderrNoise + "\n");
+
 const fixturePath = process.env.LIVECAP_FAKE_FIXTURE;
 if (!fixturePath) {
   process.stderr.write("fake-cli: LIVECAP_FAKE_FIXTURE not set\n");

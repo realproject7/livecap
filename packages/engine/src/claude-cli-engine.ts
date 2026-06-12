@@ -51,7 +51,12 @@ export interface ClaudeCliEngineConfig {
   glossary?: Record<string, string>;
   /** How many recent pairs to include per request (default 4). */
   contextPairs?: number;
+  /** Resume a prior session by id after a crash, instead of starting fresh. */
+  resume?: string;
 }
+
+/** Cap on the retained stderr tail folded into exit errors (chars). */
+const MAX_STDERR_TAIL = 2000;
 
 /** Thrown when a turn ends with an error result (e.g. invalid model → 404). */
 export class EngineTurnError extends Error {
@@ -74,6 +79,8 @@ export class ClaudeCliEngine implements TranslationEngine {
 
   private child: ChildProcessWithoutNullStreams | null = null;
   private stdoutBuffer = "";
+  /** Last MAX_STDERR_TAIL chars of child stderr, surfaced in exit errors only. */
+  private stderrTail = "";
   private currentTurn: AsyncChannel<ParsedEvent> | null = null;
   private statusValue: EngineHealth = { status: "stopped" };
   private cumulativeCostUsd = 0;
@@ -112,6 +119,7 @@ export class ClaudeCliEngine implements TranslationEngine {
       systemPrompt: this.systemPrompt,
       includePartialMessages: this.config.includePartialMessages,
       model: this.config.model,
+      resume: this.config.resume,
     });
     const env = sanitizeChildEnv(this.config.env);
 
@@ -139,6 +147,13 @@ export class ClaudeCliEngine implements TranslationEngine {
 
     child.stdout.setEncoding("utf8");
     child.stdout.on("data", (chunk: string) => this.onStdout(chunk));
+    // Drain stderr: an unread stderr pipe fills its ~64KB kernel buffer and
+    // wedges the CLI mid-write during a long session. We keep only a capped
+    // tail (surfaced in exit errors, never logged — it may echo content).
+    child.stderr.setEncoding("utf8");
+    child.stderr.on("data", (chunk: string) => {
+      this.stderrTail = (this.stderrTail + chunk).slice(-MAX_STDERR_TAIL);
+    });
     child.once("exit", (code, signal) => this.onExit(code, signal));
 
     this.statusValue = { status: "ready" };
@@ -159,6 +174,13 @@ export class ClaudeCliEngine implements TranslationEngine {
     child.kill();
   }
 
+  /**
+   * Translate a batch, yielding progressive snapshots until `done`. On an error
+   * turn this throws `EngineTurnError` AFTER possibly yielding in-progress
+   * snapshots (an error result can carry synthetic assistant text). Consumers
+   * must discard any prior snapshots for this batch when it throws — do not
+   * render the partial as a caption.
+   */
   async *translate(batch: Sentence[], ctx: RollingContext): AsyncIterable<Translation> {
     const ids = batch.map((s) => s.id);
     const line = formatUserMessageLine(buildTranslateMessage(batch, ctx, this.config.contextPairs));
@@ -230,7 +252,9 @@ export class ClaudeCliEngine implements TranslationEngine {
 
   private onExit(code: number | null, signal: string | null): void {
     this.child = null;
-    const detail = `cli exited (code=${code ?? "null"}, signal=${signal ?? "null"})`;
+    let detail = `cli exited (code=${code ?? "null"}, signal=${signal ?? "null"})`;
+    const tail = this.stderrTail.trim();
+    if (tail !== "") detail += `; stderr tail: ${tail}`;
     if (this.statusValue.status !== "stopped") {
       this.statusValue = { status: "error", detail };
     }
