@@ -5,7 +5,7 @@ import globals from "globals";
 export default tseslint.config(
   {
     ignores: [
-      "dist/", "src-tauri/", "target/", "crates/", "design/", "node_modules/", "**/node_modules/",
+      "dist/", "dist-host/", "src-tauri/", "target/", "crates/", "design/", "node_modules/", "**/node_modules/",
       "**/fixtures/**",
     ],
   },
@@ -13,6 +13,14 @@ export default tseslint.config(
   ...tseslint.configs.recommended,
   {
     files: ["scripts/**/*.mjs", "packages/**/*.mjs"],
+    languageOptions: { globals: globals.node },
+  },
+  {
+    files: ["src/**/*.ts"],
+    languageOptions: { globals: globals.browser },
+  },
+  {
+    files: ["src/host/**/*.ts", "test/**/*.ts"],
     languageOptions: { globals: globals.node },
   },
 );
