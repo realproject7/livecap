@@ -106,4 +106,18 @@ describe("StreamJsonParser — robustness", () => {
     );
     expect(events).toEqual([]);
   });
+
+  it("turn_end.message carries the model result verbatim — content-bearing, never log (#41)", () => {
+    // Documents the hazard the type annotation warns about: a direct parser
+    // consumer that logs turn_end.message would leak transcript-derived content.
+    const parser = new StreamJsonParser();
+    const events = parser.pushLine(
+      '{"type":"result","subtype":"success","is_error":false,"total_cost_usd":0.1,"stop_reason":"end_turn","result":"SECRET transcript content here","usage":{"input_tokens":1,"output_tokens":1}}',
+    );
+    const turnEnd = events.find((e) => e.kind === "turn_end");
+    expect(turnEnd?.kind).toBe("turn_end");
+    expect(turnEnd && "message" in turnEnd ? turnEnd.message : null).toBe(
+      "SECRET transcript content here",
+    );
+  });
 });

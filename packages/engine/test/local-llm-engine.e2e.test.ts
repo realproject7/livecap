@@ -136,6 +136,21 @@ describe("LocalLlmEngine — real spawn + HTTP (fake llama-server)", () => {
     await engine.stop();
   });
 
+  it("counts UTF-8 bytes (not UTF-16 chars) in the stderr digest (#41)", async () => {
+    const KO = "가".repeat(50); // 50 chars but 150 UTF-8 bytes
+    const engine = await makeEngine({
+      env: { ...process.env, LLAMA_FAKE_HEALTH_HANG: "1", LLAMA_FAKE_STDERR: KO },
+      startupTimeoutMs: 500,
+    });
+    await expect(engine.start()).rejects.toThrow(/health timeout/);
+    const detail = engine.health().detail ?? "";
+    const match = /stderr (\d+) bytes/.exec(detail);
+    expect(match).not.toBeNull();
+    // ≥ 50×3 bytes (plus a newline); pre-fix this counted ~51 UTF-16 chars.
+    expect(Number(match?.[1])).toBeGreaterThanOrEqual(150);
+    await engine.stop();
+  });
+
   it("aborts a wedged /health poll instead of hanging start() forever (#34)", async () => {
     // The server accepts the /health connection but never responds. Pre-fix the
     // fetch had no AbortSignal, so start() would hang past startupTimeoutMs.

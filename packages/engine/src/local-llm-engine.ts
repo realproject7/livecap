@@ -146,7 +146,9 @@ export class LocalLlmEngine implements TranslationEngine {
     // count + a hash of the capped tail are surfaced (#23) — never the raw text.
     child.stderr.setEncoding("utf8");
     child.stderr.on("data", (chunk: string) => {
-      this.stderrBytes += chunk.length;
+      // Count actual UTF-8 bytes (not UTF-16 code units) so the digest's
+      // "N bytes" label is truthful for multi-byte stderr (#41).
+      this.stderrBytes += Buffer.byteLength(chunk, "utf8");
       this.stderrTail = (this.stderrTail + chunk).slice(-MAX_STDERR_TAIL);
     });
     child.stdout.resume();

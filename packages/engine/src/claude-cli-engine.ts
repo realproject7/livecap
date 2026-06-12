@@ -166,7 +166,9 @@ export class ClaudeCliEngine implements TranslationEngine {
     // echo prompt/caption content.
     child.stderr.setEncoding("utf8");
     child.stderr.on("data", (chunk: string) => {
-      this.stderrBytes += chunk.length;
+      // Count actual UTF-8 bytes (not UTF-16 code units), so the digest's
+      // "N bytes" label is truthful for multi-byte (e.g. Korean) stderr (#41).
+      this.stderrBytes += Buffer.byteLength(chunk, "utf8");
       this.stderrTail = (this.stderrTail + chunk).slice(-MAX_STDERR_TAIL);
     });
     child.once("exit", (code, signal) => this.onExit(code, signal));

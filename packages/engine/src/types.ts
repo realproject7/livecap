@@ -130,6 +130,13 @@ export type ParsedEvent =
       stopReason: string | null;
       isError: boolean;
       apiErrorStatus: number | null;
+      /**
+       * CONTENT-BEARING — NEVER LOG. Carries the model's `result` text verbatim,
+       * which can echo prompt/transcript-derived content (the inverse of the
+       * safe-to-log `EngineHealth.detail`). `StreamJsonParser` is a public
+       * export, so any consumer wiring parser events to a debug log reproduces
+       * the #23 leak. Add this field to the #11 logging-redaction checklist (#41).
+       */
       message: string | null;
     }
   | {
