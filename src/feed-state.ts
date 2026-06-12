@@ -2,10 +2,18 @@
 // caption-block states of the design system (design/system/design-system.png):
 // 1 streaming partial · 2 finalized/translation-pending · 3 translated ·
 // 4 low-confidence (?) · 5 pinned. No DOM, no Tauri — unit-tested headless.
+//
+// #57: the feed is WINDOWED — only the newest FEED_WINDOW blocks stay in the
+// model (and therefore the DOM); older blocks are evicted oldest-first. Every
+// finalized caption is already durable in the session archive (#11), so
+// eviction loses nothing. Pinned blocks and live partials are never evicted.
 
 import type { CaptionBridgeEvent, Channel, TranslationItem } from "./protocol";
 
 export type BlockState = "streaming" | "pending" | "translated" | "failed";
+
+/** Rendered-block cap (#57): keeps a 3-hour meeting's DOM flat. */
+export const FEED_WINDOW = 200;
 
 export interface CaptionBlock {
   /** Stable render key (DOM identity). */
@@ -26,6 +34,43 @@ export class FeedState {
   private readonly byId = new Map<number, CaptionBlock>();
   private readonly partials = new Map<Channel, CaptionBlock>();
   private keyCounter = 0;
+  private evicted = 0;
+
+  constructor(private readonly windowSize: number = FEED_WINDOW) {}
+
+  /** How many blocks have been evicted into history (archive-only). */
+  get evictedCount(): number {
+    return this.evicted;
+  }
+
+  /**
+   * Enforce the render window (#57): while more than `windowSize` blocks are
+   * held, drop the oldest ones — skipping pinned blocks and live partials,
+   * which are never evicted (so the total may exceed the window when old
+   * pins accumulate). Returns the evicted blocks so the caller can drop
+   * their DOM nodes; evicted ids stop resolving (late translations for them
+   * are ignored here — the archive still records them in the host).
+   */
+  evictOverflow(): CaptionBlock[] {
+    const dropped: CaptionBlock[] = [];
+    let overflow = this.blocks.length - this.windowSize;
+    if (overflow <= 0) return dropped;
+    const live = new Set(this.partials.values());
+    let index = 0;
+    while (overflow > 0 && index < this.blocks.length) {
+      const block = this.blocks[index];
+      if (block.pinned || live.has(block)) {
+        index += 1;
+        continue;
+      }
+      this.blocks.splice(index, 1);
+      if (block.id !== null) this.byId.delete(block.id);
+      dropped.push(block);
+      overflow -= 1;
+    }
+    this.evicted += dropped.length;
+    return dropped;
+  }
 
   /**
    * Apply a caption event. A finalized event REUSES the channel's streaming

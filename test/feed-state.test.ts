@@ -3,7 +3,7 @@
 // discard, pins, and the Strip/Capsule latest-line view.
 import { describe, expect, it } from "vitest";
 
-import { FeedState } from "../src/feed-state";
+import { FEED_WINDOW, FeedState } from "../src/feed-state";
 
 function finalized(id: number, channel: "them" | "me", text: string, lowConfidence = false) {
   return { type: "finalized" as const, id, channel, text, lang: "en", lowConfidence, epochMs: 1_000 + id };
@@ -106,5 +106,68 @@ describe("FeedState", () => {
     feed.applyCaption({ type: "partial", channel: "me", text: "second…" });
     expect(feed.latest()?.source).toBe("second…");
     expect(feed.latest()?.state).toBe("streaming");
+  });
+});
+
+describe("FeedState — render window (#57)", () => {
+  /** Feed `count` finalized captions, evicting after each like main.ts does. */
+  function fill(feed: FeedState, count: number, startId = 1): void {
+    for (let i = 0; i < count; i += 1) {
+      feed.applyCaption(finalized(startId + i, "them", `line ${startId + i}`));
+      feed.evictOverflow();
+    }
+  }
+
+  it("obeys the cap under 1000 synthetic captions (default window)", () => {
+    const feed = new FeedState();
+    fill(feed, 1000);
+    expect(feed.blocks).toHaveLength(FEED_WINDOW);
+    expect(feed.evictedCount).toBe(1000 - FEED_WINDOW);
+    expect(feed.blocks[0].id).toBe(1000 - FEED_WINDOW + 1);
+    expect(feed.latest()?.id).toBe(1000);
+  });
+
+  it("evicts oldest-first and reports the evicted blocks", () => {
+    const feed = new FeedState(3);
+    fill(feed, 3);
+    feed.applyCaption(finalized(4, "them", "line 4"));
+    feed.applyCaption(finalized(5, "them", "line 5"));
+    const dropped = feed.evictOverflow();
+    expect(dropped.map((b) => b.id)).toEqual([1, 2]); // oldest first
+    expect(feed.blocks.map((b) => b.id)).toEqual([3, 4, 5]);
+  });
+
+  it("never evicts pinned blocks (they outlive the window)", () => {
+    const feed = new FeedState(3);
+    feed.applyCaption(finalized(1, "them", "keep me"));
+    feed.setPinned(1, true);
+    fill(feed, 10, 2);
+    expect(feed.blocks[0].id).toBe(1);
+    expect(feed.blocks[0].pinned).toBe(true);
+    expect(feed.blocks).toHaveLength(3);
+    expect(feed.blocks.slice(1).map((b) => b.id)).toEqual([10, 11]);
+  });
+
+  it("never evicts a live streaming partial", () => {
+    const feed = new FeedState(3);
+    const partial = feed.applyCaption({ type: "partial", channel: "me", text: "still talking" });
+    fill(feed, 10, 1);
+    expect(feed.blocks.some((b) => b.key === partial.key)).toBe(true);
+    expect(feed.blocks).toHaveLength(3);
+  });
+
+  it("evicted ids stop resolving: late translations and pins are no-ops", () => {
+    const feed = new FeedState(3);
+    fill(feed, 10);
+    expect(feed.get(1)).toBeNull();
+    expect(feed.applyTranslation([{ id: 1, text: "늦은 번역" }], true)).toHaveLength(0);
+    expect(feed.setPinned(1, true)).toBeNull();
+  });
+
+  it("does not evict while at or under the window", () => {
+    const feed = new FeedState(5);
+    fill(feed, 5);
+    expect(feed.evictOverflow()).toHaveLength(0);
+    expect(feed.evictedCount).toBe(0);
   });
 });

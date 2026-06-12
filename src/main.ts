@@ -79,7 +79,7 @@ document.body.innerHTML = `
       </div>
       <div class="hairline"></div>
       <div id="feed-wrap">
-        <div id="feed" aria-live="polite"></div>
+        <div id="feed" aria-live="polite"><div id="feed-note" class="t-meta">older captions are in the archive</div></div>
       </div>
       <button id="live-chip" type="button">↓ live</button>
       <div id="pinned"></div>
@@ -124,6 +124,7 @@ const summaryDot = $<HTMLSpanElement>("summary-dot");
 const summaryLabel = $<HTMLSpanElement>("summary-label");
 const summaryLineEl = $<HTMLSpanElement>("summary-line");
 const feedEl = $<HTMLDivElement>("feed");
+const feedNote = $<HTMLDivElement>("feed-note");
 const feedWrap = $<HTMLDivElement>("feed-wrap");
 const liveChip = $<HTMLButtonElement>("live-chip");
 const pinnedEl = $<HTMLDivElement>("pinned");
@@ -524,6 +525,7 @@ startUiHeartbeat(() => {
   return {
     mode: state.mode,
     feedBlocks: feed.blocks.length,
+    domBlocks: feedEl.querySelectorAll(".cap").length,
     latestSource: latest?.source ?? "",
     latestTranslation: latest?.translation ?? "",
     capsuleText: capsuleTxt.textContent ?? "",
@@ -536,6 +538,13 @@ void listen<CaptionBridgeEvent>("caption://event", (event) => {
   const el = blockEl(block);
   if (isNew) feedEl.appendChild(el);
   updateBlockEl(block);
+  // #57: keep the DOM windowed — evicted blocks leave the feed (they remain
+  // in the archive); scrolling above the window meets the history notice.
+  for (const gone of feed.evictOverflow()) {
+    blockEls.get(gone.key)?.remove();
+    blockEls.delete(gone.key);
+  }
+  feedNote.classList.toggle("visible", feed.evictedCount > 0);
   afterFeedChange(isNew);
 });
 

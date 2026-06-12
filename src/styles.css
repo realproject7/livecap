@@ -220,6 +220,17 @@ body[data-phase="paused"] #summary .lbl {
   display: flex;
   flex-direction: column;
 }
+/* #57: shown once old blocks have been evicted from the DOM window —
+   scrolling up past the oldest rendered block meets this line. */
+#feed-note {
+  display: none;
+  align-self: center;
+  font-size: 11px;
+  margin-bottom: 16px;
+}
+#feed-note.visible {
+  display: block;
+}
 
 .cap {
   max-width: 86%;

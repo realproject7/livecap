@@ -227,6 +227,7 @@ pub fn run() {
                                 ts: Date.now(),
                                 mode: "probe",
                                 feedBlocks: document.querySelectorAll("#feed > *").length,
+                                domBlocks: document.querySelectorAll("#feed .cap").length,
                                 latestSource: "readyState=" + document.readyState,
                                 latestTranslation: "bodyBytes=" + (document.body ? document.body.innerHTML.length : -1),
                                 capsuleText: "scripts=" + document.scripts.length,

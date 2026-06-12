@@ -9,6 +9,8 @@ export interface UiBeat {
   ts: number;
   mode: string;
   feedBlocks: number;
+  /** Caption blocks actually in the DOM (#57: must obey FEED_WINDOW). */
+  domBlocks: number;
   latestSource: string;
   latestTranslation: string;
   capsuleText: string;
