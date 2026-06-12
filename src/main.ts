@@ -16,6 +16,7 @@ import type {
   HostInbound,
   HostOutbound,
   ReplyIntentWire,
+  SessionChannels,
   SessionStatus,
 } from "./protocol";
 import { createSettingsSheet } from "./settings-sheet";
@@ -46,6 +47,9 @@ const ICONS = {
   pause:
     '<svg viewBox="0 0 12 12" fill="currentColor" aria-hidden="true"><rect x="2.5" y="2" width="2.6" height="8" rx="1"/><rect x="6.9" y="2" width="2.6" height="8" rx="1"/></svg>',
   stop: '<svg viewBox="0 0 12 12" fill="currentColor" aria-hidden="true"><rect x="2.5" y="2.5" width="7" height="7" rx="1.5"/></svg>',
+  mic: '<svg viewBox="0 0 12 12" fill="currentColor" aria-hidden="true"><rect x="4.4" y="0.8" width="3.2" height="6" rx="1.6"/><path d="M2.7 5.4a.55.55 0 0 1 1.1 0 2.2 2.2 0 0 0 4.4 0 .55.55 0 0 1 1.1 0 3.3 3.3 0 0 1-2.75 3.25v1.25h1.05a.55.55 0 0 1 0 1.1H4.4a.55.55 0 0 1 0-1.1h1.05V8.65A3.3 3.3 0 0 1 2.7 5.4z"/></svg>',
+  micOff:
+    '<svg viewBox="0 0 12 12" aria-hidden="true"><g fill="currentColor" opacity="0.55"><rect x="4.4" y="0.8" width="3.2" height="6" rx="1.6"/><path d="M2.7 5.4a.55.55 0 0 1 1.1 0 2.2 2.2 0 0 0 4.4 0 .55.55 0 0 1 1.1 0 3.3 3.3 0 0 1-2.75 3.25v1.25h1.05a.55.55 0 0 1 0 1.1H4.4a.55.55 0 0 1 0-1.1h1.05V8.65A3.3 3.3 0 0 1 2.7 5.4z"/></g><path d="M1.8 1.4l8.4 9.2" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" fill="none"/></svg>',
   clickThrough:
     '<svg viewBox="0 0 12 12" fill="currentColor" aria-hidden="true"><path d="M2 1l8 6.2-3.6.5L8.2 11l-1.6.7-1.7-3.2L2 11.2z"/></svg>',
   mode: '<svg viewBox="0 0 12 12" fill="currentColor" aria-hidden="true"><rect x="1" y="1.5" width="10" height="3.2" rx="1.4"/><rect x="2.5" y="6.2" width="7" height="2.2" rx="1.1"/><rect x="4" y="9.8" width="4" height="1.6" rx="0.8"/></svg>',
@@ -56,6 +60,8 @@ const ICONS = {
 const state: ShellState = { mode: "panel", clickThrough: false, live: false };
 let capabilities: Capabilities = { captioning: false, settings: false };
 let phase: SessionStatus["phase"] = "idle";
+// #53: desired capture channels for the running session (both-on while idle).
+let channels: SessionChannels = { system: true, mic: true };
 let statusDetail = "";
 let summaryLine = "";
 let requestCounter = 0;
@@ -67,6 +73,7 @@ document.body.innerHTML = `
     <div id="chrome">
       <button id="btn-pause" class="btn" aria-label="Start, pause, or resume captions">${ICONS.play}</button>
       <button id="btn-stop" class="btn" aria-label="Stop captioning">${ICONS.stop}</button>
+      <button id="btn-mic" class="btn" aria-label="Microphone capture on/off">${ICONS.mic}</button>
       <span class="spacer"></span>
       <button id="btn-clickthrough" class="btn" aria-label="Toggle click-through">${ICONS.clickThrough}</button>
       <button id="btn-mode" class="btn" aria-label="Cycle window mode">${ICONS.mode}</button>
@@ -117,6 +124,7 @@ const glass = $<HTMLDivElement>("glass");
 const chrome = $<HTMLDivElement>("chrome");
 const btnPause = $<HTMLButtonElement>("btn-pause");
 const btnStop = $<HTMLButtonElement>("btn-stop");
+const btnMic = $<HTMLButtonElement>("btn-mic");
 const btnClickThrough = $<HTMLButtonElement>("btn-clickthrough");
 const btnMode = $<HTMLButtonElement>("btn-mode");
 const btnClose = $<HTMLButtonElement>("btn-close");
@@ -152,6 +160,8 @@ let appSettings: AppSettings = {
   archiveAutoSave: true,
   archiveFolder: null,
   archiveRetentionDays: 0,
+  captureSystem: true,
+  captureMic: true,
 };
 
 async function persistSettings(next: AppSettings): Promise<AppSettings> {
@@ -197,6 +207,14 @@ btnPause.addEventListener("click", () => {
 btnStop.addEventListener("click", () => {
   if (sessionRunning()) void sessionCommand("session_stop");
 });
+btnMic.addEventListener("click", () => {
+  // #53: mid-session pause/resume of just the mic; the resulting
+  // session://channels event updates the button (and the tray mirror).
+  if (!sessionRunning()) return;
+  void invoke("session_set_mic", { enabled: !channels.mic }).catch((error: unknown) =>
+    showToast(String(error)),
+  );
+});
 
 /* ================= rendering ================= */
 
@@ -206,6 +224,14 @@ function render(): void {
 
   btnPause.disabled = !capabilities.captioning || phase === "starting" || phase === "stopping";
   btnStop.disabled = !capabilities.captioning || !sessionRunning();
+  btnMic.disabled = !capabilities.captioning || !sessionRunning();
+  btnMic.innerHTML = channels.mic ? ICONS.mic : ICONS.micOff;
+  btnMic.setAttribute("aria-pressed", String(channels.mic));
+  btnMic.title = !sessionRunning()
+    ? "Microphone on/off (during a session)"
+    : channels.mic
+      ? "Mic is on — click to stop capturing your voice"
+      : "Mic is off — click to capture your voice again";
   btnPause.innerHTML = phase === "live" ? ICONS.pause : ICONS.play;
   btnPause.title =
     phase === "idle"
@@ -624,6 +650,13 @@ void listen<SessionStatus>("session://status", (event) => {
   syncMiniViews();
 });
 
+/* #53: channel config — seeded at session start, flipped by the mic toggle
+   (panel button or tray); the button mirrors it either way. */
+void listen<SessionChannels>("session://channels", (event) => {
+  channels = event.payload;
+  render();
+});
+
 /* ================= shell behaviors (#10) ================= */
 
 let chromeTimer: ReturnType<typeof setTimeout> | undefined;
@@ -703,15 +736,17 @@ void listen<ChromePayload>("shell://chrome", (event) => {
 /* ================= initial state ================= */
 
 void (async () => {
-  const [shellState, caps, initialPhase, settings] = await Promise.all([
+  const [shellState, caps, initialPhase, settings, initialChannels] = await Promise.all([
     invoke<ShellState>("get_shell_state"),
     invoke<Capabilities>("capabilities"),
     invoke<SessionStatus["phase"]>("session_phase"),
     invoke<AppSettings>("get_settings"),
+    invoke<SessionChannels>("session_channels"),
   ]);
   Object.assign(state, shellState);
   capabilities = caps;
   phase = initialPhase;
+  channels = initialChannels;
   appSettings = settings;
   applyCaptionSize(settings.captionSize);
   render();

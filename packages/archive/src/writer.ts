@@ -53,6 +53,7 @@ export class SessionArchiveWriter {
       sourceLang: this.meta.sourceLang,
       targetLang: this.meta.targetLang,
       engineName: this.meta.engineName,
+      channels: this.meta.channels,
       costUsd: 0,
       summary: [],
       board: { decisions: [], actionItems: [], openQuestions: [] },

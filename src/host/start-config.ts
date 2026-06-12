@@ -38,6 +38,9 @@ export interface ResolvedStartConfig {
   /** Per-session extras budget cap (#55), USD. Caps summary/extras spend so a
    *  long session can't run away with the monthly pool. */
   extrasBudgetUsd: number;
+  /** Archive header note when a channel is off at session start (#53),
+   *  e.g. "system audio only"; null when both channels are on. */
+  channelsNote: string | null;
 }
 
 export function resolveStartConfig(message: StartMessage): ResolvedStartConfig {
@@ -58,7 +61,16 @@ export function resolveStartConfig(message: StartMessage): ResolvedStartConfig {
         ? Math.floor(message.archiveRetentionDays)
         : 0,
     extrasBudgetUsd: DEFAULT_EXTRAS_BUDGET_USD,
+    channelsNote: resolveChannelsNote(message.captureSystem, message.captureMic),
   };
+}
+
+/** Only an explicit false disables a channel (older shells omit the field);
+ *  both-off cannot reach the host (the shell sanitizes it away). */
+function resolveChannelsNote(captureSystem: boolean, captureMic: boolean): string | null {
+  if (captureMic === false && captureSystem !== false) return "system audio only";
+  if (captureSystem === false && captureMic !== false) return "microphone only";
+  return null;
 }
 
 function clampResetDay(day: number): number {

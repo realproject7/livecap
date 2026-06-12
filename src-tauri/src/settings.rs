@@ -61,6 +61,10 @@ pub struct AppSettings {
     pub archive_folder: Option<String>,
     /// Delete archives older than this many days; 0 = keep forever.
     pub archive_retention_days: u32,
+    /// Channels group (#53): capture system audio ("them") at session start.
+    pub capture_system: bool,
+    /// Channels group (#53): capture the microphone ("me") at session start.
+    pub capture_mic: bool,
 }
 
 impl Default for AppSettings {
@@ -76,6 +80,8 @@ impl Default for AppSettings {
             archive_auto_save: default_true(),
             archive_folder: None,
             archive_retention_days: 0,
+            capture_system: true,
+            capture_mic: true,
         }
     }
 }
@@ -102,6 +108,12 @@ impl AppSettings {
             .is_some_and(|folder| folder.trim().is_empty())
         {
             self.archive_folder = None;
+        }
+        // #53: a session needs at least one capture channel; a hand-edited
+        // file with both off comes back as the both-on default.
+        if !self.capture_system && !self.capture_mic {
+            self.capture_system = true;
+            self.capture_mic = true;
         }
         self
     }
@@ -206,6 +218,8 @@ mod tests {
             archive_auto_save: false,
             archive_folder: Some("/tmp/livecap-archives".into()),
             archive_retention_days: 90,
+            capture_system: true,
+            capture_mic: false,
         };
         save_atomic(&path, &settings).unwrap();
         assert_eq!(load(&path), settings);
@@ -235,6 +249,8 @@ mod tests {
         assert_eq!(d.caption_size, "m");
         assert!(d.archive_auto_save);
         assert_eq!(d.archive_retention_days, 0); // keep forever
+        assert!(d.capture_system); // #53: both channels on by default
+        assert!(d.capture_mic);
     }
 
     #[test]
@@ -255,6 +271,25 @@ mod tests {
         assert_eq!(clean.reset_day, 28);
         assert_eq!(clean.caption_size, "m");
         assert_eq!(clean.archive_folder, None);
+    }
+
+    #[test]
+    fn sanitize_keeps_at_least_one_capture_channel() {
+        let both_off = AppSettings {
+            capture_system: false,
+            capture_mic: false,
+            ..AppSettings::default()
+        }
+        .sanitized();
+        assert!(both_off.capture_system && both_off.capture_mic);
+
+        let mic_only = AppSettings {
+            capture_system: false,
+            capture_mic: true,
+            ..AppSettings::default()
+        }
+        .sanitized();
+        assert!(!mic_only.capture_system && mic_only.capture_mic);
     }
 
     #[test]

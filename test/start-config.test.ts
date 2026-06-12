@@ -21,6 +21,8 @@ function startMessage(overrides: Partial<StartMessage> = {}): StartMessage {
     autoSwitch: true,
     archiveAutoSave: true,
     archiveRetentionDays: 0,
+    captureSystem: true,
+    captureMic: true,
     ...overrides,
   };
 }
@@ -73,5 +75,19 @@ describe("resolveStartConfig — gauge + router mapping", () => {
     expect(resolved.archiveAutoSave).toBe(false);
     expect(resolved.archiveRetentionDays).toBe(90);
     expect(resolveStartConfig(startMessage()).archiveRetentionDays).toBe(0); // forever
+  });
+
+  it("maps the channel config onto the archive header note (#53)", () => {
+    expect(resolveStartConfig(startMessage()).channelsNote).toBeNull();
+    expect(resolveStartConfig(startMessage({ captureMic: false })).channelsNote).toBe(
+      "system audio only",
+    );
+    expect(resolveStartConfig(startMessage({ captureSystem: false })).channelsNote).toBe(
+      "microphone only",
+    );
+    // Both-off cannot reach the host (the shell sanitizes it) — no note.
+    expect(
+      resolveStartConfig(startMessage({ captureSystem: false, captureMic: false })).channelsNote,
+    ).toBeNull();
   });
 });

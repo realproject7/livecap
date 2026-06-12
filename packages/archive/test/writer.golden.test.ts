@@ -85,4 +85,26 @@ describe("SessionArchiveWriter — golden file (PROPOSAL §8.9)", () => {
     });
     expect(appendBuilt).toBe(expected);
   });
+
+  it("notes the channel config in the header meta line when set (#53)", () => {
+    const fs = new FakeFs();
+    const writer = new SessionArchiveWriter({
+      fs,
+      folder: "/data/LiveCap",
+      meta: { ...META, channels: "system audio only" },
+    });
+    writer.open();
+    const doc = fs.readFile(writer.path);
+    expect(doc).toContain("engine: Claude CLI ($0.00) · system audio only\n");
+    // The note survives the finalize rewrite.
+    const finalPath = writer.finalize(FINAL);
+    expect(fs.readFile(finalPath)).toContain("($0.31) · system audio only\n");
+  });
+
+  it("omits the channel note when both channels were on (golden stays canonical)", () => {
+    const fs = new FakeFs();
+    const writer = new SessionArchiveWriter({ fs, folder: "/data/LiveCap", meta: META });
+    writer.open();
+    expect(fs.readFile(writer.path)).toContain("engine: Claude CLI ($0.00)\n");
+  });
 });

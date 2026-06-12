@@ -59,6 +59,28 @@ struct StatusPayload {
     detail: Option<String>,
 }
 
+/// Desired capture channels (#53): seeded from Settings at session start;
+/// `mic` flips live via the panel/tray toggle. Emitted to the webview as
+/// `session://channels`.
+#[derive(Debug, Clone, Copy, Serialize)]
+pub struct ChannelConfig {
+    pub system: bool,
+    pub mic: bool,
+}
+
+impl Default for ChannelConfig {
+    fn default() -> Self {
+        Self {
+            system: true,
+            mic: true,
+        }
+    }
+}
+
+fn emit_channels(app: &AppHandle, channels: ChannelConfig) {
+    let _ = app.emit("session://channels", channels);
+}
+
 struct HostHandle {
     child: Child,
     stdin: Arc<StdMutex<ChildStdin>>,
@@ -70,6 +92,7 @@ struct HostHandle {
 #[derive(Default)]
 struct Inner {
     phase: Phase,
+    channels: ChannelConfig,
     pipeline: Option<CaptionPipeline>,
     host: Option<HostHandle>,
     events_task: Option<tauri::async_runtime::JoinHandle<()>>,
@@ -236,18 +259,29 @@ fn spawn_host(app: &AppHandle, start_message: &serde_json::Value) -> Result<Host
     })
 }
 
-/// Start mic + system capture; system-only operation is tolerated (mic may
-/// lack permission), but at least one channel must come up.
-fn start_captures(pipeline: &mut CaptionPipeline) -> Result<Option<String>, String> {
-    let system = pipeline.start_system(None);
-    let mic = pipeline.start_mic(None);
+/// Start the captures enabled by `channels` (#53). A requested channel that
+/// fails (e.g. no mic permission) is tolerated while another channel comes
+/// up, but at least one channel must come up. Settings sanitization
+/// guarantees at least one channel is requested.
+fn start_captures(pipeline: &mut CaptionPipeline, channels: ChannelConfig) -> Result<Option<String>, String> {
+    let system = channels.system.then(|| pipeline.start_system(None));
+    let mic = channels.mic.then(|| pipeline.start_mic(None));
     match (system, mic) {
-        (Ok(()), Ok(())) => Ok(None),
-        (Ok(()), Err(e)) => Ok(Some(format!("microphone unavailable ({e}) — captioning system audio only"))),
-        (Err(e), Ok(())) => Ok(Some(format!("system audio unavailable ({e}) — captioning the microphone only"))),
-        (Err(system_err), Err(mic_err)) => Err(format!(
+        (Some(Ok(())), Some(Ok(()))) => Ok(None),
+        (Some(Ok(())), Some(Err(e))) => Ok(Some(format!(
+            "microphone unavailable ({e}) — captioning system audio only"
+        ))),
+        (Some(Err(e)), Some(Ok(()))) => Ok(Some(format!(
+            "system audio unavailable ({e}) — captioning the microphone only"
+        ))),
+        (Some(Err(system_err)), Some(Err(mic_err))) => Err(format!(
             "audio capture failed — system: {system_err}; mic: {mic_err}"
         )),
+        (Some(Ok(())), None) => Ok(Some("microphone is off — captioning system audio only".into())),
+        (None, Some(Ok(()))) => Ok(Some("system audio is off — captioning the microphone only".into())),
+        (Some(Err(e)), None) => Err(format!("system audio capture failed: {e} (the microphone is off in Settings)")),
+        (None, Some(Err(e))) => Err(format!("microphone capture failed: {e} (system audio is off in Settings)")),
+        (None, None) => Err("no capture channel is enabled".into()),
     }
 }
 
@@ -268,12 +302,15 @@ pub async fn start(app: AppHandle) -> Result<(), String> {
 
     match start_inner(&app).await {
         Ok(detail) => {
-            {
+            let channels = {
                 let state = app.state::<SessionState>();
                 let mut inner = state.inner.lock().await;
                 inner.phase = Phase::Live;
-            }
+                inner.channels
+            };
             tray::set_live(&app, true);
+            tray::sync_mic(&app, true, channels.mic);
+            emit_channels(&app, channels);
             emit_status(&app, Phase::Live, detail);
             Ok(())
         }
@@ -315,6 +352,11 @@ async fn start_inner(app: &AppHandle) -> Result<Option<String>, String> {
     // Settings changes apply to the next session without an app restart.
     let settings = app.state::<SettingsState>().snapshot();
     let archive_dir = archive_dir(app, &settings);
+    // #53: per-channel capture toggles, sanitized so at least one is on.
+    let channels = ChannelConfig {
+        system: settings.capture_system,
+        mic: settings.capture_mic,
+    };
 
     // The host starts first (cheap; engine detection runs while whisper
     // loads); the pipeline build may block on a first-run model download.
@@ -329,6 +371,8 @@ async fn start_inner(app: &AppHandle) -> Result<Option<String>, String> {
         "autoSwitch": settings.auto_switch,
         "archiveAutoSave": settings.archive_auto_save,
         "archiveRetentionDays": settings.archive_retention_days,
+        "captureSystem": channels.system,
+        "captureMic": channels.mic,
     });
     let mut host = spawn_host(app, &start_message)?;
 
@@ -347,7 +391,7 @@ async fn start_inner(app: &AppHandle) -> Result<Option<String>, String> {
         }
     };
 
-    let capture_note = match start_captures(&mut pipeline) {
+    let capture_note = match start_captures(&mut pipeline, channels) {
         Ok(note) => note,
         Err(error) => {
             abort_host(&mut host);
@@ -377,6 +421,7 @@ async fn start_inner(app: &AppHandle) -> Result<Option<String>, String> {
     });
 
     let mut inner = state.inner.lock().await;
+    inner.channels = channels;
     inner.pipeline = Some(pipeline);
     inner.host = Some(host);
     inner.events_task = Some(events_task);
@@ -427,10 +472,69 @@ pub async fn stop(app: AppHandle) -> Result<(), String> {
     {
         let mut inner = state.inner.lock().await;
         inner.phase = Phase::Idle;
+        inner.channels = ChannelConfig::default();
     }
     tray::set_live(&app, false);
+    tray::sync_mic(&app, false, false);
     emit_status(&app, Phase::Idle, None);
     Ok(())
+}
+
+/// Mid-session microphone toggle (#53): pause/resume JUST the mic capture.
+/// While Paused only the desired flag flips; resume honors it. Turning the
+/// last active channel off is refused (a session must keep one channel).
+pub async fn set_mic(app: AppHandle, enabled: bool) -> Result<(), String> {
+    let state = app.state::<SessionState>();
+    let channels = {
+        let mut inner = state.inner.lock().await;
+        if inner.phase != Phase::Live && inner.phase != Phase::Paused {
+            return Err("no active session".into());
+        }
+        if !enabled && !inner.channels.system {
+            return Err("the microphone is the only active channel — pause the session instead".into());
+        }
+        if inner.phase == Phase::Live {
+            let pipeline = inner
+                .pipeline
+                .as_mut()
+                .ok_or_else(|| "no active pipeline".to_string())?;
+            if enabled {
+                if !pipeline.mic_running() {
+                    pipeline
+                        .start_mic(None)
+                        .map_err(|e| format!("microphone unavailable: {e}"))?;
+                }
+            } else {
+                pipeline.stop_mic();
+            }
+        }
+        inner.channels.mic = enabled;
+        inner.channels
+    };
+    tray::sync_mic(&app, true, channels.mic);
+    emit_channels(&app, channels);
+    Ok(())
+}
+
+/// Tray "Microphone" entry point: flip the mic, surfacing failures as a
+/// toast and re-syncing the menu check mark.
+pub async fn toggle_mic(app: AppHandle) {
+    let current = {
+        let state = app.state::<SessionState>();
+        let inner = state.inner.lock().await;
+        match inner.phase {
+            Phase::Live | Phase::Paused => Some(inner.channels.mic),
+            _ => None,
+        }
+    };
+    let Some(mic) = current else { return };
+    if let Err(error) = set_mic(app.clone(), !mic).await {
+        tray::sync_mic(&app, true, mic);
+        let _ = app.emit(
+            "host://event",
+            serde_json::json!({ "type": "hostError", "detail": error }),
+        );
+    }
 }
 
 pub async fn pause(app: AppHandle) -> Result<(), String> {
@@ -455,8 +559,9 @@ pub async fn resume(app: AppHandle) -> Result<(), String> {
     if inner.phase != Phase::Paused {
         return Err(format!("session is {}", inner.phase.as_str()));
     }
+    let channels = inner.channels;
     let detail = match inner.pipeline.as_mut() {
-        Some(pipeline) => start_captures(pipeline)?,
+        Some(pipeline) => start_captures(pipeline, channels)?,
         None => return Err("no active pipeline".into()),
     };
     inner.phase = Phase::Live;
@@ -525,6 +630,19 @@ pub async fn session_resume(app: AppHandle) -> Result<(), String> {
 #[tauri::command]
 pub async fn session_phase(state: State<'_, SessionState>) -> Result<&'static str, String> {
     Ok(state.inner.lock().await.phase.as_str())
+}
+
+/// Mid-session mic toggle (#53) — the panel chrome button calls this.
+#[tauri::command]
+pub async fn session_set_mic(app: AppHandle, enabled: bool) -> Result<(), String> {
+    set_mic(app, enabled).await
+}
+
+/// Current desired channel config (both-on default while idle) — lets the
+/// webview seed the mic button after a reload or an autostarted session.
+#[tauri::command]
+pub async fn session_channels(state: State<'_, SessionState>) -> Result<ChannelConfig, String> {
+    Ok(state.inner.lock().await.channels)
 }
 
 /// Forward a UI request (quick translate, reply chip, retranslate, pin,

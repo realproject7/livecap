@@ -872,6 +872,11 @@ body[data-capsize="l"] #capsule-view .txt { font-size: 15.5px; }
 .sh-check input {
   accent-color: var(--accent-live);
 }
+/* #53: one-line hint under the Channels toggles */
+.sh-channels-note {
+  font-size: 11px;
+  margin: -2px 0 8px;
+}
 .sh-row {
   display: flex;
   align-items: center;

@@ -170,6 +170,8 @@ pub fn run() {
             session::session_pause,
             session::session_resume,
             session::session_phase,
+            session::session_set_mic,
+            session::session_channels,
             session::host_request,
             session::gauge_state,
             ui_state::ui_beat,
