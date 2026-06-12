@@ -18,6 +18,7 @@ struct TrayHandles {
     tray: TrayIcon,
     mode_items: Vec<(Mode, CheckMenuItem<Wry>)>,
     captioning: MenuItem<Wry>,
+    mic: CheckMenuItem<Wry>,
 }
 
 fn icon(live: bool) -> Image<'static> {
@@ -58,6 +59,8 @@ pub fn create(app: &AppHandle, initial_mode: Mode) -> tauri::Result<()> {
         caps.captioning,
         None::<&str>,
     )?;
+    // #53: mirrors the panel's mic toggle — enabled only during a session.
+    let mic = CheckMenuItem::with_id(app, "mic", "Microphone", false, false, None::<&str>)?;
     let settings = MenuItem::with_id(app, "settings", "Settings…", caps.settings, None::<&str>)?;
     let quit = MenuItem::with_id(app, "quit", "Quit LiveCap", true, Some("Cmd+Q"))?;
 
@@ -69,6 +72,7 @@ pub fn create(app: &AppHandle, initial_mode: Mode) -> tauri::Result<()> {
             &mode_menu,
             &PredefinedMenuItem::separator(app)?,
             &captioning,
+            &mic,
             &PredefinedMenuItem::separator(app)?,
             &settings,
             &quit,
@@ -91,6 +95,13 @@ pub fn create(app: &AppHandle, initial_mode: Mode) -> tauri::Result<()> {
                     crate::session::toggle(app).await;
                 });
             }
+            "mic" => {
+                // #53: mid-session mic pause/resume; no-op without a session.
+                let app = app.clone();
+                tauri::async_runtime::spawn(async move {
+                    crate::session::toggle_mic(app).await;
+                });
+            }
             "settings" => overlay::open_settings(app),
             "quit" => {
                 app.state::<Shell>().save_now();
@@ -108,8 +119,18 @@ pub fn create(app: &AppHandle, initial_mode: Mode) -> tauri::Result<()> {
         tray,
         mode_items,
         captioning,
+        mic,
     });
     Ok(())
+}
+
+/// Mirror the session's mic state (#53): enabled while a session is running,
+/// check mark = mic capturing. Driven by session.rs.
+pub fn sync_mic(app: &AppHandle, enabled: bool, checked: bool) {
+    if let Some(handles) = app.try_state::<TrayHandles>() {
+        let _ = handles.mic.set_enabled(enabled);
+        let _ = handles.mic.set_checked(checked);
+    }
 }
 
 /// Reflect the active mode in the Mode submenu check marks.

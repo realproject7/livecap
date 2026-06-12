@@ -15,6 +15,8 @@ export interface ArchiveModel {
   sourceLang: string;
   targetLang: string;
   engineName: string;
+  /** Channel-config header note (#53), e.g. "system audio only". */
+  channels?: string;
   costUsd: number;
   summary: string[];
   board: BoardData;
@@ -22,9 +24,10 @@ export interface ArchiveModel {
 }
 
 function renderMetaLine(m: ArchiveModel): string {
+  const channels = m.channels !== undefined && m.channels !== "" ? ` · ${m.channels}` : "";
   return (
     `${m.headerDate} ${m.startClock}–${m.endClock} (${m.durationMin} min) · ` +
-    `${m.sourceLang} → ${m.targetLang} · engine: ${m.engineName} ($${m.costUsd.toFixed(2)})`
+    `${m.sourceLang} → ${m.targetLang} · engine: ${m.engineName} ($${m.costUsd.toFixed(2)})${channels}`
   );
 }
 

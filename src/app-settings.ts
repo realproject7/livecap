@@ -15,6 +15,10 @@ export interface AppSettings {
   archiveAutoSave: boolean;
   archiveFolder: string | null;
   archiveRetentionDays: number;
+  /** Channels group (#53): per-channel capture toggles, applied at session
+   *  start. The Rust side sanitizes so at least one stays on. */
+  captureSystem: boolean;
+  captureMic: boolean;
 }
 
 /** Engine-package default $/meeting-hour until real usage is metered

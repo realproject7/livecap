@@ -226,6 +226,8 @@ export class HostSession {
           sourceLang: resolved.sourceLangCode,
           targetLang: resolved.targetLangCode,
           engineName: engineLabel,
+          // #53: header notes the channel config when one channel is off.
+          channels: resolved.channelsNote ?? undefined,
         },
       });
       writer.open();

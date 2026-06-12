@@ -93,6 +93,11 @@ export function createSettingsSheet(options: SettingsSheetOptions): SettingsShee
         <label class="sh-check sh-right"><input type="checkbox" id="sh-clickthrough" /> Click-through (Strip/Capsule)</label>
       </div>
 
+      <div class="sh-section">Channels</div>
+      <label class="sh-check"><input type="checkbox" id="sh-cap-system" /> Capture system audio (them)</label>
+      <label class="sh-check"><input type="checkbox" id="sh-cap-mic" /> Capture microphone (me)</label>
+      <div class="sh-channels-note t-meta">Applies at the next session start — at least one channel stays on.</div>
+
       <div class="sh-section">Archive</div>
       <label class="sh-check"><input type="checkbox" id="sh-autosave" /> Auto-save transcripts</label>
       <div class="sh-row">
@@ -128,6 +133,8 @@ export function createSettingsSheet(options: SettingsSheetOptions): SettingsShee
   const resetDayInput = el<HTMLInputElement>(host, "#sh-resetday");
   const langSelect = el<HTMLSelectElement>(host, "#sh-lang");
   const clickThrough = el<HTMLInputElement>(host, "#sh-clickthrough");
+  const captureSystem = el<HTMLInputElement>(host, "#sh-cap-system");
+  const captureMic = el<HTMLInputElement>(host, "#sh-cap-mic");
   const autoSave = el<HTMLInputElement>(host, "#sh-autosave");
   const folderBtn = el<HTMLButtonElement>(host, "#sh-folder");
   const retentionSelect = el<HTMLSelectElement>(host, "#sh-retention");
@@ -156,6 +163,11 @@ export function createSettingsSheet(options: SettingsSheetOptions): SettingsShee
       btn.setAttribute("aria-pressed", String(btn.dataset.size === s.captionSize));
     }
     clickThrough.checked = options.getClickThrough();
+    // #53: the last enabled channel locks so a session always has one.
+    captureSystem.checked = s.captureSystem;
+    captureMic.checked = s.captureMic;
+    captureSystem.disabled = s.captureSystem && !s.captureMic;
+    captureMic.disabled = s.captureMic && !s.captureSystem;
     autoSave.checked = s.archiveAutoSave;
     folderBtn.textContent = s.archiveFolder ?? "~/Documents/LiveCap";
     retentionSelect.value = String(s.archiveRetentionDays);
@@ -213,6 +225,21 @@ export function createSettingsSheet(options: SettingsSheetOptions): SettingsShee
     });
   }
   clickThrough.addEventListener("change", () => options.setClickThrough(clickThrough.checked));
+  captureSystem.addEventListener("change", () => {
+    // Belt-and-braces with the disabled lock: never persist both-off.
+    if (!captureSystem.checked && !options.getSettings().captureMic) {
+      captureSystem.checked = true;
+      return;
+    }
+    save({ captureSystem: captureSystem.checked });
+  });
+  captureMic.addEventListener("change", () => {
+    if (!captureMic.checked && !options.getSettings().captureSystem) {
+      captureMic.checked = true;
+      return;
+    }
+    save({ captureMic: captureMic.checked });
+  });
   autoSave.addEventListener("change", () => save({ archiveAutoSave: autoSave.checked }));
   folderBtn.addEventListener("click", () => {
     void openDialog({ directory: true, title: "Archive folder" }).then((picked) => {

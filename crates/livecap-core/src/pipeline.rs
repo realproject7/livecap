@@ -191,6 +191,19 @@ impl CaptionPipeline {
         self.system_capture.take();
     }
 
+    /// Stop ONLY the microphone capture (#53 mid-session mic toggle): the
+    /// mic channel's VAD flushes (trailing speech finalizes) while system
+    /// capture continues. [`Self::start_mic`] resumes it on the same
+    /// pipeline.
+    pub fn stop_mic(&mut self) {
+        self.mic_capture.take();
+    }
+
+    /// Whether microphone capture is currently running.
+    pub fn mic_running(&self) -> bool {
+        self.mic_capture.is_some()
+    }
+
     /// Create a raw PCM feeder for `channel`, spawning its processing
     /// worker. Capture threads use this internally; tests and other audio
     /// sources can use it directly — close the feeder (drop the sender) to

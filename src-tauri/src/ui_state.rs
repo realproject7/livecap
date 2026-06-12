@@ -12,6 +12,10 @@ pub struct UiBeat {
     pub mode: String,
     #[serde(rename = "feedBlocks")]
     pub feed_blocks: u64,
+    /// Caption blocks actually in the DOM (#57 window cap verification).
+    /// Defaulted so the LIVECAP_UI_PROBE beat (older shape) still parses.
+    #[serde(rename = "domBlocks", default)]
+    pub dom_blocks: u64,
     #[serde(rename = "latestSource")]
     pub latest_source: String,
     #[serde(rename = "latestTranslation")]

@@ -31,6 +31,13 @@ export interface SessionStatus {
   detail?: string;
 }
 
+/** Desired capture channels (#53), emitted by Rust on `session://channels`
+ *  and served by the `session_channels` command (both-on while idle). */
+export interface SessionChannels {
+  system: boolean;
+  mic: boolean;
+}
+
 export type ReplyIntentWire = "agree" | "push-back" | "ask" | "suggest";
 
 /** Engine preference (#12 Settings): which tier the router defaults to. */
@@ -59,6 +66,10 @@ export type HostInbound =
       archiveAutoSave: boolean;
       /** Delete archives older than this many days; 0 = keep forever. */
       archiveRetentionDays: number;
+      /** Channel config at session start (#53) — when one channel is off the
+       *  archive header notes it (e.g. "system audio only"). */
+      captureSystem: boolean;
+      captureMic: boolean;
     }
   | { type: "caption"; id: number; channel: Channel; text: string; lowConfidence: boolean; epochMs: number }
   | { type: "quickTranslate"; id: number; text: string }

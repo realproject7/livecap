@@ -44,6 +44,9 @@ export interface SessionMeta {
   targetLang: string;
   /** Engine label for the header, e.g. "Claude CLI". */
   engineName: string;
+  /** Channel-config note for the header when a channel was off at session
+   *  start (#53), e.g. "system audio only". Omitted when both were on. */
+  channels?: string;
 }
 
 /** The mutable front-matter that gets rewritten over the session. */
