@@ -6,3 +6,8 @@ members = ["src-tauri", "crates/livecap-core"]
 edition = "2021"
 license = "MIT"
 repository = "https://github.com/realproject7/livecap"
+
+# Same cpal pin as Meetily (RustAudio/cpal rev 51c3b43): fixes macOS capture
+# issues present in the released 0.15.3.
+[patch.crates-io]
+cpal = { git = "https://github.com/RustAudio/cpal", rev = "51c3b43" }
