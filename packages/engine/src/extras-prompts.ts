@@ -45,6 +45,8 @@ export function buildSummaryBoardPrompt(
     "OPEN QUESTIONS",
     "- <question>",
     "Keep a header even if it has no bullets. Do not invent content.",
+    `Write the bullet content in ${outputLanguage}, but keep the section headers ` +
+      "in English exactly as above (SUMMARY / DECISIONS / ACTION ITEMS / OPEN QUESTIONS).",
     "",
     "Transcript:",
     transcript,
@@ -95,6 +97,22 @@ const SECTION_BY_HEADER: Record<string, keyof SectionBuckets> = {
   "OPEN QUESTIONS": "openQuestions",
   "OPEN QUESTION": "openQuestions",
   QUESTIONS: "openQuestions",
+  // Korean aliases (#40): the prompt asks the model to keep English headers, but
+  // a localizing model writing the board in KO is a documented launch case — so
+  // the common Korean header phrasings parse too.
+  요약: "summary",
+  "회의 요약": "summary",
+  "결정 사항": "decisions",
+  결정사항: "decisions",
+  결정: "decisions",
+  "실행 항목": "actionItems",
+  실행항목: "actionItems",
+  "액션 아이템": "actionItems",
+  "할 일": "actionItems",
+  할일: "actionItems",
+  "미해결 질문": "openQuestions",
+  "열린 질문": "openQuestions",
+  질문: "openQuestions",
 };
 
 interface SectionBuckets {
