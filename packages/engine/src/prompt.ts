@@ -49,6 +49,19 @@ export function buildSystemPrompt(options: PromptOptions = {}): string {
   return lines.join(" ");
 }
 
+/**
+ * Build a one-time session-setup message that carries the user glossary over
+ * stdin instead of argv (#26). Wrap with `asTaskMessage` before sending so the
+ * session's translation system prompt yields to it.
+ */
+export function buildGlossarySetupMessage(glossary: Record<string, string>): string {
+  return [
+    "For the rest of this session, use these preferred term translations consistently:",
+    ...glossaryLines(glossary),
+    "Acknowledge with an empty line.",
+  ].join("\n");
+}
+
 const DEFAULT_CONTEXT_PAIRS = 4;
 
 /**

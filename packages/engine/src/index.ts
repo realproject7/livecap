@@ -25,6 +25,7 @@ export {
   buildSystemPrompt,
   buildTranslateMessage,
   buildSummaryMessage,
+  buildGlossarySetupMessage,
   formatUserMessageLine,
 } from "./prompt";
 export type { PromptOptions } from "./prompt";

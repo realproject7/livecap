@@ -17,6 +17,7 @@ import { Mutex } from "./internal/mutex";
 import { stderrDigest } from "./internal/redact";
 import {
   asTaskMessage,
+  buildGlossarySetupMessage,
   buildSummaryMessage,
   buildSystemPrompt,
   buildTranslateMessage,
@@ -107,10 +108,10 @@ export class ClaudeCliEngine implements TranslationEngine {
   constructor(config: ClaudeCliEngineConfig) {
     this.config = config;
     this.sessionId = config.sessionId ?? randomUUID();
-    this.systemPrompt = buildSystemPrompt({
-      targetLanguage: config.targetLanguage,
-      glossary: config.glossary,
-    });
+    // The system prompt goes on argv (--system-prompt), so it must stay static
+    // and content-free of user data: the glossary is bootstrapped over stdin in
+    // start() instead (#26 — argv is world-readable via ps / /proc).
+    this.systemPrompt = buildSystemPrompt({ targetLanguage: config.targetLanguage });
   }
 
   health(): EngineHealth {
@@ -171,6 +172,17 @@ export class ClaudeCliEngine implements TranslationEngine {
     child.once("exit", (code, signal) => this.onExit(code, signal));
 
     this.statusValue = { status: "ready" };
+
+    // Bootstrap the user glossary over stdin (never argv). Best-effort: a failed
+    // setup turn must not block the session.
+    const glossary = this.config.glossary;
+    if (glossary && Object.keys(glossary).length > 0) {
+      try {
+        await this.runTextTurn(asTaskMessage(buildGlossarySetupMessage(glossary)), "glossary-setup");
+      } catch {
+        // glossary is best-effort; the session still translates without it
+      }
+    }
   }
 
   async stop(): Promise<void> {

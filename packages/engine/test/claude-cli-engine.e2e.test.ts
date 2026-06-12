@@ -1,4 +1,6 @@
+import { readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, it, expect } from "vitest";
 
@@ -130,6 +132,39 @@ describe("ClaudeCliEngine — real spawn/stdio (fake-cli replay)", () => {
       expect(result.text.startsWith("[TASK]")).toBe(true);
       expect(result.text).toContain("Be a board generator.");
       expect(result.text).toContain("the transcript");
+    } finally {
+      await engine.stop();
+    }
+  });
+
+  it("keeps the user glossary out of argv, bootstrapping it over stdin (#26)", async () => {
+    const argvFile = join(tmpdir(), `livecap-argv-${process.pid}-${process.hrtime.bigint()}.json`);
+    const GLOSSARY = { AcmeCorp: "에이콘", ProjectNarwhal: "프로젝트 나월" };
+    const engine = new ClaudeCliEngine({
+      bin: FAKE_CLI,
+      cwd: tmpdir(),
+      env: {
+        ...process.env,
+        LIVECAP_FAKE_FIXTURE: fixturePath("session-without-partials.jsonl"),
+        LIVECAP_FAKE_ARGV_OUT: argvFile,
+      },
+      includePartialMessages: false,
+      glossary: GLOSSARY,
+    });
+    await engine.start(); // spawns fake-cli (writes its argv) + bootstraps glossary over stdin
+    try {
+      const argv: string[] = JSON.parse(readFileSync(argvFile, "utf8"));
+      const joined = argv.join("\0");
+      // No glossary term (source or target) is ever on the command line.
+      expect(joined).not.toContain("AcmeCorp");
+      expect(joined).not.toContain("에이콘");
+      expect(joined).not.toContain("ProjectNarwhal");
+      expect(joined).not.toContain("프로젝트 나월");
+      // The static system prompt is still passed (and carries no user data).
+      expect(argv).toContain("--system-prompt");
+      const systemPrompt = argv[argv.indexOf("--system-prompt") + 1] ?? "";
+      expect(systemPrompt).not.toContain("AcmeCorp");
+      expect(systemPrompt).toContain("real-time meeting interpreter");
     } finally {
       await engine.stop();
     }
