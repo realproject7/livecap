@@ -1,6 +1,8 @@
 import { describe, it, expect } from "vitest";
 
-import { sanitizeTitle, archiveFileName, MAX_TITLE_LENGTH, FALLBACK_TITLE } from "../src/sanitize";
+import { sanitizeTitle, archiveFileName, MAX_TITLE_BYTES, FALLBACK_TITLE } from "../src/sanitize";
+
+const utf8 = (s: string) => new TextEncoder().encode(s).length;
 
 describe("sanitizeTitle — path traversal defense (SECURITY.md)", () => {
   it("strips forward and back slashes so the result is one segment", () => {
@@ -40,9 +42,29 @@ describe("sanitizeTitle — path traversal defense (SECURITY.md)", () => {
     expect(sanitizeTitle("///")).toBe(FALLBACK_TITLE);
   });
 
-  it("caps length", () => {
+  it("caps the title by UTF-8 bytes", () => {
     const safe = sanitizeTitle("x".repeat(500));
-    expect(safe.length).toBeLessThanOrEqual(MAX_TITLE_LENGTH);
+    expect(utf8(safe)).toBeLessThanOrEqual(MAX_TITLE_BYTES);
+  });
+
+  it("keeps a CJK title's filename under the 255-byte FS limit (#32)", () => {
+    // 80 Korean chars = 240 UTF-8 bytes — pre-fix this overflowed the filename.
+    const koreanTitle = "가".repeat(80);
+    expect(utf8(koreanTitle)).toBe(240);
+    const safe = sanitizeTitle(koreanTitle);
+    expect(utf8(safe)).toBeLessThanOrEqual(MAX_TITLE_BYTES);
+    const fileName = archiveFileName("2026-06-11 1045", koreanTitle);
+    expect(utf8(fileName)).toBeLessThanOrEqual(255);
+  });
+
+  it("truncates at a code-point boundary — no lone surrogate (#32)", () => {
+    // Emoji are surrogate pairs (4 UTF-8 bytes each); truncation must not split one.
+    const safe = sanitizeTitle("🎉".repeat(100));
+    expect(utf8(safe)).toBeLessThanOrEqual(MAX_TITLE_BYTES);
+    // A lone surrogate would not survive an encode/decode round-trip.
+    expect(new TextDecoder().decode(new TextEncoder().encode(safe))).toBe(safe);
+    // Every code point is a whole emoji (4 bytes), so the byte length is a multiple of 4.
+    expect(utf8(safe) % 4).toBe(0);
   });
 
   it("strips bidi/format controls (filename spoofing)", () => {
