@@ -65,11 +65,19 @@ export interface GaugeState {
 
 export type CreditEvent =
   | { type: "gauge"; gauge: GaugeState }
-  | { type: "engine-switch"; reason: "credit-low"; gauge: GaugeState };
+  | { type: "engine-switch"; reason: "credit-low"; gauge: GaugeState }
+  // A ledger persistence failure, surfaced (not thrown) so it never crashes the
+  // caption stream — accounting can be lost; captions must not.
+  | { type: "ledger-error"; error: unknown };
 
 const MS_PER_HOUR = 3_600_000;
 
-/** Billing period containing `nowMs`, keyed by the month the period started. */
+/**
+ * Billing period containing `nowMs`, keyed by the month the period started.
+ * NOTE: boundaries are evaluated in UTC, so the reset happens at UTC midnight,
+ * not the user's local midnight (up to ~half a day of skew). Fine for a gauge;
+ * #12's Settings copy should not promise an exact local-time reset.
+ */
 export function periodKeyFor(nowMs: number, resetDay: number): string {
   const date = new Date(nowMs);
   let year = date.getUTCFullYear();
@@ -102,7 +110,17 @@ export class CreditAccountant {
     this.thresholdHours = config.fallbackThresholdHours ?? 2;
     this.defaultDollarsPerHour = config.defaultDollarsPerHour ?? 0.4;
     this.data = this.load();
-    this.belowThreshold = this.gauge().estimatedHoursRemaining < this.thresholdHours;
+    // Do NOT pre-latch from loaded state: a process that relaunches already
+    // below threshold must still re-deliver the recommendation (the first
+    // recorded usage re-fires it; a consumer can also pull isBelowThreshold()
+    // at session start). Pre-latching here would silence it for the period.
+    this.belowThreshold = false;
+  }
+
+  /** Whether est. meeting-hours left is under the fallback threshold right now.
+   *  Pull this at session start to decide whether to begin on the fallback. */
+  isBelowThreshold(): boolean {
+    return this.gauge().estimatedHoursRemaining < this.thresholdHours;
   }
 
   /** Subscribe to gauge / engine-switch events. Returns an unsubscribe fn. */
@@ -111,9 +129,20 @@ export class CreditAccountant {
     return () => this.listeners.delete(listener);
   }
 
-  /** Wire an engine's usage events into the ledger. Returns an unsubscribe fn. */
+  /**
+   * Wire an engine's usage events into the ledger. Returns an unsubscribe fn.
+   * A persistence failure here is caught and surfaced as a "ledger-error" event
+   * — it must NOT throw, because this listener runs inside the engine's stdout
+   * data handler and an uncaught throw there would take down the caption stream.
+   */
   attach(engine: { onUsage(listener: (usage: Usage) => void): () => void }): () => void {
-    return engine.onUsage((usage) => this.recordCost(usage.turnCostUsd));
+    return engine.onUsage((usage) => {
+      try {
+        this.recordCost(usage.turnCostUsd);
+      } catch (error) {
+        this.emit({ type: "ledger-error", error });
+      }
+    });
   }
 
   /** Add a turn's cost (USD). Rolls the period over first if needed. */
@@ -203,7 +232,15 @@ export class CreditAccountant {
   }
 
   private emit(event: CreditEvent): void {
-    for (const listener of this.listeners) listener(event);
+    // Isolate subscribers: a throwing UI listener must not propagate back into
+    // recordCost (and thus the engine callback).
+    for (const listener of this.listeners) {
+      try {
+        listener(event);
+      } catch {
+        // A faulty subscriber is its own problem; accounting continues.
+      }
+    }
   }
 }
 

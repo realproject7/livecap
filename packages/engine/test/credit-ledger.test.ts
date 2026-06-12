@@ -2,6 +2,15 @@ import { describe, it, expect } from "vitest";
 
 import { CreditAccountant, periodKeyFor } from "../src/credit-ledger";
 import type { CreditConfig, CreditEvent, LedgerFs } from "../src/credit-ledger";
+import type { Usage } from "../src/types";
+
+const ZERO_USAGE: Usage = {
+  cumulativeCostUsd: 0,
+  turnCostUsd: 0,
+  inputTokens: 0,
+  outputTokens: 0,
+  cacheReadInputTokens: 0,
+};
 
 class FakeLedgerFs implements LedgerFs {
   files = new Map<string, string>();
@@ -157,6 +166,40 @@ describe("CreditAccountant — auto-fallback threshold", () => {
     expect(events.filter((e) => e.type === "engine-switch")).toHaveLength(1);
   });
 
+  it("re-delivers the recommendation when a process relaunches already below threshold", () => {
+    // Persist a below-threshold ledger (spent $19 of $20, $1/hr → ~1h left).
+    const fs = new FakeLedgerFs();
+    const now = () => Date.UTC(2026, 5, 10);
+    const first = new CreditAccountant({
+      fs,
+      ledgerPath: PATH,
+      poolUsd: 20,
+      fallbackThresholdHours: 2,
+      defaultDollarsPerHour: 1,
+      now,
+    });
+    first.recordCost(19);
+
+    // Relaunch: a brand-new accountant loads the below-threshold ledger.
+    const relaunched = new CreditAccountant({
+      fs,
+      ledgerPath: PATH,
+      poolUsd: 20,
+      fallbackThresholdHours: 2,
+      defaultDollarsPerHour: 1,
+      now,
+    });
+    expect(relaunched.isBelowThreshold()).toBe(true);
+
+    const switches: CreditEvent[] = [];
+    relaunched.onEvent((e) => {
+      if (e.type === "engine-switch") switches.push(e);
+    });
+    relaunched.recordCost(0.1); // first usage after relaunch re-fires it once
+    relaunched.recordCost(0.1); // still below → must NOT fire again
+    expect(switches).toHaveLength(1);
+  });
+
   it("re-arms and fires again after a period rollover re-crosses", () => {
     let now = Date.UTC(2026, 5, 10);
     const acc = make({ now: () => now });
@@ -217,6 +260,43 @@ describe("CreditAccountant — persistence", () => {
     // A reload sees the last durable value (4), not the crashed 6.
     const reloaded = new CreditAccountant({ fs, ledgerPath: PATH, poolUsd: 20, now });
     expect(reloaded.gauge().spentUsd).toBeCloseTo(4, 6);
+  });
+});
+
+describe("CreditAccountant — failure isolation", () => {
+  it("surfaces a ledger write failure as an event instead of throwing into the engine callback", () => {
+    const fs = new FakeLedgerFs();
+    const acc = new CreditAccountant({ fs, ledgerPath: PATH, poolUsd: 20, now: () => Date.UTC(2026, 5, 10) });
+    const events: CreditEvent[] = [];
+    acc.onEvent((e) => events.push(e));
+
+    let listener: (u: Usage) => void = () => {};
+    const fakeEngine = {
+      onUsage(l: (u: Usage) => void) {
+        listener = l;
+        return () => {};
+      },
+    };
+    acc.attach(fakeEngine);
+
+    fs.failNextRename = true;
+    // The engine invokes this synchronously inside its stdout data handler — it
+    // must never throw there.
+    expect(() => listener({ ...ZERO_USAGE, turnCostUsd: 0.5 })).not.toThrow();
+    expect(events.some((e) => e.type === "ledger-error")).toBe(true);
+
+    // A later usage (disk recovered) still records normally.
+    listener({ ...ZERO_USAGE, turnCostUsd: 0.5 });
+    expect(acc.gauge().spentUsd).toBeCloseTo(0.5, 6);
+  });
+
+  it("isolates a throwing event subscriber from accounting", () => {
+    const acc = make({ now: () => Date.UTC(2026, 5, 10) });
+    acc.onEvent(() => {
+      throw new Error("bad UI subscriber");
+    });
+    expect(() => acc.recordCost(1)).not.toThrow();
+    expect(acc.gauge().spentUsd).toBe(1);
   });
 });
 

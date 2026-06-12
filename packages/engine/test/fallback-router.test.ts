@@ -127,6 +127,28 @@ describe("FallbackRouter", () => {
     expect((await collect(router.translate(batch, { pairs: [] }))).at(-1)?.text).toBe("fallback:final");
   });
 
+  it("begins on the fallback when startOnFallback() is true at launch (restart-while-below)", async () => {
+    const primary = new StubEngine("primary");
+    const fallback = new StubEngine("fallback");
+    const router = new FallbackRouter({ primary, fallback, startOnFallback: () => true });
+    await router.start();
+
+    expect(router.onFallback).toBe(true);
+    expect(fallback.startCalls).toBe(1);
+    expect(primary.startCalls).toBe(0);
+    expect((await collect(router.translate(batch, { pairs: [] }))).at(-1)?.text).toBe("fallback:final");
+  });
+
+  it("begins on the primary when startOnFallback() is false", async () => {
+    const primary = new StubEngine("primary");
+    const fallback = new StubEngine("fallback");
+    const router = new FallbackRouter({ primary, fallback, startOnFallback: () => false });
+    await router.start();
+    expect(router.onFallback).toBe(false);
+    expect(primary.startCalls).toBe(1);
+    expect(fallback.startCalls).toBe(0);
+  });
+
   it("switchToFallback is idempotent", async () => {
     const primary = new StubEngine("primary");
     const fallback = new StubEngine("fallback");
