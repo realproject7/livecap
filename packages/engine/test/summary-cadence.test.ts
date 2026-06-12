@@ -64,4 +64,18 @@ describe("SummaryCadence", () => {
     c.shouldRun(T0 + MIN, "same"); // 1*10 → capped at 3*MIN
     expect(c.currentIntervalMs).toBe(3 * MIN);
   });
+
+  it("paces retries when a run fails (no markRun) — not every poll tick (#39)", () => {
+    const c = new SummaryCadence({ baseMs: MIN });
+    // First attempt is due; the consumer's engine call THROWS, so markRun is
+    // never reached. The transcript keeps changing (live meeting).
+    expect(c.shouldRun(T0, "live")).toBe(true);
+    // Pre-fix, lastRunAt was never recorded without markRun → shouldRun returned
+    // true on every tick (retry storm). Now it's paced at the base interval.
+    expect(c.shouldRun(T0 + 5_000, "live v2")).toBe(false);
+    expect(c.shouldRun(T0 + 30_000, "live v3")).toBe(false);
+    // After the base interval, one retry is due — at cadence, not every tick.
+    expect(c.shouldRun(T0 + MIN, "live v4")).toBe(true);
+    expect(c.shouldRun(T0 + MIN + 5_000, "live v5")).toBe(false);
+  });
 });

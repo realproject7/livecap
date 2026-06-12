@@ -110,4 +110,36 @@ describe("buildSummaryBoardPrompt / buildQuickTranslatePrompt", () => {
     expect(system).toContain("English");
     expect(user).toBe("이거 다음 분기로 미루면 어때요?");
   });
+
+  it("tells the model to keep section headers in English for a non-English board (#40)", () => {
+    const { user } = buildSummaryBoardPrompt("transcript", "한국어");
+    expect(user).toContain("keep the section headers");
+    expect(user).toContain("English");
+  });
+});
+
+describe("parseSummaryBoard — Korean-localized headers (#40)", () => {
+  it("parses a board whose section headers were localized to Korean", () => {
+    const text = [
+      "요약",
+      "- 예산 논의",
+      "결정 사항",
+      "- 스택 랭크 사용",
+      "실행 항목",
+      "- 마이크 → 앱 목록 공유",
+      "미해결 질문",
+      "- MAU 정의는?",
+    ].join("\n");
+    const { summary, board } = parseSummaryBoard(text);
+    expect(summary).toEqual(["예산 논의"]);
+    expect(board.decisions).toEqual(["스택 랭크 사용"]);
+    expect(board.actionItems).toEqual(["마이크 → 앱 목록 공유"]);
+    expect(board.openQuestions).toEqual(["MAU 정의는?"]);
+  });
+
+  it("still parses English headers (EN output) unchanged", () => {
+    const { summary, board } = parseSummaryBoard("SUMMARY\n- a\nDECISIONS\n- b");
+    expect(summary).toEqual(["a"]);
+    expect(board.decisions).toEqual(["b"]);
+  });
 });

@@ -41,7 +41,13 @@ export class SummaryCadence {
    */
   shouldRun(nowMs: number, transcript: string): boolean {
     if (transcript.trim() === "") return false;
-    if (this.lastRunAt === null) return true;
+    // First attempt: pace it (record the attempt) so a run that THROWS — the
+    // consumer never reaches markRun — still backs off to the base cadence
+    // instead of returning true on every poll tick (#39).
+    if (this.lastRunAt === null) {
+      this.lastRunAt = nowMs;
+      return true;
+    }
     const changed = transcript !== this.lastTranscript;
     // New content resets the cadence to base BEFORE the due check, so a meeting
     // that resumes after an idle backoff becomes due on the base interval again
@@ -54,6 +60,9 @@ export class SummaryCadence {
       this.lastRunAt = nowMs;
       return false;
     }
+    // Due + changed → run. Record the attempt now so a failed run (no markRun)
+    // still paces the next poll at `intervalMs`, not every tick (#39).
+    this.lastRunAt = nowMs;
     return true;
   }
 
