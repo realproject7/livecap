@@ -176,6 +176,35 @@ describe("FallbackRouter", () => {
     expect(seen).toHaveLength(2);
   });
 
+  it("preserves onUsage subscriptions across a stop/start cycle (#38)", async () => {
+    const primary = new StubEngine("primary");
+    const fallback = new StubEngine("fallback");
+    const router = new FallbackRouter({ primary, fallback });
+    const seen: Usage[] = [];
+    router.onUsage((u) => seen.push(u)); // wired once, like accountant.attach(router)
+
+    await router.start();
+    await router.stop();
+    await router.start(); // a new captioning session
+
+    primary.emitUsage(); // usage in the new session
+    expect(seen).toHaveLength(1); // still wired (pre-fix: stop() unsubscribed → 0)
+  });
+
+  it("the onUsage unsubscribe still detaches from both engines", async () => {
+    const primary = new StubEngine("primary");
+    const fallback = new StubEngine("fallback");
+    const router = new FallbackRouter({ primary, fallback });
+    const seen: Usage[] = [];
+    const off = router.onUsage((u) => seen.push(u));
+
+    primary.emitUsage();
+    off();
+    primary.emitUsage();
+    fallback.emitUsage();
+    expect(seen).toHaveLength(1); // only the event before unsubscribe
+  });
+
   it("reflects the active engine's health", async () => {
     const primary = new StubEngine("primary");
     const fallback = new StubEngine("fallback");

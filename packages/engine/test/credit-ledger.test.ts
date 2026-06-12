@@ -1,7 +1,7 @@
 import { describe, it, expect } from "vitest";
 
 import { CreditAccountant, periodKeyFor } from "../src/credit-ledger";
-import type { CreditConfig, CreditEvent, LedgerFs } from "../src/credit-ledger";
+import type { CreditConfig, CreditEvent, GaugeState, LedgerFs } from "../src/credit-ledger";
 import type { Usage } from "../src/types";
 
 const ZERO_USAGE: Usage = {
@@ -260,6 +260,37 @@ describe("CreditAccountant — persistence", () => {
     // A reload sees the last durable value (4), not the crashed 6.
     const reloaded = new CreditAccountant({ fs, ledgerPath: PATH, poolUsd: 20, now });
     expect(reloaded.gauge().spentUsd).toBeCloseTo(4, 6);
+  });
+});
+
+describe("CreditAccountant — rollover read-path resilience (#37)", () => {
+  it("gauge() does not throw on a disk error during rollover-on-read", () => {
+    const fs = new FakeLedgerFs();
+    let now = Date.UTC(2026, 5, 10); // 2026-06
+    const acc = new CreditAccountant({ fs, ledgerPath: PATH, poolUsd: 20, now: () => now });
+    const events: CreditEvent[] = [];
+    acc.onEvent((e) => events.push(e));
+    acc.recordCost(5);
+
+    now = Date.UTC(2026, 6, 10); // advance to 2026-07 → next read rolls over
+    fs.failNextWrite = true; // disk error on the rollover persist
+    let gauge: GaugeState | undefined;
+    expect(() => {
+      gauge = acc.gauge();
+    }).not.toThrow(); // pre-fix this threw (rollover commit failed in a read)
+    expect(gauge?.periodKey).toBe("2026-07");
+    expect(gauge?.spentUsd).toBe(0); // rolled over in memory despite the failed persist
+    expect(events.some((e) => e.type === "ledger-error")).toBe(true);
+  });
+
+  it("isBelowThreshold() survives a rollover disk error (so startOnFallback can't fail session start)", () => {
+    const fs = new FakeLedgerFs();
+    let now = Date.UTC(2026, 5, 10);
+    const acc = new CreditAccountant({ fs, ledgerPath: PATH, poolUsd: 20, now: () => now });
+    acc.recordCost(5);
+    now = Date.UTC(2026, 6, 10);
+    fs.failNextRename = true;
+    expect(() => acc.isBelowThreshold()).not.toThrow();
   });
 });
 
