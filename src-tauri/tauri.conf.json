@@ -4,7 +4,7 @@
   "version": "0.1.0",
   "identifier": "app.livecap.desktop",
   "build": {
-    "beforeDevCommand": "pnpm dev",
+    "beforeDevCommand": "pnpm build:host && pnpm dev",
     "devUrl": "http://localhost:1420",
     "beforeBuildCommand": "pnpm build",
     "frontendDist": "../dist"
@@ -36,6 +36,9 @@
   "bundle": {
     "active": true,
     "targets": ["dmg", "app"],
+    "resources": {
+      "../dist-host/main.mjs": "dist-host/main.mjs"
+    },
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",

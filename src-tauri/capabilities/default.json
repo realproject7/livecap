@@ -3,5 +3,5 @@
   "identifier": "default",
   "description": "Baseline capability for the LiveCap overlay window",
   "windows": ["main"],
-  "permissions": ["core:default"]
+  "permissions": ["core:default", "dialog:default", "clipboard-manager:allow-write-text"]
 }

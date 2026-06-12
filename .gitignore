@@ -54,3 +54,6 @@ DerivedData/
 *.log
 .tmp/
 coverage/
+
+# --- session host bundle (built by `pnpm build:host`) ---
+dist-host/

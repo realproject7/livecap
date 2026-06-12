@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>NSMicrophoneUsageDescription</key>
+  <string>LiveCap transcribes your microphone on this Mac to caption what you say. Audio never leaves the device.</string>
+  <key>NSAudioCaptureUsageDescription</key>
+  <string>LiveCap captures system audio on this Mac to caption what you hear. Audio never leaves the device.</string>
+</dict>
+</plist>

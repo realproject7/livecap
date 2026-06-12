@@ -26,7 +26,9 @@ jobs:
           cache: pnpm
       - run: pnpm install --frozen-lockfile
       - run: pnpm lint
+      - run: pnpm typecheck
       - run: pnpm -r --filter './packages/*' typecheck
+      - run: pnpm test:app
       - run: pnpm -r --filter './packages/*' test
 
   app-macos:

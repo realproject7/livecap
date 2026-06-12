@@ -1,11 +1,13 @@
 //! LiveCap overlay shell (#10): three glass window modes, capture exclusion,
 //! edge snapping, click-through, global hotkeys, and the menu bar item.
 
+mod bridge;
 mod config;
 mod glyph;
 mod modes;
 mod overlay;
 mod platform;
+mod session;
 mod snap;
 mod tray;
 
@@ -19,7 +21,7 @@ use modes::Mode;
 use overlay::Shell;
 
 /// Feature availability flags the UI reads its disabled states from.
-/// #11 flips `captioning`, #12 flips `settings` — the shell UI then enables
+/// #11 flipped `captioning`; #12 flips `settings` — the shell UI then enables
 /// the corresponding controls without rewiring.
 #[derive(Debug, Clone, Copy, Serialize)]
 pub struct Capabilities {
@@ -28,7 +30,7 @@ pub struct Capabilities {
 }
 
 pub const CAPABILITIES: Capabilities = Capabilities {
-    captioning: false,
+    captioning: true,
     settings: false,
 };
 
@@ -122,8 +124,8 @@ fn hide_overlay(window: WebviewWindow) {
     let _ = window.hide();
 }
 
-/// Captioning live state (#11 calls this when the pipeline starts/stops);
-/// drives the amber menu bar glyph. Defaults to false.
+/// Captioning live state (the session lifecycle in session.rs drives this);
+/// drives the amber menu bar glyph. Kept as a command for manual diagnostics.
 #[tauri::command]
 fn set_live(app: AppHandle, live: bool) {
     tray::set_live(&app, live);
@@ -146,6 +148,8 @@ pub fn run() {
                 })
                 .build(),
         )
+        .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_clipboard_manager::init())
         .invoke_handler(tauri::generate_handler![
             capabilities,
             get_shell_state,
@@ -158,6 +162,13 @@ pub fn run() {
             end_drag,
             hide_overlay,
             set_live,
+            session::session_start,
+            session::session_stop,
+            session::session_pause,
+            session::session_resume,
+            session::session_phase,
+            session::host_request,
+            session::gauge_state,
         ])
         .setup(|app| {
             #[cfg(target_os = "macos")]
@@ -166,6 +177,9 @@ pub fn run() {
             let window = app
                 .get_webview_window(overlay::WINDOW_LABEL)
                 .expect("overlay window declared in tauri.conf.json");
+
+            app.manage(session::SessionState::default());
+            app.manage(session::GaugeCache::default());
 
             let config_path = app.path().app_data_dir()?.join(config::FILE_NAME);
             let cfg = config::load(&config_path);
@@ -180,6 +194,18 @@ pub fn run() {
             tray::create(app.handle(), initial_mode)?;
             overlay::apply_mode(app.handle(), initial_mode);
             window.show()?;
+
+            // Headless E2E support (also used by #13): start a captioning
+            // session at launch when LIVECAP_AUTOSTART=1 — same code path as
+            // the tray/chrome start, just triggered without UI.
+            if std::env::var("LIVECAP_AUTOSTART").as_deref() == Ok("1") {
+                let handle = app.handle().clone();
+                tauri::async_runtime::spawn(async move {
+                    if let Err(e) = session::start(handle).await {
+                        eprintln!("autostart session failed: {e}");
+                    }
+                });
+            }
 
             for (name, shortcut) in [("Alt+Space", shortcut_toggle()), ("Alt+Shift+Space", shortcut_cycle())]
             {

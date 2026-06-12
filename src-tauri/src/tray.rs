@@ -17,6 +17,7 @@ const TRAY_ID: &str = "livecap-tray";
 struct TrayHandles {
     tray: TrayIcon,
     mode_items: Vec<(Mode, CheckMenuItem<Wry>)>,
+    captioning: MenuItem<Wry>,
 }
 
 fn icon(live: bool) -> Image<'static> {
@@ -48,8 +49,8 @@ pub fn create(app: &AppHandle, initial_mode: Mode) -> tauri::Result<()> {
         .collect();
     let mode_menu = Submenu::with_id_and_items(app, "mode", "Mode", true, &mode_refs)?;
 
-    // Real capability gating: these enable when #11 (captioning) and #12
-    // (settings) flip the flags — no UI rewiring needed.
+    // Real capability gating: captioning is live (#11); settings enables
+    // when #12 flips its flag — no UI rewiring needed.
     let captioning = MenuItem::with_id(
         app,
         "captioning",
@@ -82,6 +83,14 @@ pub fn create(app: &AppHandle, initial_mode: Mode) -> tauri::Result<()> {
         .show_menu_on_left_click(true)
         .on_menu_event(|app, event| match event.id().as_ref() {
             "toggle" => overlay::toggle_visibility(app),
+            "captioning" => {
+                // Session start/stop (#11) — async: starting loads the
+                // whisper model and spawns the session host.
+                let app = app.clone();
+                tauri::async_runtime::spawn(async move {
+                    crate::session::toggle(app).await;
+                });
+            }
             "quit" => {
                 app.state::<Shell>().save_now();
                 app.exit(0);
@@ -94,7 +103,11 @@ pub fn create(app: &AppHandle, initial_mode: Mode) -> tauri::Result<()> {
         })
         .build(app)?;
 
-    app.manage(TrayHandles { tray, mode_items });
+    app.manage(TrayHandles {
+        tray,
+        mode_items,
+        captioning,
+    });
     Ok(())
 }
 
@@ -108,7 +121,7 @@ pub fn sync_mode(app: &AppHandle, mode: Mode) {
 }
 
 /// Live state: amber glyph while captioning (template glyph otherwise).
-/// Called by the captioning pipeline (#11); defaults to false.
+/// Driven by the session lifecycle (#11, session.rs).
 pub fn set_live(app: &AppHandle, live: bool) {
     let shell = app.state::<Shell>();
     shell.live.store(live, Ordering::Relaxed);
@@ -117,6 +130,9 @@ pub fn set_live(app: &AppHandle, live: bool) {
         // template image (macOS would flatten it to monochrome).
         let _ = handles.tray.set_icon_as_template(!live);
         let _ = handles.tray.set_icon(Some(icon(live)));
+        let _ = handles
+            .captioning
+            .set_text(if live { "Stop Captioning" } else { "Start Captioning" });
     }
     if let Some(window) = overlay::overlay_window(app) {
         let _ = window.emit(EVENT_MODE, overlay::shell_state(&shell));
