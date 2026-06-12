@@ -1,0 +1,7 @@
+/* LiveCap Glass tokens — canonical values in design/system/tokens.css */
+html,
+body {
+  margin: 0;
+  background: transparent;
+  font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI", sans-serif;
+}
