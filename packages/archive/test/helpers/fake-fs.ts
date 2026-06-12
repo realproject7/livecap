@@ -90,7 +90,11 @@ export class FakeFs implements ArchiveFs {
     return names;
   }
 
+  /** Paths whose stat should throw ENOENT (simulate a file vanishing mid-sweep). */
+  readonly enoentOnStat = new Set<string>();
+
   mtimeMs(path: string): number {
+    if (this.enoentOnStat.has(path)) throw new Error(`ENOENT: ${path}`);
     return this.mtimes.get(path) ?? 0;
   }
 

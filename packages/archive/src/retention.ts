@@ -38,9 +38,15 @@ export function sweepOldArchives(options: RetentionOptions): string[] {
     // otherwise accumulate one per crash in the user's folder.
     if (!name.endsWith(".md") && !name.endsWith(".md.tmp")) continue;
     const path = fs.join(folder, name);
-    if (fs.mtimeMs(path) < cutoff) {
-      fs.unlink(path);
-      removed.push(name);
+    try {
+      if (fs.mtimeMs(path) < cutoff) {
+        fs.unlink(path);
+        removed.push(name);
+      }
+    } catch {
+      // The file vanished between readdir and stat/unlink (user cleaning the
+      // folder, a sync tool, a concurrent sweep). It's already "swept" — skip
+      // and continue so a benign race never crashes app start (#33).
     }
   }
   return removed;

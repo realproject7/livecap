@@ -53,4 +53,22 @@ describe("sweepOldArchives", () => {
     const fs = new FakeFs();
     expect(sweepOldArchives({ fs, folder: "/missing", maxAgeDays: 30, nowMs: NOW })).toEqual([]);
   });
+
+  it("continues the sweep when a file vanishes mid-sweep — no crash on ENOENT (#33)", () => {
+    const fs = seed();
+    // An old .md that would be swept, but its stat throws ENOENT (a sync tool /
+    // the user deleted it between readdir and stat).
+    const vanished = fs.join(FOLDER, "vanished.md");
+    fs.writeFile(vanished, "x");
+    fs.setMtime(vanished, NOW - 200 * DAY);
+    fs.enoentOnStat.add(vanished);
+
+    let removed: string[] = [];
+    expect(() => {
+      removed = sweepOldArchives({ fs, folder: FOLDER, maxAgeDays: 90, nowMs: NOW });
+    }).not.toThrow();
+    // The other old archive is still swept; the vanished one is skipped.
+    expect(removed).toContain("old.md");
+    expect(removed).not.toContain("vanished.md");
+  });
 });

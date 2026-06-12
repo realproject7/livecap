@@ -3,8 +3,30 @@
 // fully untrusted. The output here is a SINGLE filename segment — never a path:
 // it can contain no separators, no traversal, no control chars.
 
-/** Max length of the title portion of a filename (chars, before ".md"). */
-export const MAX_TITLE_LENGTH = 80;
+/**
+ * Max UTF-8 BYTE budget for the title portion of a filename (#32). Filesystems
+ * cap filenames at 255 bytes, not characters — an 80-char CJK title is 240
+ * bytes and overflows once the `<prefix> — ….md` wrapper is added. 180 bytes
+ * leaves headroom for the prefix, the `.md` suffix, and a collision suffix.
+ */
+export const MAX_TITLE_BYTES = 180;
+
+const UTF8 = new TextEncoder();
+
+/** Truncate to at most `maxBytes` of UTF-8, never splitting a code point. */
+function truncateToByteBudget(text: string, maxBytes: number): string {
+  let bytes = 0;
+  let out = "";
+  // for…of iterates by Unicode code point, so a surrogate pair (emoji) is never
+  // split into a lone surrogate.
+  for (const ch of text) {
+    const chBytes = UTF8.encode(ch).length;
+    if (bytes + chBytes > maxBytes) break;
+    bytes += chBytes;
+    out += ch;
+  }
+  return out;
+}
 
 /** Fallback when a title sanitizes to nothing. */
 export const FALLBACK_TITLE = "Untitled session";
@@ -41,9 +63,9 @@ export function sanitizeTitle(raw: string): string {
   // Strip leading/trailing dots and spaces so no result is a dotfile or a
   // "." / ".." segment (handles interleaved runs like ".. .. x").
   title = title.replace(/^[.\s]+/, "").replace(/[.\s]+$/, "");
-  if (title.length > MAX_TITLE_LENGTH) {
-    title = title.slice(0, MAX_TITLE_LENGTH).trim();
-  }
+  // Truncate by UTF-8 bytes (not chars) at a code-point boundary (#32), then
+  // re-trim any trailing space the cut may have exposed.
+  title = truncateToByteBudget(title, MAX_TITLE_BYTES).replace(/[.\s]+$/, "");
   return title === "" ? FALLBACK_TITLE : title;
 }
 

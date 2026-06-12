@@ -6,7 +6,7 @@ export { SessionArchiveWriter } from "./writer";
 export type { SessionArchiveWriterOptions } from "./writer";
 export { sweepOldArchives } from "./retention";
 export type { RetentionOptions } from "./retention";
-export { sanitizeTitle, archiveFileName, MAX_TITLE_LENGTH, FALLBACK_TITLE } from "./sanitize";
+export { sanitizeTitle, archiveFileName, MAX_TITLE_BYTES, FALLBACK_TITLE } from "./sanitize";
 export { nodeArchiveFs } from "./fs";
 export type { ArchiveFs } from "./fs";
 export { renderDocument, renderEntryBody, renderEntryAppend, renderFrontMatter } from "./render";
