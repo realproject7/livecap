@@ -103,6 +103,28 @@ describe("ensureModel", () => {
     expect(await fs.sha256(path)).toBe(GOOD_SHA);
   });
 
+  it("renames a verified complete partial instead of bricking on a 416", async () => {
+    // Crash after the last byte but before the rename: <file>.part is full-size.
+    const fs = new MemFs();
+    fs.files.set("/data/models/model.gguf.part", GOOD);
+    const fetch: RangeFetcher = async () => {
+      throw new Error("must not fetch a complete, valid partial");
+    };
+    const path = await ensureModel({ fs, fetch, dataDir: DATA_DIR, artifact: ARTIFACT });
+    expect(path).toBe("/data/models/model.gguf");
+    expect(await fs.sha256(path)).toBe(GOOD_SHA);
+    expect(fs.exists("/data/models/model.gguf.part")).toBe(false);
+  });
+
+  it("restarts from zero when a full-size partial is corrupt", async () => {
+    const fs = new MemFs();
+    fs.files.set("/data/models/model.gguf.part", new Uint8Array(GOOD.length)); // right size, wrong bytes
+    const fetch = fetcherFor(GOOD);
+    const path = await ensureModel({ fs, fetch, dataDir: DATA_DIR, artifact: ARTIFACT });
+    expect(fetch.lastStart).toBe(0);
+    expect(await fs.sha256(path)).toBe(GOOD_SHA);
+  });
+
   it("skips the download when the file is already present and valid", async () => {
     const fs = new MemFs();
     fs.files.set("/data/models/model.gguf", GOOD);

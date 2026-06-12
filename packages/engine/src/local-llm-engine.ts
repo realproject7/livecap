@@ -36,6 +36,8 @@ export interface LocalLlmEngineConfig {
   extraArgs?: string[];
   /** Health-poll timeout in ms before start() gives up. Default 60s. */
   startupTimeoutMs?: number;
+  /** Per-request timeout in ms; a hung server aborts so #7 can fall back. Default 30s. */
+  requestTimeoutMs?: number;
   targetLanguage?: string;
   glossary?: Record<string, string>;
   contextPairs?: number;
@@ -47,6 +49,8 @@ const MAX_STDERR_TAIL = 2000;
 const DEFAULT_HOST = "127.0.0.1";
 const DEFAULT_CTX = 4096;
 const DEFAULT_STARTUP_TIMEOUT = 60_000;
+const DEFAULT_REQUEST_TIMEOUT = 30_000;
+const STOP_GRACE_MS = 2000;
 
 interface ChatResponse {
   choices?: { message?: { content?: string } }[];
@@ -107,6 +111,13 @@ export class LocalLlmEngine implements TranslationEngine {
       String(this.config.port),
       "--ctx-size",
       String(this.config.ctxSize ?? DEFAULT_CTX),
+      // The pinned Qwen3-4B GGUF is the hybrid-THINKING model (no official
+      // Instruct GGUF exists). Disable reasoning so it does not emit a
+      // multi-second <think> block before each translation. --jinja makes the
+      // server honor chat_template_kwargs (the per-request belt-and-suspenders).
+      "--jinja",
+      "--reasoning-budget",
+      "0",
       ...(this.config.extraArgs ?? []),
     ];
 
@@ -157,7 +168,16 @@ export class LocalLlmEngine implements TranslationEngine {
     if (!child) return;
     this.child = null;
     this.statusValue = { status: "stopped" };
-    child.kill("SIGTERM");
+    // Await exit so the port/socket is released before we return — a quick
+    // stop()→start() on the same port otherwise races the dying server.
+    await new Promise<void>((resolve) => {
+      const forceKill = setTimeout(() => child.kill("SIGKILL"), STOP_GRACE_MS);
+      child.once("exit", () => {
+        clearTimeout(forceKill);
+        resolve();
+      });
+      child.kill("SIGTERM");
+    });
   }
 
   /** Force-terminate the child and clear the handle (failed-startup cleanup). */
@@ -182,6 +202,9 @@ export class LocalLlmEngine implements TranslationEngine {
   /** One chat-completions round-trip against the local server. */
   private async chat(userMessage: string): Promise<{ content: string }> {
     if (!this.child) throw new Error("engine not started");
+    // Abort a hung (not dead) server so translate()/summarize() reject and #7's
+    // auto-fallback gets a failure signal instead of stalling forever.
+    const signal = AbortSignal.timeout(this.config.requestTimeoutMs ?? DEFAULT_REQUEST_TIMEOUT);
     const res = await this.fetchImpl(`${this.baseUrl}/v1/chat/completions`, {
       method: "POST",
       headers: { "content-type": "application/json" },
@@ -192,7 +215,10 @@ export class LocalLlmEngine implements TranslationEngine {
         ],
         temperature: 0,
         stream: false,
+        // Disable Qwen3 hybrid thinking per-request (requires --jinja server-side).
+        chat_template_kwargs: { enable_thinking: false },
       }),
+      signal,
     });
     if (!res.ok) throw new Error(`local engine HTTP ${res.status}`);
     const data = (await res.json()) as ChatResponse;

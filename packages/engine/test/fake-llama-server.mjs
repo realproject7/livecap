@@ -26,8 +26,15 @@ const healthDelayMs = Number(process.env.LLAMA_FAKE_HEALTH_DELAY_MS ?? "0");
 if (stderrNoise) process.stderr.write(stderrNoise + "\n");
 
 const startedAt = Date.now();
+let lastChatRequest = null;
 
 const server = http.createServer((req, res) => {
+  if (req.method === "GET" && req.url === "/last-request") {
+    res.writeHead(200, { "content-type": "application/json" });
+    res.end(JSON.stringify(lastChatRequest));
+    return;
+  }
+
   if (req.method === "GET" && req.url === "/health") {
     if (Date.now() - startedAt < healthDelayMs) {
       res.writeHead(503, { "content-type": "application/json" });
@@ -43,6 +50,11 @@ const server = http.createServer((req, res) => {
     let body = "";
     req.on("data", (chunk) => (body += chunk));
     req.on("end", () => {
+      try {
+        lastChatRequest = JSON.parse(body);
+      } catch {
+        lastChatRequest = { parseError: true };
+      }
       res.writeHead(200, { "content-type": "application/json" });
       res.end(
         JSON.stringify({

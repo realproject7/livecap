@@ -59,6 +59,21 @@ describe("LocalLlmEngine — real spawn + HTTP (fake llama-server)", () => {
     expect(engine.health().status).toBe("stopped");
   });
 
+  it("disables Qwen3 thinking in the chat request", async () => {
+    const engine = await makeEngine();
+    await engine.start();
+    try {
+      const port = (engine as unknown as { config: { port: number } }).config.port;
+      const out = [];
+      for await (const t of engine.translate(batch, { pairs: [] })) out.push(t);
+      const res = await fetch(`http://127.0.0.1:${port}/last-request`);
+      const sent = (await res.json()) as { chat_template_kwargs?: { enable_thinking?: boolean } };
+      expect(sent.chat_template_kwargs?.enable_thinking).toBe(false);
+    } finally {
+      await engine.stop();
+    }
+  });
+
   it("waits through a slow /health before reporting ready", async () => {
     const engine = await makeEngine({
       env: { ...process.env, LLAMA_FAKE_HEALTH_DELAY_MS: "300" },

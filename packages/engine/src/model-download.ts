@@ -81,8 +81,14 @@ export async function ensureModel(options: EnsureModelOptions): Promise<string> 
 
   // Resume from a prior partial file if present.
   let startByte = fs.exists(partPath) ? fs.size(partPath) : 0;
-  if (startByte > artifact.sizeBytes) {
-    // Partial is larger than the target (stale/corrupt) — start over.
+  if (startByte >= artifact.sizeBytes) {
+    // A full-size (or larger) partial: a crash after the last byte but before
+    // the rename. Verify it instead of sending Range:bytes=<size>- (which the
+    // server answers 416 → would brick every retry). Rename if valid, else reset.
+    if (startByte === artifact.sizeBytes && (await fs.sha256(partPath)) === artifact.sha256) {
+      fs.rename(partPath, finalPath);
+      return finalPath;
+    }
     fs.unlink(partPath);
     startByte = 0;
   }

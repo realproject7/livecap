@@ -27,14 +27,29 @@ function stripLabelsAndQuotes(line: string): string {
   return line.replace(INLINE_LABEL, "").replace(LEADING_QUOTES, "").replace(TRAILING_QUOTES, "").trim();
 }
 
+/** Remove Qwen3 hybrid-thinking reasoning, defensively (belt to the request flag). */
+function stripThinking(text: string): string {
+  // Whole <think>…</think> blocks.
+  let out = text.replace(/<think>[\s\S]*?<\/think>/gi, "");
+  // A dangling close (server emitted reasoning then a stray </think>): keep what follows.
+  if (/<\/think>/i.test(out)) out = out.replace(/^[\s\S]*<\/think>/i, "");
+  // An unclosed <think> (truncated): everything from it on is reasoning, not answer.
+  out = out.replace(/<think>[\s\S]*$/i, "");
+  return out.trim();
+}
+
 /**
  * Reduce raw model output to translation-only text: at most `expectedLines`
- * cleaned lines (one per input sentence), with code fences, labels, wrapping
- * quotes, and commentary removed. Returns "" when nothing translatable remains
- * (empty output is allowed by the prompt contract).
+ * cleaned lines (one per input sentence), with thinking blocks, code fences,
+ * labels, wrapping quotes, and commentary removed. Returns "" when nothing
+ * translatable remains (empty output is allowed by the prompt contract).
+ *
+ * NOTE (MVP): empty lines are dropped, so a per-sentence empty translation does
+ * not hold its slot — line↔sentence positional alignment within a batch is not
+ * preserved here. Tracked for #11 if positional empties become needed.
  */
 export function stripNonTranslation(raw: string, expectedLines = 1): string {
-  let text = (raw ?? "").trim();
+  let text = stripThinking((raw ?? "").trim());
 
   // Unwrap a single surrounding code fence.
   const fence = text.match(/^```[^\n]*\n([\s\S]*?)\n?```$/);

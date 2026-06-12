@@ -37,4 +37,17 @@ describe("stripNonTranslation — small-model commentary guard (#6)", () => {
   it("passes through clean output unchanged", () => {
     expect(stripNonTranslation("안녕하세요, 잘 지내세요?", 1)).toBe("안녕하세요, 잘 지내세요?");
   });
+
+  it("strips a Qwen3 <think> reasoning block before the answer", () => {
+    expect(stripNonTranslation("<think>Let me translate this.</think>안녕하세요", 1)).toBe("안녕하세요");
+    expect(stripNonTranslation("<think>\nreasoning\nmore\n</think>\n안녕하세요", 1)).toBe("안녕하세요");
+  });
+
+  it("keeps only what follows a dangling </think>", () => {
+    expect(stripNonTranslation("internal reasoning</think>안녕하세요", 1)).toBe("안녕하세요");
+  });
+
+  it("yields empty when output is only unterminated thinking", () => {
+    expect(stripNonTranslation("<think>still reasoning, never answered", 1)).toBe("");
+  });
 });
