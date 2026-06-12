@@ -94,6 +94,23 @@ describe("ClaudeCliEngine — real spawn/stdio (fake-cli replay)", () => {
     }
   });
 
+  it("does not put the model's verbatim result text in EngineTurnError.message (#23)", async () => {
+    // The error fixture's result.result is "There's an issue with the selected
+    // model …" — content that must NOT travel in the thrown error message.
+    const engine = makeEngine("error-invalid-model.jsonl", false);
+    await engine.start();
+    try {
+      await drain(engine);
+      throw new Error("expected EngineTurnError");
+    } catch (err) {
+      const message = (err as Error).message;
+      expect(message).not.toContain("issue with the selected model");
+      expect(message).toBe("translation turn failed (api_error_status=404)");
+    } finally {
+      await engine.stop();
+    }
+  });
+
   it("marks complete() requests with [TASK] so they override the translation prompt", async () => {
     // Echo mode: the fake CLI replies with exactly the message it received, so
     // we can assert what the adapter actually sent over stdin.
@@ -148,12 +165,14 @@ describe("ClaudeCliEngine — real spawn/stdio (fake-cli replay)", () => {
     }
   });
 
-  it("folds a stderr tail into the exit error detail on an unexpected exit", async () => {
-    // No fixture path → fake-cli writes to stderr and exits(1) right after spawn.
+  it("redacts stderr content from the exit error detail — byte count + hash only (#23)", async () => {
+    // No fixture path → fake-cli writes to stderr and exits(1). Also inject a
+    // recognizable "caption" secret into stderr; it must NOT reach health.detail.
+    const SECRET = "CAPTION-SECRET-deal-with-AcmeCorp-Q3";
     const engine = new ClaudeCliEngine({
       bin: FAKE_CLI,
       cwd: tmpdir(),
-      env: { ...process.env, LIVECAP_FAKE_FIXTURE: undefined },
+      env: { ...process.env, LIVECAP_FAKE_FIXTURE: undefined, LIVECAP_FAKE_STDERR: SECRET },
       includePartialMessages: false,
     });
     await engine.start();
@@ -164,7 +183,9 @@ describe("ClaudeCliEngine — real spawn/stdio (fake-cli replay)", () => {
     }
     const health = engine.health();
     expect(health.status).toBe("error");
-    expect(health.detail).toContain("LIVECAP_FAKE_FIXTURE not set");
+    expect(health.detail).not.toContain(SECRET); // no caption content
+    expect(health.detail).not.toContain("LIVECAP_FAKE_FIXTURE not set"); // no raw stderr line
+    expect(health.detail).toMatch(/stderr \d+ bytes \(tail sha256:[0-9a-f]{8}\)/);
     await engine.stop();
   });
 });

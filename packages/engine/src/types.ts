@@ -70,7 +70,11 @@ export type EngineStatus = "stopped" | "starting" | "ready" | "error";
 
 export interface EngineHealth {
   status: EngineStatus;
-  /** Human-readable detail (e.g. the error message when status is "error"). */
+  /**
+   * Human-readable detail when status is "error". Carries only non-content
+   * metadata (exit code/signal, a stderr byte count + hash) — never raw stderr
+   * or model output — so it is safe to log/surface (#23, SECURITY.md).
+   */
   detail?: string;
 }
 

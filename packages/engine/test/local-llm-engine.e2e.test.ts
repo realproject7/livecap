@@ -122,4 +122,17 @@ describe("LocalLlmEngine — real spawn + HTTP (fake llama-server)", () => {
     await expect(engine.start()).rejects.toThrow();
     await engine.stop();
   });
+
+  it("redacts server stderr content from the health timeout detail (#23)", async () => {
+    const SECRET = "CAPTION-SECRET-merger-terms";
+    const engine = await makeEngine({
+      env: { ...process.env, LLAMA_FAKE_HEALTH_DELAY_MS: "5000", LLAMA_FAKE_STDERR: SECRET },
+      startupTimeoutMs: 600,
+    });
+    await expect(engine.start()).rejects.toThrow(/health timeout/);
+    const detail = engine.health().detail ?? "";
+    expect(detail).not.toContain(SECRET);
+    expect(detail).toMatch(/stderr \d+ bytes \(tail sha256:[0-9a-f]{8}\)/);
+    await engine.stop();
+  });
 });

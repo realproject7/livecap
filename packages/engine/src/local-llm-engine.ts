@@ -7,6 +7,7 @@
 import { spawn } from "node:child_process";
 import type { ChildProcessWithoutNullStreams } from "node:child_process";
 
+import { stderrDigest } from "./internal/redact";
 import { buildSummaryMessage, buildSystemPrompt, buildTranslateMessage } from "./prompt";
 import { stripNonTranslation, stripThinking } from "./translation-guard";
 import type {
@@ -68,6 +69,7 @@ export class LocalLlmEngine implements TranslationEngine {
 
   private child: ChildProcessWithoutNullStreams | null = null;
   private stderrTail = "";
+  private stderrBytes = 0;
   private statusValue: EngineHealth = { status: "stopped" };
   private latestUsage: Usage = {
     cumulativeCostUsd: 0,
@@ -144,10 +146,11 @@ export class LocalLlmEngine implements TranslationEngine {
       child.once("error", onError);
     });
 
-    // Drain stderr (an unread pipe fills and wedges the server); keep a capped
-    // tail for exit diagnostics only, never logged.
+    // Drain stderr (an unread pipe fills and wedges the server). Only a byte
+    // count + a hash of the capped tail are surfaced (#23) — never the raw text.
     child.stderr.setEncoding("utf8");
     child.stderr.on("data", (chunk: string) => {
+      this.stderrBytes += chunk.length;
       this.stderrTail = (this.stderrTail + chunk).slice(-MAX_STDERR_TAIL);
     });
     child.stdout.resume();
@@ -246,7 +249,7 @@ export class LocalLlmEngine implements TranslationEngine {
         // server not up yet
       }
       if (Date.now() > deadline) {
-        const detail = `local server health timeout${this.stderrTail ? `; stderr tail: ${this.stderrTail.trim()}` : ""}`;
+        const detail = `local server health timeout; ${stderrDigest(this.stderrBytes, this.stderrTail)}`;
         this.statusValue = { status: "error", detail };
         throw new Error(detail);
       }
@@ -260,9 +263,7 @@ export class LocalLlmEngine implements TranslationEngine {
     // deliberate stop() or an already-recorded startup error (e.g. the health
     // timeout that just killed this child) with a less useful exit message.
     if (this.statusValue.status === "starting" || this.statusValue.status === "ready") {
-      let detail = `llama-server exited (code=${code ?? "null"}, signal=${signal ?? "null"})`;
-      const tail = this.stderrTail.trim();
-      if (tail !== "") detail += `; stderr tail: ${tail}`;
+      const detail = `llama-server exited (code=${code ?? "null"}, signal=${signal ?? "null"}); ${stderrDigest(this.stderrBytes, this.stderrTail)}`;
       this.statusValue = { status: "error", detail };
     }
   }
