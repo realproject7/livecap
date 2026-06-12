@@ -14,6 +14,7 @@ import { buildClaudeArgs } from "./args";
 import { sanitizeChildEnv } from "./env";
 import { AsyncChannel } from "./internal/channel";
 import { Mutex } from "./internal/mutex";
+import { stderrDigest } from "./internal/redact";
 import {
   asTaskMessage,
   buildSummaryMessage,
@@ -58,7 +59,7 @@ export interface ClaudeCliEngineConfig {
   resume?: string;
 }
 
-/** Cap on the retained stderr tail folded into exit errors (chars). */
+/** Cap on the retained stderr tail used only to derive a non-content hash (chars). */
 const MAX_STDERR_TAIL = 2000;
 
 /** Thrown when a turn ends with an error result (e.g. invalid model → 404). */
@@ -72,6 +73,12 @@ export class EngineTurnError extends Error {
   }
 }
 
+/** Content-free turn-failure message — never includes the model's result text,
+ *  which can echo prompt/caption content (#23). */
+function turnErrorMessage(kind: string, apiErrorStatus: number | null): string {
+  return apiErrorStatus != null ? `${kind} turn failed (api_error_status=${apiErrorStatus})` : `${kind} turn failed`;
+}
+
 export class ClaudeCliEngine implements TranslationEngine {
   private readonly config: ClaudeCliEngineConfig;
   private readonly sessionId: string;
@@ -82,8 +89,10 @@ export class ClaudeCliEngine implements TranslationEngine {
 
   private child: ChildProcessWithoutNullStreams | null = null;
   private stdoutBuffer = "";
-  /** Last MAX_STDERR_TAIL chars of child stderr, surfaced in exit errors only. */
+  /** Capped tail of child stderr — used ONLY to derive a non-content hash. */
   private stderrTail = "";
+  /** Total bytes of child stderr seen (surfaced as a count, never the text). */
+  private stderrBytes = 0;
   private currentTurn: AsyncChannel<ParsedEvent> | null = null;
   private statusValue: EngineHealth = { status: "stopped" };
   private cumulativeCostUsd = 0;
@@ -151,10 +160,12 @@ export class ClaudeCliEngine implements TranslationEngine {
     child.stdout.setEncoding("utf8");
     child.stdout.on("data", (chunk: string) => this.onStdout(chunk));
     // Drain stderr: an unread stderr pipe fills its ~64KB kernel buffer and
-    // wedges the CLI mid-write during a long session. We keep only a capped
-    // tail (surfaced in exit errors, never logged — it may echo content).
+    // wedges the CLI mid-write during a long session. Only a byte count + a hash
+    // of the capped tail are ever surfaced (#23) — never the raw text, which can
+    // echo prompt/caption content.
     child.stderr.setEncoding("utf8");
     child.stderr.on("data", (chunk: string) => {
+      this.stderrBytes += chunk.length;
       this.stderrTail = (this.stderrTail + chunk).slice(-MAX_STDERR_TAIL);
     });
     child.once("exit", (code, signal) => this.onExit(code, signal));
@@ -196,7 +207,7 @@ export class ClaudeCliEngine implements TranslationEngine {
       } else if (event.kind === "usage") {
         this.recordUsage(event);
       } else if (event.kind === "turn_end" && event.isError) {
-        throw new EngineTurnError(event.message ?? "translation turn failed", event.apiErrorStatus);
+        throw new EngineTurnError(turnErrorMessage("translation", event.apiErrorStatus), event.apiErrorStatus);
       }
     }
     // Final snapshot — emitted even when the model output nothing (allowed).
@@ -231,7 +242,7 @@ export class ClaudeCliEngine implements TranslationEngine {
       } else if (event.kind === "usage") {
         this.recordUsage(event);
       } else if (event.kind === "turn_end" && event.isError) {
-        throw new EngineTurnError(event.message ?? `${label} turn failed`, event.apiErrorStatus);
+        throw new EngineTurnError(turnErrorMessage(label, event.apiErrorStatus), event.apiErrorStatus);
       }
     }
     return text.trim();
@@ -274,9 +285,7 @@ export class ClaudeCliEngine implements TranslationEngine {
 
   private onExit(code: number | null, signal: string | null): void {
     this.child = null;
-    let detail = `cli exited (code=${code ?? "null"}, signal=${signal ?? "null"})`;
-    const tail = this.stderrTail.trim();
-    if (tail !== "") detail += `; stderr tail: ${tail}`;
+    const detail = `cli exited (code=${code ?? "null"}, signal=${signal ?? "null"}); ${stderrDigest(this.stderrBytes, this.stderrTail)}`;
     if (this.statusValue.status !== "stopped") {
       this.statusValue = { status: "error", detail };
     }
