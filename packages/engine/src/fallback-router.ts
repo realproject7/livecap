@@ -37,7 +37,6 @@ export class FallbackRouter implements TranslationEngine {
   private readonly fallback: TranslationEngine;
   private active: TranslationEngine;
   private usingFallback = false;
-  private readonly unsubscribers: (() => void)[] = [];
 
   private readonly startOnFallback?: () => boolean;
 
@@ -67,9 +66,10 @@ export class FallbackRouter implements TranslationEngine {
   }
 
   async stop(): Promise<void> {
-    // NOTE: this unsubscribes ALL onUsage wiring — a router reused after stop()
-    // must be re-wired (re-call onUsage / re-attach the accountant).
-    for (const off of this.unsubscribers.splice(0)) off();
+    // onUsage subscriptions are durable until the caller invokes the unsubscribe
+    // returned by onUsage() — NOT cleared here. Both engines keep their listeners
+    // across stop(), so accounting (e.g. accountant.attach(router) once) keeps
+    // working after a stop/start cycle (#38).
     // Stop both; the fallback may have been started on a switch.
     await Promise.all([this.primary.stop(), this.fallback.stop()]);
     // Reset routing so the NEXT session begins on the primary again — otherwise
@@ -106,15 +106,17 @@ export class FallbackRouter implements TranslationEngine {
     return this.active.complete(request);
   }
 
-  /** Subscribe to usage from BOTH engines, so accounting is continuous across a switch. */
+  /**
+   * Subscribe to usage from BOTH engines, so accounting is continuous across a
+   * switch AND across a stop/start cycle. The subscription is durable until the
+   * returned unsubscribe is called — `stop()` does not clear it (#38).
+   */
   onUsage(listener: (usage: Usage) => void): () => void {
     const offPrimary = this.primary.onUsage(listener);
     const offFallback = this.fallback.onUsage(listener);
-    const off = () => {
+    return () => {
       offPrimary();
       offFallback();
     };
-    this.unsubscribers.push(off);
-    return off;
   }
 }

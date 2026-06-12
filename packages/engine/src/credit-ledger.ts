@@ -199,8 +199,13 @@ export class CreditAccountant {
   private rolloverIfNeeded(): void {
     const key = periodKeyFor(this.config.now(), this.resetDay);
     if (key === this.data.periodKey) return;
-    this.commit({ version: 1, periodKey: key, spentUsd: 0, meteredMs: 0 });
+    // Swap the in-memory period FIRST so read paths (gauge/isBelowThreshold and
+    // the synchronous startOnFallback wiring) never throw on a disk error; the
+    // persist is best-effort. The new period is still correct in memory, and
+    // load() re-rolls a stale file to 0 on next start, so no double-charge (#37).
+    this.data = { version: 1, periodKey: key, spentUsd: 0, meteredMs: 0 };
     this.belowThreshold = false; // pool replenished — re-arm the latch
+    this.persistBestEffort(this.data);
   }
 
   private load(): LedgerData {
@@ -225,10 +230,23 @@ export class CreditAccountant {
 
   /** Atomically write `next`, then commit it in memory (write-before-commit). */
   private commit(next: LedgerData): void {
+    this.writeAtomic(next);
+    this.data = next;
+  }
+
+  /** Persist without throwing — a disk error surfaces as a `ledger-error` event. */
+  private persistBestEffort(next: LedgerData): void {
+    try {
+      this.writeAtomic(next);
+    } catch (error) {
+      this.emit({ type: "ledger-error", error });
+    }
+  }
+
+  private writeAtomic(next: LedgerData): void {
     const tmp = `${this.config.ledgerPath}.tmp`;
     this.config.fs.writeFile(tmp, JSON.stringify(next));
     this.config.fs.rename(tmp, this.config.ledgerPath);
-    this.data = next;
   }
 
   private emit(event: CreditEvent): void {
