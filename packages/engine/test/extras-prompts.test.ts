@@ -1,6 +1,7 @@
 import { describe, it, expect } from "vitest";
 
 import {
+  buildIncrementalSummaryBoardPrompt,
   buildQuickTranslatePrompt,
   buildReplyPrompt,
   buildSummaryBoardPrompt,
@@ -115,6 +116,48 @@ describe("buildSummaryBoardPrompt / buildQuickTranslatePrompt", () => {
     const { user } = buildSummaryBoardPrompt("transcript", "한국어");
     expect(user).toContain("keep the section headers");
     expect(user).toContain("English");
+  });
+});
+
+describe("buildIncrementalSummaryBoardPrompt (#55)", () => {
+  const previous = {
+    summary: ["budget under pressure"],
+    board: {
+      decisions: ["use stack rank"],
+      actionItems: ["Mike → apps list"],
+      openQuestions: ["which MAU?"],
+    },
+  };
+
+  it("feeds back the previous summary/board and ONLY the new delta — not the full transcript", () => {
+    const { system, user } = buildIncrementalSummaryBoardPrompt(previous, "Them: new line here", "English");
+    // The model is told to merge, not re-derive from scratch.
+    expect(system).toMatch(/merge/i);
+    // Prior state is present so the model can extend it.
+    expect(user).toContain("budget under pressure");
+    expect(user).toContain("use stack rank");
+    expect(user).toContain("Mike → apps list");
+    expect(user).toContain("which MAU?");
+    // Only the delta transcript rides along — the caller never re-sends history.
+    expect(user).toContain("Them: new line here");
+    expect(user).toContain("New transcript since the last update:");
+  });
+
+  it("emits the same section headers the full prompt does, so parseSummaryBoard handles both", () => {
+    const { user } = buildIncrementalSummaryBoardPrompt(previous, "delta", "한국어");
+    for (const header of ["SUMMARY", "DECISIONS", "ACTION ITEMS", "OPEN QUESTIONS"]) {
+      expect(user).toContain(header);
+    }
+    expect(user).toContain("keep the section headers");
+  });
+
+  it("renders an empty prior section as a placeholder rather than dropping the header", () => {
+    const { user } = buildIncrementalSummaryBoardPrompt(
+      { summary: [], board: { decisions: [], actionItems: [], openQuestions: [] } },
+      "first delta",
+      "English",
+    );
+    expect(user).toContain("(none)");
   });
 });
 

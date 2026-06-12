@@ -1,10 +1,15 @@
-// Summary cadence (issue #9): drive the 60s summary/board refresh, backing off
+// Summary cadence (issue #9): drive the summary/board refresh, backing off
 // when the transcript hasn't changed so an idle meeting doesn't keep paying for
 // identical summaries. Pure and clock-injected — no real timers — so the
 // scheduling logic tests deterministically.
+//
+// #55: the base interval is 120s (up from 60s). With incremental summarization
+// the per-call cost is bounded, but a longer base cadence still roughly halves
+// the call count over a long meeting — directly cutting the #13 cost — while the
+// existing idle backoff (up to 300s) keeps a quiet meeting from paying at all.
 
 export interface SummaryCadenceOptions {
-  /** Base interval between summaries (ms). Default 60_000. */
+  /** Base interval between summaries (ms). Default 120_000 (#55). */
   baseMs?: number;
   /** Cap on the backed-off interval (ms). Default 300_000. */
   maxMs?: number;
@@ -22,7 +27,7 @@ export class SummaryCadence {
   private intervalMs: number;
 
   constructor(options: SummaryCadenceOptions = {}) {
-    this.baseMs = options.baseMs ?? 60_000;
+    this.baseMs = options.baseMs ?? 120_000;
     this.maxMs = options.maxMs ?? 300_000;
     this.backoffFactor = options.backoffFactor ?? 2;
     this.intervalMs = this.baseMs;

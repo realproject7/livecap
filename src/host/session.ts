@@ -10,16 +10,18 @@ import { join } from "node:path";
 import {
   ClaudeCliEngine,
   CreditAccountant,
+  ExtrasBudget,
+  ExtrasBudgetExceededError,
   ExtrasPipeline,
   FallbackRouter,
   nodeLedgerFs,
   SummaryCadence,
 } from "@livecap/engine";
-import type { ReplyIntent, TranslationEngine, Usage } from "@livecap/engine";
+import type { GaugeState, ReplyIntent, TranslationEngine, Usage } from "@livecap/engine";
 import { nodeArchiveFs, SessionArchiveWriter, sweepOldArchives } from "@livecap/archive";
 import type { BoardData, CaptionEntry } from "@livecap/archive";
 
-import type { Channel, HostInbound, HostOutbound } from "../protocol.ts";
+import type { Channel, GaugeWire, HostInbound, HostOutbound } from "../protocol.ts";
 import { detectClaudeCli } from "./detect-cli.ts";
 import { LazyLocalEngine } from "./local-tier.ts";
 import { SILENCE_THRESHOLD_MS, SilenceWatchdog } from "./silence.ts";
@@ -68,6 +70,7 @@ export class HostSession {
   private router: FallbackRouter | null = null;
   private accountant: CreditAccountant | null = null;
   private extras: ExtrasPipeline | null = null;
+  private extrasBudget: ExtrasBudget | null = null;
   private runner: TranslationRunner | null = null;
   private writer: SessionArchiveWriter | null = null;
   private watchdog: SilenceWatchdog | null = null;
@@ -80,6 +83,11 @@ export class HostSession {
   private sessionCostUsd = 0;
   private startedAtMs = 0;
   private summaryRunning = false;
+  /** How many transcript lines are already folded into `lastSummary` — the
+   *  boundary for the incremental summary delta (#55). */
+  private summarizedLineCount = 0;
+  /** Latch so the "extras budget reached" notice is surfaced exactly once. */
+  private extrasBudgetNoticeSent = false;
   private lastSummary: { summary: string[]; board: BoardData } | null = null;
   private intervals: ReturnType<typeof setInterval>[] = [];
   private stopping = false;
@@ -179,7 +187,7 @@ export class HostSession {
     });
     accountant.onEvent((event) => {
       if (event.type === "gauge") {
-        this.emit({ type: "gauge", gauge: event.gauge });
+        this.emit({ type: "gauge", gauge: this.withExtrasBudget(event.gauge) });
       } else if (event.type === "engine-switch") {
         // §8.7 auto-switch toggle: when off, the gauge still updates but the
         // session stays on the CLI tier.
@@ -224,10 +232,15 @@ export class HostSession {
       this.writer = writer;
     }
 
+    // Per-session extras budget cap (#55): the recurring auto-summary stops
+    // calling the model once this is reached, so a long session can't run away
+    // with the monthly pool the way #13 observed.
+    this.extrasBudget = new ExtrasBudget({ capUsd: resolved.extrasBudgetUsd });
     this.extras = new ExtrasPipeline({
       engine,
       summaryLanguage: resolved.summaryLanguage,
       meetingLanguage: resolved.meetingLanguage,
+      budget: this.extrasBudget,
     });
 
     this.runner = new TranslationRunner({
@@ -252,8 +265,21 @@ export class HostSession {
     this.intervals.push(setInterval(() => void this.summaryTick(), SUMMARY_TICK_MS));
     this.intervals.push(setInterval(() => this.watchdog?.check(Date.now()), WATCHDOG_TICK_MS));
 
-    this.emit({ type: "gauge", gauge: accountant.gauge() });
+    this.emit({ type: "gauge", gauge: this.withExtrasBudget(accountant.gauge()) });
     this.emit({ type: "ready", engine: engineLabel });
+  }
+
+  /** Fold the per-session extras budget (#55) into a gauge snapshot before it
+   *  goes on the wire, so the cap + extras spend ride along with the gauge. */
+  private withExtrasBudget(gauge: GaugeState): GaugeWire {
+    if (!this.extrasBudget) return gauge;
+    const snapshot = this.extrasBudget.snapshot();
+    return { ...gauge, extrasSpentUsd: snapshot.spentUsd, extrasCapUsd: snapshot.capUsd };
+  }
+
+  private emitGauge(): void {
+    if (!this.accountant) return;
+    this.emit({ type: "gauge", gauge: this.withExtrasBudget(this.accountant.gauge()) });
   }
 
   private switchToLocal(): void {
@@ -334,6 +360,7 @@ export class HostSession {
     try {
       const result = await this.extras.quickTranslate(text);
       this.emit({ type: "quickTranslateResult", id, text: result.text });
+      this.emitGauge(); // extras spend changed → refresh the gauge
     } catch (error) {
       this.emit({ type: "extrasFailed", id, detail: errorDetail(error) });
     }
@@ -344,6 +371,7 @@ export class HostSession {
     try {
       const result = await this.extras.suggestReply(intent, this.transcriptLines.slice(-10));
       this.emit({ type: "replyResult", id, intent, text: result.text });
+      this.emitGauge(); // extras spend changed → refresh the gauge
     } catch (error) {
       this.emit({ type: "extrasFailed", id, detail: errorDetail(error) });
     }
@@ -351,21 +379,54 @@ export class HostSession {
 
   private async summaryTick(): Promise<void> {
     if (!this.extras || this.summaryRunning || this.stopping) return;
-    const transcript = this.transcriptLines.join("\n");
+    // Per-session cap reached (#55): stand the auto-summary loop down (surfacing
+    // it once) so we stop polling the model for the rest of the session.
+    if (this.extrasBudget && !this.extrasBudget.canSpend()) {
+      this.noteExtrasBudgetReached();
+      return;
+    }
     const now = Date.now();
-    if (!this.cadence.shouldRun(now, transcript)) return;
+    const lines = this.transcriptLines;
+    const lineCountAtRun = lines.length;
+    const fullTranscript = lines.join("\n");
+    // The cadence sees the FULL transcript so its unchanged-detection / idle
+    // backoff still works; only the engine payload is the incremental delta.
+    if (!this.cadence.shouldRun(now, fullTranscript)) return;
     this.summaryRunning = true;
     try {
-      const result = await this.extras.generateSummaryBoard(transcript);
-      this.cadence.markRun(now, transcript);
+      // Incremental after the first summary (#55): send only the new lines since
+      // the last summary plus the previous summary/board, not the whole growing
+      // transcript. The first run (no previous) summarizes in full.
+      const previous = this.lastSummary
+        ? { summary: this.lastSummary.summary, board: this.lastSummary.board }
+        : null;
+      const payload = previous
+        ? lines.slice(this.summarizedLineCount, lineCountAtRun).join("\n")
+        : fullTranscript;
+      const result = await this.extras.generateSummaryBoard(payload, { previous });
+      this.cadence.markRun(now, fullTranscript);
+      // Captions that arrived during the await belong to the NEXT delta.
+      this.summarizedLineCount = lineCountAtRun;
       this.lastSummary = { summary: result.summary, board: result.board };
       this.emit({ type: "summary", summary: result.summary, board: result.board });
+      this.emitGauge(); // extras spend changed → refresh the gauge
       this.persistBrief();
     } catch (error) {
-      this.emit({ type: "status", detail: `summary failed (${errorDetail(error)})` });
+      if (error instanceof ExtrasBudgetExceededError) {
+        this.noteExtrasBudgetReached();
+      } else {
+        this.emit({ type: "status", detail: `summary failed (${errorDetail(error)})` });
+      }
     } finally {
       this.summaryRunning = false;
     }
+  }
+
+  /** Surface the per-session extras cap exactly once (#55). */
+  private noteExtrasBudgetReached(): void {
+    if (this.extrasBudgetNoticeSent) return;
+    this.extrasBudgetNoticeSent = true;
+    this.emit({ type: "status", detail: "extras budget reached — pausing auto-summary for this session" });
   }
 
   /** Rewrite the archive's front sections from current session state. */
@@ -401,12 +462,25 @@ export class HostSession {
     }
 
     // Final summary → archive title (PROPOSAL §8.9: title = first summary line).
-    const transcript = this.transcriptLines.join("\n");
+    // Incremental like the live ticks (#55): fold only the tail since the last
+    // summary into the previous one rather than re-summarizing the whole
+    // transcript. Skipped silently if the per-session extras cap is reached.
+    const lines = this.transcriptLines;
+    const transcript = lines.join("\n");
     let finalSummary = this.lastSummary;
-    if (this.extras && transcript !== "") {
+    if (this.extras && transcript !== "" && (!this.extrasBudget || this.extrasBudget.canSpend())) {
       try {
-        const result = await this.extras.generateSummaryBoard(transcript);
-        finalSummary = { summary: result.summary, board: result.board };
+        const previous = this.lastSummary
+          ? { summary: this.lastSummary.summary, board: this.lastSummary.board }
+          : null;
+        const tail = lines.slice(this.summarizedLineCount).join("\n");
+        // Nothing new since the last summary → the last one is already final.
+        if (!previous || tail !== "") {
+          const result = await this.extras.generateSummaryBoard(previous ? tail : transcript, {
+            previous,
+          });
+          finalSummary = { summary: result.summary, board: result.board };
+        }
       } catch {
         // Keep the last good summary; the archive still finalizes.
       }

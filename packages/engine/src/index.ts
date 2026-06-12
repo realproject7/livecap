@@ -69,10 +69,12 @@ export type {
   ExtrasPipelineConfig,
   CompletionEngine,
   SummaryBoardResult,
+  SummaryBoardPrevious,
   TextResult,
 } from "./extras-pipeline";
 export {
   buildSummaryBoardPrompt,
+  buildIncrementalSummaryBoardPrompt,
   buildReplyPrompt,
   buildQuickTranslatePrompt,
   parseSummaryBoard,
@@ -80,3 +82,7 @@ export {
 export type { MeetingBoard, ReplyIntent, SummaryBoardParse } from "./extras-prompts";
 export { SummaryCadence } from "./summary-cadence";
 export type { SummaryCadenceOptions } from "./summary-cadence";
+
+// Issue #55 — per-session extras budget cap (flows into the gauge).
+export { ExtrasBudget, ExtrasBudgetExceededError, DEFAULT_EXTRAS_BUDGET_USD } from "./extras-budget";
+export type { ExtrasBudgetOptions, ExtrasBudgetState } from "./extras-budget";

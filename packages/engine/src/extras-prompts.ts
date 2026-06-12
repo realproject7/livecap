@@ -54,6 +54,60 @@ export function buildSummaryBoardPrompt(
   return { system, user };
 }
 
+/** Render a board section back into the bullet form the prompt expects, so the
+ *  model sees its own prior output in the same shape it must re-emit. */
+function renderSection(header: string, items: string[]): string[] {
+  return [header, ...(items.length > 0 ? items.map((i) => `- ${i}`) : ["- (none)"])];
+}
+
+/**
+ * Build an INCREMENTAL summary+board request (#55). Instead of re-sending the
+ * whole accumulated transcript every cadence tick (linear input → quadratic
+ * session cost, the #13 blow-up), this feeds the PREVIOUS summary/board plus
+ * only the NEW transcript since the last update, and asks the model to fold the
+ * delta in. Output format is identical to the full prompt, so `parseSummaryBoard`
+ * handles both. Keeping the summary concise (instructed below) keeps the
+ * fed-back previous summary bounded, so per-call input stays roughly constant.
+ */
+export function buildIncrementalSummaryBoardPrompt(
+  previous: SummaryBoardParse,
+  deltaTranscript: string,
+  outputLanguage: string,
+): { system: string; user: string } {
+  const system =
+    `You are a meeting assistant maintaining a running summary and board in ` +
+    `${outputLanguage}. You are given the CURRENT summary/board and only the NEW ` +
+    `transcript since it was written. Merge the new content in — update or extend, ` +
+    `do not re-derive from scratch and do not drop still-relevant prior points. ` +
+    `Output ONLY the format below — no preamble, no commentary.`;
+  const user = [
+    "Current summary and board:",
+    ...renderSection("SUMMARY", previous.summary),
+    ...renderSection("DECISIONS", previous.board.decisions),
+    ...renderSection("ACTION ITEMS", previous.board.actionItems),
+    ...renderSection("OPEN QUESTIONS", previous.board.openQuestions),
+    "",
+    "New transcript since the last update:",
+    deltaTranscript,
+    "",
+    "Output the COMPLETE updated summary and board (not just the changes), using",
+    "EXACTLY these section headers, each on its own line:",
+    "SUMMARY",
+    "- <one short bullet per key point>",
+    "DECISIONS",
+    "- <decision>",
+    "ACTION ITEMS",
+    "- <owner> → <task>",
+    "OPEN QUESTIONS",
+    "- <question>",
+    "Keep a header even if it has no bullets. Keep the summary concise — merge",
+    "related points rather than letting it grow without bound. Do not invent content.",
+    `Write the bullet content in ${outputLanguage}, but keep the section headers ` +
+      "in English exactly as above (SUMMARY / DECISIONS / ACTION ITEMS / OPEN QUESTIONS).",
+  ].join("\n");
+  return { system, user };
+}
+
 /** Build the reply-suggestion request (intent + last ~N captions — §8.5). */
 export function buildReplyPrompt(
   intent: ReplyIntent,

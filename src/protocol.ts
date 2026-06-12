@@ -89,6 +89,12 @@ export interface GaugeWire {
   dollarsPerHour: number;
   estimatedHoursRemaining: number;
   fractionUsed: number;
+  /** Per-session extras (summary/board/reply/quick-translate) spend so far this
+   *  session (#55). Optional — present on live session gauges, absent on the
+   *  pre-session probe snapshot. */
+  extrasSpentUsd?: number;
+  /** The per-session extras budget cap the spend above is metered against (#55). */
+  extrasCapUsd?: number;
 }
 
 /** Messages emitted by the host on stdout; Rust forwards each to the webview
