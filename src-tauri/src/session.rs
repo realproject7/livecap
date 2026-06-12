@@ -22,6 +22,7 @@ use serde::Serialize;
 use tauri::{AppHandle, Emitter, Manager, State};
 
 use crate::bridge::BridgeCaption;
+use crate::settings::SettingsState;
 use crate::tray;
 
 const HOST_EXIT_TIMEOUT: Duration = Duration::from_secs(60);
@@ -289,14 +290,31 @@ pub async fn start(app: AppHandle) -> Result<(), String> {
     }
 }
 
+/// Archive destination: the Settings folder pick when set, otherwise
+/// ~/Documents/LiveCap (PROPOSAL §8.9).
+fn archive_dir(app: &AppHandle, settings: &crate::settings::AppSettings) -> PathBuf {
+    if let Some(folder) = settings.archive_folder.as_deref() {
+        return PathBuf::from(folder);
+    }
+    let app_data_dir = app
+        .path()
+        .app_data_dir()
+        .unwrap_or_else(|_| std::env::temp_dir());
+    app.path()
+        .document_dir()
+        .map(|d| d.join("LiveCap"))
+        .unwrap_or_else(|_| app_data_dir.join("LiveCap"))
+}
+
 async fn start_inner(app: &AppHandle) -> Result<Option<String>, String> {
     let app_data_dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
     let models_dir = app_data_dir.join("models");
-    let archive_dir = app
-        .path()
-        .document_dir()
-        .map(|d| d.join("LiveCap"))
-        .unwrap_or_else(|_| app_data_dir.join("LiveCap"));
+
+    // Persisted settings (#12) drive the session: target language, engine
+    // preference, gauge config, archive policy. Read fresh at every start so
+    // Settings changes apply to the next session without an app restart.
+    let settings = app.state::<SettingsState>().snapshot();
+    let archive_dir = archive_dir(app, &settings);
 
     // The host starts first (cheap; engine detection runs while whisper
     // loads); the pipeline build may block on a first-run model download.
@@ -304,12 +322,13 @@ async fn start_inner(app: &AppHandle) -> Result<Option<String>, String> {
         "type": "start",
         "appDataDir": app_data_dir,
         "archiveDir": archive_dir,
-        "targetLanguage": "Korean",
-        "sourceLangCode": "EN",
-        "targetLangCode": "KO",
-        "meetingLanguage": "English",
-        "summaryLanguage": "English",
-        "poolUsd": 20.0,
+        "targetLanguageCode": settings.target_language,
+        "enginePref": settings.engine_pref,
+        "poolUsd": settings.pool_usd,
+        "resetDay": settings.reset_day,
+        "autoSwitch": settings.auto_switch,
+        "archiveAutoSave": settings.archive_auto_save,
+        "archiveRetentionDays": settings.archive_retention_days,
     });
     let mut host = spawn_host(app, &start_message)?;
 
@@ -534,4 +553,49 @@ pub async fn host_request(
 #[tauri::command]
 pub fn gauge_state(cache: State<'_, GaugeCache>) -> Option<serde_json::Value> {
     cache.0.lock().ok().and_then(|guard| guard.clone())
+}
+
+/// Sessionless probe (#12): run the host in `--probe` mode for real CLI
+/// detection plus a read-only credit-gauge snapshot. Used by onboarding
+/// screen 3 and the Settings sheet before a session has filled GaugeCache.
+#[tauri::command]
+pub async fn host_probe(app: AppHandle) -> Result<serde_json::Value, String> {
+    let node = find_node()
+        .ok_or_else(|| "Node.js runtime not found — install node or set LIVECAP_NODE".to_string())?;
+    let script = host_script(&app)?;
+    let app_data_dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
+    let settings = app.state::<SettingsState>().snapshot();
+    let request = serde_json::json!({
+        "appDataDir": app_data_dir,
+        "poolUsd": settings.pool_usd,
+        "resetDay": settings.reset_day,
+    })
+    .to_string();
+
+    let output = tauri::async_runtime::spawn_blocking(move || {
+        Command::new(node)
+            .arg(script)
+            .arg("--probe")
+            .arg(request)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .output()
+    })
+    .await
+    .map_err(|e| e.to_string())?
+    .map_err(|e| format!("probe failed to run: {e}"))?;
+
+    let line = String::from_utf8_lossy(&output.stdout);
+    let value: serde_json::Value = serde_json::from_str(line.trim())
+        .map_err(|_| "probe produced no result".to_string())?;
+    if value.get("type").and_then(|t| t.as_str()) == Some("probe") {
+        Ok(value)
+    } else {
+        let detail = value
+            .get("detail")
+            .and_then(|d| d.as_str())
+            .unwrap_or("probe failed");
+        Err(detail.to_string())
+    }
 }

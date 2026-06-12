@@ -130,13 +130,136 @@ of the visible mode.
 
 ## Known limits for the reviewer (#11)
 
-- Languages are fixed this round (EN captions → KO translations; extras in
-  English) — the language pickers land with Settings (#12).
+- ~~Languages are fixed this round~~ — closed by #12: the target language is
+  a setting (KO default) and reaches the translation prompt, the
+  summary/extras output, and the archive header.
 - The session host needs a system Node.js in dev and in the bundled app
   (resolved from PATH/`LIVECAP_NODE`/Homebrew paths); bundling a runtime is
   a packaging follow-up.
 - A webview reload mid-session (dev hot-reload) clears the on-screen feed;
   the session, translations, and archive continue unaffected.
+
+---
+
+# #12 Onboarding (3 steps) + Settings sheet
+
+Automated coverage (already green): settings persistence + sanitization
+(`cargo test -p livecap-app` — settings.rs), language plumbing through the
+host protocol and gauge/router mapping (`pnpm test:app` —
+test/start-config.test.ts, test/languages.test.ts), generic-source prompt
+contract (engine prompt.test.ts). The flows below need a human, real TCC
+sheets, and a real `claude` binary.
+
+## A. Fresh-machine onboarding (<60 s, AC)
+
+Reset this Mac to a "fresh" state:
+
+```sh
+tccutil reset Microphone app.livecap.desktop
+tccutil reset All app.livecap.desktop   # also clears system-audio recording
+rm ~/Library/Application\ Support/app.livecap.desktop/settings.json
+```
+
+1. Start a stopwatch, launch (`pnpm tauri dev`). The Panel opens on
+   onboarding card **1 · AUDIO** ("LiveCap hears two things").
+2. Click **Grant audio access** → the REAL macOS Microphone sheet appears
+   (triggered by a transient capture, not a fake) and, on macOS 14.4+, the
+   System Audio Recording sheet follows. Accept both → both rows gain an
+   amber ✓ (mic via live AVCaptureDevice status polling; system audio via a
+   tap probe). Deny instead → the row shows "✕ no access" plus
+   "Open System Settings" (deep-links the right Privacy pane) and
+   "Check again"; **Continue** still appears — never a dead end.
+3. Card **2 · LANGUAGE**: "Translate into…" with 한국어 preselected; note
+   says the spoken language is detected automatically. Continue.
+4. Card **3 · ENGINE**: runs a real CLI probe (`--probe` host mode).
+   With `claude` on PATH: "✓ Claude CLI found · …uses your plan's SDK
+   credits — about **50 hrs/month**" (for the $20 default pool) and a
+   "Use the local model instead — free, 2.4 GB download" link.
+5. **Start captioning** → onboarding closes, a session starts, play English
+   audio → first captions render. Stop the stopwatch: **< 60 s** from app
+   open (record the time in the PR).
+6. Relaunch → onboarding does NOT reappear
+   (`settings.json` has `"onboardingComplete": true`).
+
+## B. No-CLI path (AC)
+
+1. With settings.json deleted again, launch with the CLI hidden:
+   `PATH=/usr/bin:/bin LIVECAP_NODE=$(which node) pnpm tauri dev`
+   (the host augments PATH with `~/.local/bin` etc., so on this Mac also
+   temporarily `mv ~/.local/bin/claude{,.off}`).
+2. Onboarding card 3 now LEADS with "Use the local model" (size + 
+   download-on-first-use stated); the CLI is one meta line below
+   ("No Claude CLI found — install and sign in…"). No dead end.
+3. Start captioning → status strip shows the model download progress
+   ("downloading local model NN%…"), then captions + translations work on
+   the local tier. Restore the binary afterwards.
+
+## C. Settings sheet (menu bar → Settings…)
+
+Menu bar → **Settings…** → the Panel surfaces (switching mode to Panel if
+needed) and the sheet opens INSIDE the Panel window on the same glass (no
+separate window — deliberate, §8.7 "single sheet").
+
+Apply-without-restart matrix — verify each row, no app relaunch anywhere:
+
+| Change | Takes effect |
+|---|---|
+| Caption size Aa/Aa/Aa | immediately (live feed + strip/capsule re-scale) |
+| Click-through (Strip/Capsule) | immediately (same toggle as the chrome button) |
+| Engine segmented control | next session start (start/stop captioning to see "Local (Qwen3 4B)" in the archive header / no CLI spawn) |
+| Translate into | next session start (new captions translate into the new language; summary follows) |
+| Plan / custom pool, reset day | gauge re-renders immediately; the ledger period+pool apply at next session / next probe |
+| Auto-switch toggle | next session start (drill below) |
+| Archive auto-save off | next session writes NO `(recording).md` |
+| Archive folder (native picker) | next session writes there |
+| Retention | swept at next session start (backdate a file: `touch -t 202401010101 ~/Documents/LiveCap/old.md`, pick "keep 90 days", start a session → file deleted) |
+
+Checks while the sheet is open:
+
+1. Credit gauge: before any session it fills from a host `--probe` (real
+   ledger read): `$0.00 / $20.00`, "≈ 50 meeting-hours left · resets <next
+   reset day>". During a live CLI session the bar/amounts tick live from
+   `host://event` gauge messages (monospaced digits).
+2. Plan picker: Pro $20 / Max 5x $100 / Max 20x $200 / Custom… (custom
+   reveals a USD field); reset-day field clamps to 1–28 (try 99 → saved as
+   28; check `settings.json`).
+3. Auto-switch OFF drill: write the ledger as nearly spent (see #11 §E),
+   start a session → a "switch to local" recommendation is NOT acted on;
+   captions stay on the CLI. ON: switches as in #11 §E.
+4. Privacy rows: "Hidden from screen sharing" shows ✓ only if the live
+   `capture_excluded` readback is true (flip `set_content_protected` in a
+   scratch build to see ✕); "Audio never leaves this Mac" is informational.
+5. Hotkeys row matches ⌥Space / ⌥⇧Space.
+6. Persistence is atomic: `cat ~/Library/Application\ Support/app.livecap.desktop/settings.json`
+   after each change; kill -9 the app right after a change → file is valid
+   JSON (temp+rename write).
+
+## D. Language plumbing E2E (goal 4)
+
+1. Settings → Translate into **English**… actually pick a non-default, e.g.
+   日本語. Start a session, play English audio →
+   captions translate into Japanese; the summary strip fills in Japanese.
+2. Stop → archive header reads `EN → JA` and the engine line; transcript
+   `>` lines are Japanese. (KO and EN are the supported minimum; the picker
+   list rides arbitrary BCP-47 through the same path.)
+
+## Known limits for the reviewer (#12)
+
+- Engine/language/pool/auto-switch/archive changes apply from the NEXT
+  session (a running meeting keeps its engine and language; switching
+  engines mid-meeting remains the #7 auto-fallback path). No app restart is
+  ever needed.
+- System-audio permission has no public macOS status API: its "status" is a
+  real tap probe, so onboarding's first probe IS what raises the TCC sheet;
+  "Check again" re-probes after the System Settings toggle.
+- The pool reset day is evaluated in UTC (ledger semantics, #7) — the
+  Settings copy names the day, not a local-midnight promise.
+- The archive header's source label stays "EN" (meeting language; replies
+  and quick translate also output English) — per-sentence caption language
+  remains auto-detected regardless.
+- Onboarding shows the three §8.6 cards sequentially inside the Panel
+  (design 06 paints them side by side as a storyboard; the Panel is one
+  card wide).
 
 ---
 

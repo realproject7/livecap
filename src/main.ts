@@ -8,7 +8,9 @@ import { listen } from "@tauri-apps/api/event";
 import { writeText } from "@tauri-apps/plugin-clipboard-manager";
 import { ask } from "@tauri-apps/plugin-dialog";
 
+import { applyCaptionSize, type AppSettings } from "./app-settings";
 import { FeedState, type CaptionBlock } from "./feed-state";
+import { startOnboarding } from "./onboarding";
 import type {
   CaptionBridgeEvent,
   HostInbound,
@@ -16,6 +18,7 @@ import type {
   ReplyIntentWire,
   SessionStatus,
 } from "./protocol";
+import { createSettingsSheet } from "./settings-sheet";
 
 type Mode = "panel" | "strip" | "capsule";
 
@@ -102,6 +105,8 @@ document.body.innerHTML = `
       <span class="live-dot on"></span>
       <span class="txt"></span>
     </div>
+    <div id="settings-sheet"></div>
+    <div id="onboarding"></div>
     <div id="toast"></div>
   </div>
 `;
@@ -130,6 +135,37 @@ const toastEl = $<HTMLDivElement>("toast");
 const stripSrc = document.querySelector<HTMLDivElement>("#strip-view .src") as HTMLDivElement;
 const stripTr = document.querySelector<HTMLDivElement>("#strip-view .tr") as HTMLDivElement;
 const capsuleTxt = document.querySelector<HTMLSpanElement>("#capsule-view .txt") as HTMLSpanElement;
+const onboardingEl = $<HTMLDivElement>("onboarding");
+
+/* ================= settings (#12) ================= */
+
+let appSettings: AppSettings = {
+  onboardingComplete: true, // assume done until get_settings says otherwise
+  engine: "cli",
+  targetLanguage: "ko",
+  poolUsd: 20,
+  resetDay: 1,
+  autoSwitch: true,
+  captionSize: "m",
+  archiveAutoSave: true,
+  archiveFolder: null,
+  archiveRetentionDays: 0,
+};
+
+async function persistSettings(next: AppSettings): Promise<AppSettings> {
+  const saved = await invoke<AppSettings>("set_settings", { settings: next });
+  appSettings = saved;
+  applyCaptionSize(saved.captionSize);
+  return saved;
+}
+
+const settingsSheet = createSettingsSheet({
+  host: $<HTMLDivElement>("settings-sheet"),
+  getSettings: () => appSettings,
+  applySettings: persistSettings,
+  getClickThrough: () => state.clickThrough,
+  setClickThrough: (enabled) => void invoke("set_click_through", { enabled }),
+});
 
 /* ================= session lifecycle ================= */
 
@@ -534,8 +570,10 @@ void listen<HostOutbound>("host://event", (event) => {
     case "hostError":
       showToast(message.detail);
       break;
-    case "ready":
     case "gauge":
+      settingsSheet.updateGauge(message.gauge);
+      break;
+    case "ready":
     case "stopped":
       break;
   }
@@ -619,6 +657,18 @@ void listen<ShellState>("shell://mode", (event) => {
   Object.assign(state, event.payload);
   render();
   syncMiniViews();
+  settingsSheet.syncShell();
+});
+
+/* tray "Settings…" → the sheet opens inside the Panel (#12) */
+void listen("shell://settings", () => {
+  if (!onboardingEl.classList.contains("active")) settingsSheet.open();
+});
+
+/* settings changed elsewhere (sanitized echo): keep the cache + feed live */
+void listen<AppSettings>("settings://changed", (event) => {
+  appSettings = event.payload;
+  applyCaptionSize(appSettings.captionSize);
 });
 
 void listen<ChromePayload>("shell://chrome", (event) => {
@@ -629,14 +679,37 @@ void listen<ChromePayload>("shell://chrome", (event) => {
 /* ================= initial state ================= */
 
 void (async () => {
-  const [shellState, caps, initialPhase] = await Promise.all([
+  const [shellState, caps, initialPhase, settings] = await Promise.all([
     invoke<ShellState>("get_shell_state"),
     invoke<Capabilities>("capabilities"),
     invoke<SessionStatus["phase"]>("session_phase"),
+    invoke<AppSettings>("get_settings"),
   ]);
   Object.assign(state, shellState);
   capabilities = caps;
   phase = initialPhase;
+  appSettings = settings;
+  applyCaptionSize(settings.captionSize);
   render();
   syncMiniViews();
+
+  // First run (§8.6): no completed onboarding → the three cards, then
+  // straight into a session.
+  if (capabilities.settings && !settings.onboardingComplete) {
+    startOnboarding({
+      host: onboardingEl,
+      settings: appSettings,
+      onDone: ({ targetLanguage, engine }) => {
+        void persistSettings({
+          ...appSettings,
+          targetLanguage,
+          engine,
+          onboardingComplete: true,
+        }).then(
+          () => sessionCommand("session_start"),
+          (error: unknown) => showToast(String(error)),
+        );
+      },
+    });
+  }
 })();

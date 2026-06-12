@@ -2303,6 +2303,7 @@ dependencies = [
  "livecap-core",
  "objc2",
  "objc2-app-kit",
+ "objc2-foundation",
  "serde",
  "serde_json",
  "tauri",
@@ -2310,6 +2311,7 @@ dependencies = [
  "tauri-plugin-clipboard-manager",
  "tauri-plugin-dialog",
  "tauri-plugin-global-shortcut",
+ "tokio",
  "window-vibrancy",
 ]
 

@@ -91,6 +91,7 @@ pub fn create(app: &AppHandle, initial_mode: Mode) -> tauri::Result<()> {
                     crate::session::toggle(app).await;
                 });
             }
+            "settings" => overlay::open_settings(app),
             "quit" => {
                 app.state::<Shell>().save_now();
                 app.exit(0);

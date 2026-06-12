@@ -6,8 +6,10 @@ mod config;
 mod glyph;
 mod modes;
 mod overlay;
+mod permissions;
 mod platform;
 mod session;
+mod settings;
 mod snap;
 mod tray;
 
@@ -21,7 +23,7 @@ use modes::Mode;
 use overlay::Shell;
 
 /// Feature availability flags the UI reads its disabled states from.
-/// #11 flipped `captioning`; #12 flips `settings` — the shell UI then enables
+/// #11 flipped `captioning`; #12 flipped `settings` — the shell UI enables
 /// the corresponding controls without rewiring.
 #[derive(Debug, Clone, Copy, Serialize)]
 pub struct Capabilities {
@@ -31,7 +33,7 @@ pub struct Capabilities {
 
 pub const CAPABILITIES: Capabilities = Capabilities {
     captioning: true,
-    settings: false,
+    settings: true,
 };
 
 fn shortcut_toggle() -> Shortcut {
@@ -169,6 +171,13 @@ pub fn run() {
             session::session_phase,
             session::host_request,
             session::gauge_state,
+            session::host_probe,
+            settings::get_settings,
+            settings::set_settings,
+            permissions::mic_permission_status,
+            permissions::request_audio_access,
+            permissions::probe_system_audio,
+            permissions::open_privacy_settings,
         ])
         .setup(|app| {
             #[cfg(target_os = "macos")]
@@ -180,6 +189,11 @@ pub fn run() {
 
             app.manage(session::SessionState::default());
             app.manage(session::GaugeCache::default());
+
+            // Persisted app settings (#12): onboarding state + the Settings
+            // sheet values, loaded once and managed for the whole app.
+            let settings_path = settings::settings_path(app.handle())?;
+            app.manage(settings::SettingsState::new(settings_path));
 
             let config_path = app.path().app_data_dir()?.join(config::FILE_NAME);
             let cfg = config::load(&config_path);
