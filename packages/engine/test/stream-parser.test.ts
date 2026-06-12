@@ -107,6 +107,19 @@ describe("StreamJsonParser — robustness", () => {
     expect(events).toEqual([]);
   });
 
+  it("text_delta.text carries the verbatim translation stream — content-bearing, never log (#49)", () => {
+    // Documents the hazard the type annotation warns about: a direct parser
+    // consumer that logs text_delta events would leak the whole translation
+    // stream, not just error text.
+    const parser = new StreamJsonParser();
+    const events = parser.pushLine(
+      '{"type":"stream_event","event":{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"SECRET caption translation"}}}',
+    );
+    const delta = events.find((e) => e.kind === "text_delta");
+    expect(delta?.kind).toBe("text_delta");
+    expect(delta && "text" in delta ? delta.text : null).toBe("SECRET caption translation");
+  });
+
   it("turn_end.message carries the model result verbatim — content-bearing, never log (#41)", () => {
     // Documents the hazard the type annotation warns about: a direct parser
     // consumer that logs turn_end.message would leak transcript-derived content.

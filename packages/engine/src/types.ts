@@ -122,9 +122,20 @@ export interface Completion {
  * Events produced by the stream-json parser. The adapter maps these onto
  * Translation / Usage; keeping the parser at this level lets it be unit-tested
  * against recorded fixtures with no process or I/O involved.
+ *
+ * CONTENT-BEARING — NEVER LOG RAW `ParsedEvent`s. `StreamJsonParser` is a public
+ * export, and two fields carry verbatim model/transcript-derived text:
+ * `text_delta.text` (the live translation stream) and `turn_end.message` (the
+ * result text). Logging raw events reproduces the #23 leak (#41/#49). Both are
+ * on the #11 logging-redaction checklist.
  */
 export type ParsedEvent =
-  | { kind: "text_delta"; index: number; text: string }
+  | {
+      kind: "text_delta";
+      index: number;
+      /** CONTENT-BEARING — NEVER LOG. The verbatim translation-stream delta (#49). */
+      text: string;
+    }
   | {
       kind: "turn_end";
       stopReason: string | null;
@@ -135,7 +146,7 @@ export type ParsedEvent =
        * which can echo prompt/transcript-derived content (the inverse of the
        * safe-to-log `EngineHealth.detail`). `StreamJsonParser` is a public
        * export, so any consumer wiring parser events to a debug log reproduces
-       * the #23 leak. Add this field to the #11 logging-redaction checklist (#41).
+       * the #23 leak. On the #11 logging-redaction checklist (#41).
        */
       message: string | null;
     }
