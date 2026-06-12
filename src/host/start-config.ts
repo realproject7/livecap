@@ -4,6 +4,8 @@
 // archive header labels, CreditAccountant config, router defaults. Pure and
 // headless so the language/gauge plumbing is unit-testable.
 
+import { DEFAULT_EXTRAS_BUDGET_USD } from "@livecap/engine";
+
 import { languageByCode } from "../languages.ts";
 import type { EnginePref, HostInbound } from "../protocol.ts";
 
@@ -33,6 +35,9 @@ export interface ResolvedStartConfig {
   autoSwitch: boolean;
   archiveAutoSave: boolean;
   archiveRetentionDays: number;
+  /** Per-session extras budget cap (#55), USD. Caps summary/extras spend so a
+   *  long session can't run away with the monthly pool. */
+  extrasBudgetUsd: number;
 }
 
 export function resolveStartConfig(message: StartMessage): ResolvedStartConfig {
@@ -52,6 +57,7 @@ export function resolveStartConfig(message: StartMessage): ResolvedStartConfig {
       Number.isFinite(message.archiveRetentionDays) && message.archiveRetentionDays > 0
         ? Math.floor(message.archiveRetentionDays)
         : 0,
+    extrasBudgetUsd: DEFAULT_EXTRAS_BUDGET_USD,
   };
 }
 

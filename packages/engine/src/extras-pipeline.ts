@@ -3,7 +3,9 @@
 // engine's generic complete(), so it works identically on the CLI and local
 // tiers and its cost flows through #7 accounting. UI integration is #11/#12.
 
+import { ExtrasBudget, ExtrasBudgetExceededError } from "./extras-budget";
 import {
+  buildIncrementalSummaryBoardPrompt,
   buildQuickTranslatePrompt,
   buildReplyPrompt,
   buildSummaryBoardPrompt,
@@ -18,6 +20,12 @@ export interface CompletionEngine {
   complete(request: CompletionRequest): Promise<Completion>;
 }
 
+/** Prior summary/board state, fed back for an INCREMENTAL summary (#55). */
+export interface SummaryBoardPrevious {
+  summary: string[];
+  board: MeetingBoard;
+}
+
 export interface ExtrasPipelineConfig {
   engine: CompletionEngine;
   /** Output language for summary/board (default; switchable per call). §8.4 toggle. */
@@ -26,6 +34,10 @@ export interface ExtrasPipelineConfig {
   meetingLanguage: string;
   /** How many recent captions to feed a reply suggestion (default 10). */
   contextCaptions?: number;
+  /** Optional per-session extras budget cap (#55). When present, every extras
+   *  call's cost is tallied against it, and the recurring summary stops calling
+   *  the model once the cap is reached. */
+  budget?: ExtrasBudget;
 }
 
 export interface SummaryBoardResult {
@@ -44,21 +56,41 @@ export class ExtrasPipeline {
   private readonly summaryLanguage: string;
   private readonly meetingLanguage: string;
   private readonly contextCaptions: number;
+  private readonly budget?: ExtrasBudget;
 
   constructor(config: ExtrasPipelineConfig) {
     this.engine = config.engine;
     this.summaryLanguage = config.summaryLanguage;
     this.meetingLanguage = config.meetingLanguage;
     this.contextCaptions = config.contextCaptions ?? 10;
+    this.budget = config.budget;
   }
 
-  /** One engine call → live summary + structured board (PROPOSAL §8.4). */
+  /**
+   * One engine call → live summary + structured board (PROPOSAL §8.4).
+   *
+   * When `options.previous` is given, the call is INCREMENTAL (#55): `transcript`
+   * is treated as only the NEW transcript since the last summary, and the prior
+   * summary/board is fed back so the model folds the delta in — keeping per-call
+   * input bounded instead of re-sending the whole growing transcript. With no
+   * `previous` (the first run, and the final-summary path) it summarizes
+   * `transcript` in full.
+   *
+   * The recurring driver of cost, so this is the call gated by the per-session
+   * budget: once the cap is reached it throws `ExtrasBudgetExceededError` WITHOUT
+   * calling the model, and the consumer stands the auto-summary loop down.
+   */
   async generateSummaryBoard(
     transcript: string,
-    options: { language?: string } = {},
+    options: { language?: string; previous?: SummaryBoardPrevious | null } = {},
   ): Promise<SummaryBoardResult> {
+    if (this.budget && !this.budget.canSpend()) throw new ExtrasBudgetExceededError();
     const language = options.language ?? this.summaryLanguage;
-    const { text, usage } = await this.engine.complete(buildSummaryBoardPrompt(transcript, language));
+    const prompt = options.previous
+      ? buildIncrementalSummaryBoardPrompt(options.previous, transcript, language)
+      : buildSummaryBoardPrompt(transcript, language);
+    const { text, usage } = await this.engine.complete(prompt);
+    this.budget?.record(usage.turnCostUsd);
     const parsed = parseSummaryBoard(text);
     return { summary: parsed.summary, board: parsed.board, usage };
   }
@@ -73,6 +105,8 @@ export class ExtrasPipeline {
     const { text, usage } = await this.engine.complete(
       buildReplyPrompt(intent, recentCaptions, language, this.contextCaptions),
     );
+    // User-driven and bounded — metered against the budget but never blocked by it.
+    this.budget?.record(usage.turnCostUsd);
     return { text: text.trim(), usage };
   }
 
@@ -80,6 +114,7 @@ export class ExtrasPipeline {
   async quickTranslate(text: string, options: { language?: string } = {}): Promise<TextResult> {
     const language = options.language ?? this.meetingLanguage;
     const result = await this.engine.complete(buildQuickTranslatePrompt(text, language));
+    this.budget?.record(result.usage.turnCostUsd);
     return { text: result.text.trim(), usage: result.usage };
   }
 }
