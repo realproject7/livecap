@@ -22,6 +22,9 @@ const port = portIndex >= 0 ? Number(args[portIndex + 1]) : 0;
 const content = process.env.LLAMA_FAKE_CONTENT ?? "안녕하세요, 잘 지내세요?";
 const stderrNoise = process.env.LLAMA_FAKE_STDERR;
 const healthDelayMs = Number(process.env.LLAMA_FAKE_HEALTH_DELAY_MS ?? "0");
+// Accept the /health connection but never respond — simulates a server wedged
+// during model load (the #34 hang case).
+const healthHang = process.env.LLAMA_FAKE_HEALTH_HANG === "1";
 
 if (stderrNoise) process.stderr.write(stderrNoise + "\n");
 
@@ -36,6 +39,7 @@ const server = http.createServer((req, res) => {
   }
 
   if (req.method === "GET" && req.url === "/health") {
+    if (healthHang) return; // hold the socket open, never respond
     if (Date.now() - startedAt < healthDelayMs) {
       res.writeHead(503, { "content-type": "application/json" });
       res.end(JSON.stringify({ status: "loading" }));

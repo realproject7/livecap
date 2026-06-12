@@ -8,7 +8,7 @@ import { spawn } from "node:child_process";
 import type { ChildProcessWithoutNullStreams } from "node:child_process";
 
 import { stderrDigest } from "./internal/redact";
-import { buildSummaryMessage, buildSystemPrompt, buildTranslateMessage } from "./prompt";
+import { asTaskMessage, buildSummaryMessage, buildSystemPrompt, buildTranslateMessage } from "./prompt";
 import { stripNonTranslation, stripThinking } from "./translation-guard";
 import type {
   Completion,
@@ -54,6 +54,9 @@ const DEFAULT_CTX = 4096;
 const DEFAULT_STARTUP_TIMEOUT = 60_000;
 const DEFAULT_REQUEST_TIMEOUT = 30_000;
 const STOP_GRACE_MS = 2000;
+// Per-poll timeout on the /health probe (#34): a server that accepts the TCP
+// connection but never responds must still trip startupTimeoutMs.
+const HEALTH_POLL_TIMEOUT = 2000;
 
 interface ChatResponse {
   choices?: { message?: { content?: string } }[];
@@ -71,13 +74,6 @@ export class LocalLlmEngine implements TranslationEngine {
   private stderrTail = "";
   private stderrBytes = 0;
   private statusValue: EngineHealth = { status: "stopped" };
-  private latestUsage: Usage = {
-    cumulativeCostUsd: 0,
-    turnCostUsd: 0,
-    inputTokens: 0,
-    outputTokens: 0,
-    cacheReadInputTokens: 0,
-  };
 
   constructor(config: LocalLlmEngineConfig) {
     this.config = config;
@@ -200,19 +196,28 @@ export class LocalLlmEngine implements TranslationEngine {
   }
 
   async summarize(transcript: string): Promise<MeetingBrief> {
-    const { content } = await this.chat(buildSummaryMessage(transcript));
-    return { ...parseBrief(content), usage: this.latestUsage };
+    // [TASK]-marked so the session's translation system prompt yields to the
+    // summary instructions (#35), and <think> stripped like translate/complete.
+    const { content, usage } = await this.chat(asTaskMessage(buildSummaryMessage(transcript)));
+    return { ...parseBrief(stripThinking(content)), usage };
   }
 
   async complete(request: CompletionRequest): Promise<Completion> {
     // Generic generation: use the caller's system (not the translation prompt)
     // and keep the full output — only the hybrid-thinking block is stripped.
-    const { content } = await this.chat(request.user, request.system ?? "");
-    return { text: stripThinking(content).trim(), usage: this.latestUsage };
+    const { content, usage } = await this.chat(request.user, request.system ?? "");
+    return { text: stripThinking(content).trim(), usage };
   }
 
-  /** One chat-completions round-trip against the local server. */
-  private async chat(userMessage: string, system: string = this.systemPrompt): Promise<{ content: string }> {
+  /**
+   * One chat-completions round-trip. Returns the usage parsed from THIS
+   * response (not shared state), so concurrent turns never cross-attribute
+   * tokens (#36); also emits it to usage listeners.
+   */
+  private async chat(
+    userMessage: string,
+    system: string = this.systemPrompt,
+  ): Promise<{ content: string; usage: Usage }> {
     if (!this.child) throw new Error("engine not started");
     // Abort a hung (not dead) server so translate()/summarize() reject and #7's
     // auto-fallback gets a failure signal instead of stalling forever.
@@ -234,8 +239,16 @@ export class LocalLlmEngine implements TranslationEngine {
     });
     if (!res.ok) throw new Error(`local engine HTTP ${res.status}`);
     const data = (await res.json()) as ChatResponse;
-    this.recordUsage(data.usage);
-    return { content: data.choices?.[0]?.message?.content ?? "" };
+    // Local inference is free — cost stays 0; tokens come from THIS response.
+    const usage: Usage = {
+      cumulativeCostUsd: 0,
+      turnCostUsd: 0,
+      inputTokens: data.usage?.prompt_tokens ?? 0,
+      outputTokens: data.usage?.completion_tokens ?? 0,
+      cacheReadInputTokens: 0,
+    };
+    for (const listener of this.usageListeners) listener(usage);
+    return { content: data.choices?.[0]?.message?.content ?? "", usage };
   }
 
   private async waitForHealth(): Promise<void> {
@@ -243,10 +256,14 @@ export class LocalLlmEngine implements TranslationEngine {
     for (;;) {
       if (!this.child) throw new Error("server exited before becoming healthy");
       try {
-        const res = await this.fetchImpl(`${this.baseUrl}/health`);
+        // Per-poll abort so a wedged server (TCP accept, no response) can't hang
+        // the fetch forever and defeat startupTimeoutMs (#34).
+        const res = await this.fetchImpl(`${this.baseUrl}/health`, {
+          signal: AbortSignal.timeout(HEALTH_POLL_TIMEOUT),
+        });
         if (res.ok) return;
       } catch {
-        // server not up yet
+        // server not up yet, or this poll timed out — fall through to the deadline check
       }
       if (Date.now() > deadline) {
         const detail = `local server health timeout; ${stderrDigest(this.stderrBytes, this.stderrTail)}`;
@@ -268,18 +285,6 @@ export class LocalLlmEngine implements TranslationEngine {
     }
   }
 
-  private recordUsage(usage: ChatResponse["usage"]): void {
-    // Local inference is free — cost stays 0; tokens are surfaced for telemetry.
-    const next: Usage = {
-      cumulativeCostUsd: 0,
-      turnCostUsd: 0,
-      inputTokens: usage?.prompt_tokens ?? 0,
-      outputTokens: usage?.completion_tokens ?? 0,
-      cacheReadInputTokens: 0,
-    };
-    this.latestUsage = next;
-    for (const listener of this.usageListeners) listener(next);
-  }
 }
 
 function delay(ms: number): Promise<void> {

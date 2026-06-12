@@ -135,4 +135,74 @@ describe("LocalLlmEngine — real spawn + HTTP (fake llama-server)", () => {
     expect(detail).toMatch(/stderr \d+ bytes \(tail sha256:[0-9a-f]{8}\)/);
     await engine.stop();
   });
+
+  it("aborts a wedged /health poll instead of hanging start() forever (#34)", async () => {
+    // The server accepts the /health connection but never responds. Pre-fix the
+    // fetch had no AbortSignal, so start() would hang past startupTimeoutMs.
+    const engine = await makeEngine({
+      env: { ...process.env, LLAMA_FAKE_HEALTH_HANG: "1" },
+      startupTimeoutMs: 500,
+    });
+    await expect(engine.start()).rejects.toThrow(/health timeout/);
+    expect(engine.health().status).toBe("error");
+    await engine.stop();
+  });
+
+  it("summarize() uses the [TASK] override and strips <think> reasoning (#35)", async () => {
+    const engine = await makeEngine({
+      env: {
+        ...process.env,
+        LLAMA_FAKE_CONTENT: "<think>let me reason about the meeting</think>\nMeeting covered the budget.",
+      },
+    });
+    await engine.start();
+    try {
+      const brief = await engine.summarize("transcript text");
+      // <think> reasoning is stripped before parseBrief, like translate/complete.
+      expect(brief.summary).not.toContain("let me reason");
+      expect(brief.summary).toBe("Meeting covered the budget.");
+      // The request actually sent to the server was [TASK]-marked.
+      const port = (engine as unknown as { config: { port: number } }).config.port;
+      const res = await fetch(`http://127.0.0.1:${port}/last-request`);
+      const sent = (await res.json()) as { messages: { role: string; content: string }[] };
+      expect(sent.messages.at(-1)?.content.startsWith("[TASK]")).toBe(true);
+    } finally {
+      await engine.stop();
+    }
+  });
+
+  it("attributes usage per concurrent request — no shared-latestUsage race (#36)", async () => {
+    // Injected fetch: /health ok; chat echoes per-request token counts with a
+    // staggered delay to interleave concurrent turns. Pre-fix, complete()/
+    // summarize() returned the shared `latestUsage`, so concurrent turns
+    // cross-attributed tokens.
+    const fetchImpl: typeof fetch = async (url, init) => {
+      if (String(url).endsWith("/health")) {
+        return new Response('{"status":"ok"}', { status: 200 });
+      }
+      const body = JSON.parse(init?.body as string) as { messages: { content: string }[] };
+      const n = Number(/tok=(\d+)/.exec(body.messages.at(-1)?.content ?? "")?.[1]);
+      await new Promise((r) => setTimeout(r, (n % 3) * 5));
+      return new Response(
+        JSON.stringify({
+          choices: [{ message: { content: `out-${n}` } }],
+          usage: { prompt_tokens: n, completion_tokens: n },
+        }),
+        { status: 200 },
+      );
+    };
+    const engine = await makeEngine({ fetchImpl });
+    await engine.start();
+    try {
+      const results = await Promise.all(
+        Array.from({ length: 8 }, (_, i) => engine.complete({ user: `tok=${i + 1}` })),
+      );
+      results.forEach((r, i) => {
+        expect(r.usage.outputTokens).toBe(i + 1); // each got ITS OWN tokens
+        expect(r.usage.inputTokens).toBe(i + 1);
+      });
+    } finally {
+      await engine.stop();
+    }
+  });
 });
