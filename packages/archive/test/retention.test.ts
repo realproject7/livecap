@@ -92,4 +92,19 @@ describe("sweepOldArchives", () => {
     expect(result.failed).toContain("locked.md"); // surfaced, NOT silently treated as swept
     expect(fs.exists(locked)).toBe(true); // and not deleted
   });
+
+  it("a structured EACCES is surfaced even if the filename contains 'no such file' (#48)", () => {
+    // Adversarial: a user-derived filename embeds the missing-file trigger text,
+    // so the EACCES error message contains it — but the structured code is the
+    // authority, so it must still be surfaced, not misclassified as missing.
+    const fs = seed();
+    const tricky = fs.join(FOLDER, "no such file.md");
+    fs.writeFile(tricky, "x");
+    fs.setMtime(tricky, NOW - 200 * DAY);
+    fs.eaccesOnStat.add(tricky); // throws an EACCES whose message includes the path
+
+    const { removed, failed } = sweepOldArchives({ fs, folder: FOLDER, maxAgeDays: 90, nowMs: NOW });
+    expect(failed).toContain("no such file.md"); // surfaced (not dropped as "missing")
+    expect(removed).toContain("old.md");
+  });
 });

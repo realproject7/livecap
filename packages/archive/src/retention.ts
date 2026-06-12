@@ -28,7 +28,12 @@ export interface RetentionResult {
 /** Whether an error is a "file is missing" race (tolerated silently). */
 function isMissingFile(error: unknown): boolean {
   const code = (error as { code?: string } | null)?.code;
-  if (code === "ENOENT") return true;
+  // A structured errno is authoritative — trust ONLY `code === "ENOENT"`, never
+  // the message. Otherwise an EACCES/EPERM on a file whose user-derived name
+  // contains "ENOENT"/"no such file" would be misclassified as missing and
+  // dropped from `failed`, reintroducing the invisible-failure case (#48).
+  if (typeof code === "string") return code === "ENOENT";
+  // No structured code (e.g. a bare Error) — fall back to the message.
   return error instanceof Error && /ENOENT|no such file/i.test(error.message);
 }
 
