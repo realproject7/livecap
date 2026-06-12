@@ -294,10 +294,17 @@ export class ClaudeCliEngine implements TranslationEngine {
   }
 
   private recordUsage(event: Extract<ParsedEvent, { kind: "usage" }>): void {
+    // total_cost_usd is cumulative-per-session and must never regress: an error
+    // turn reports 0 (and the parser also defaults absent cost to 0). If we let
+    // that reset the running total, the NEXT turn's delta would re-count the
+    // whole session and CreditAccountant would double-charge (#24). Only advance
+    // on a strictly higher cumulative; report the monotonic running total.
     const turnCostUsd = Math.max(0, event.cumulativeCostUsd - this.cumulativeCostUsd);
-    this.cumulativeCostUsd = event.cumulativeCostUsd;
+    if (event.cumulativeCostUsd > this.cumulativeCostUsd) {
+      this.cumulativeCostUsd = event.cumulativeCostUsd;
+    }
     const usage: Usage = {
-      cumulativeCostUsd: event.cumulativeCostUsd,
+      cumulativeCostUsd: this.cumulativeCostUsd,
       turnCostUsd,
       inputTokens: event.inputTokens,
       outputTokens: event.outputTokens,

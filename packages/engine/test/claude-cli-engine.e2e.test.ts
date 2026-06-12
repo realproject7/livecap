@@ -11,6 +11,10 @@ function fixturePath(name: string): string {
   return fileURLToPath(new URL(`./fixtures/claude-stream/${name}`, import.meta.url));
 }
 
+function scenarioPath(name: string): string {
+  return fileURLToPath(new URL(`./fixtures/scenarios/${name}`, import.meta.url));
+}
+
 function makeEngine(fixture: string, includePartialMessages: boolean): ClaudeCliEngine {
   return new ClaudeCliEngine({
     bin: FAKE_CLI,
@@ -129,6 +133,38 @@ describe("ClaudeCliEngine — real spawn/stdio (fake-cli replay)", () => {
     } finally {
       await engine.stop();
     }
+  });
+
+  it("does not double-count after a zero-cost error turn — cumulative is monotonic (#24)", async () => {
+    // Scenario: success ($0.001 cum) → error ($0 cum) → success ($0.002 cum).
+    // Pre-fix, the error turn reset the running cumulative to 0, so turn 3's
+    // delta was the full 0.002 and the ledger double-charged the first 0.001.
+    const engine = new ClaudeCliEngine({
+      bin: FAKE_CLI,
+      cwd: tmpdir(),
+      env: { ...process.env, LIVECAP_FAKE_FIXTURE: scenarioPath("cli-cost-regression.jsonl") },
+      includePartialMessages: false,
+    });
+    const usages: Usage[] = [];
+    engine.onUsage((u) => usages.push(u));
+    await engine.start();
+    try {
+      await drain(engine); // turn 1: success
+      await expect(drain(engine)).rejects.toThrow(); // turn 2: error result
+      await drain(engine); // turn 3: success
+    } finally {
+      await engine.stop();
+    }
+
+    expect(usages).toHaveLength(3);
+    // Running cumulative never regresses (the error turn holds at 0.001).
+    expect(usages.map((u) => u.cumulativeCostUsd)).toEqual([0.001, 0.001, 0.002]);
+    // Per-turn delta on turn 3 is the true 0.001, not the inflated 0.002.
+    expect(usages[2]?.turnCostUsd).toBeCloseTo(0.001, 6);
+    expect(usages[1]?.turnCostUsd).toBe(0);
+    // What CreditAccountant accumulates (sum of turn deltas) is the true total.
+    const totalCharged = usages.reduce((sum, u) => sum + u.turnCostUsd, 0);
+    expect(totalCharged).toBeCloseTo(0.002, 6);
   });
 
   it("summarizes a transcript and attaches usage", async () => {
