@@ -1,0 +1,124 @@
+//! Menu bar item (design/screens/08-menubar.png): template glyph, live
+//! (amber) state, and the dropdown menu.
+
+use std::sync::atomic::Ordering;
+
+use tauri::image::Image;
+use tauri::menu::{CheckMenuItem, Menu, MenuItem, PredefinedMenuItem, Submenu};
+use tauri::tray::{TrayIcon, TrayIconBuilder};
+use tauri::{AppHandle, Emitter, Manager, Wry};
+
+use crate::glyph;
+use crate::modes::Mode;
+use crate::overlay::{self, Shell, EVENT_MODE};
+
+const TRAY_ID: &str = "livecap-tray";
+
+struct TrayHandles {
+    tray: TrayIcon,
+    mode_items: Vec<(Mode, CheckMenuItem<Wry>)>,
+}
+
+fn icon(live: bool) -> Image<'static> {
+    Image::new_owned(glyph::menubar_icon(live), glyph::SIZE, glyph::SIZE)
+}
+
+pub fn create(app: &AppHandle, initial_mode: Mode) -> tauri::Result<()> {
+    let caps = crate::CAPABILITIES;
+
+    let toggle = MenuItem::with_id(app, "toggle", "Show/Hide LiveCap", true, Some("Alt+Space"))?;
+
+    let mode_items: Vec<(Mode, CheckMenuItem<Wry>)> = Mode::ALL
+        .iter()
+        .map(|&mode| {
+            CheckMenuItem::with_id(
+                app,
+                format!("mode-{}", mode.id()),
+                mode.label(),
+                true,
+                mode == initial_mode,
+                None::<&str>,
+            )
+            .map(|item| (mode, item))
+        })
+        .collect::<Result<_, _>>()?;
+    let mode_refs: Vec<&dyn tauri::menu::IsMenuItem<Wry>> = mode_items
+        .iter()
+        .map(|(_, item)| item as &dyn tauri::menu::IsMenuItem<Wry>)
+        .collect();
+    let mode_menu = Submenu::with_id_and_items(app, "mode", "Mode", true, &mode_refs)?;
+
+    // Real capability gating: these enable when #11 (captioning) and #12
+    // (settings) flip the flags — no UI rewiring needed.
+    let captioning = MenuItem::with_id(
+        app,
+        "captioning",
+        "Start Captioning",
+        caps.captioning,
+        None::<&str>,
+    )?;
+    let settings = MenuItem::with_id(app, "settings", "Settings…", caps.settings, None::<&str>)?;
+    let quit = MenuItem::with_id(app, "quit", "Quit LiveCap", true, Some("Cmd+Q"))?;
+
+    let menu = Menu::with_items(
+        app,
+        &[
+            &toggle,
+            &PredefinedMenuItem::separator(app)?,
+            &mode_menu,
+            &PredefinedMenuItem::separator(app)?,
+            &captioning,
+            &PredefinedMenuItem::separator(app)?,
+            &settings,
+            &quit,
+        ],
+    )?;
+
+    let tray = TrayIconBuilder::with_id(TRAY_ID)
+        .icon(icon(false))
+        .icon_as_template(true)
+        .tooltip("LiveCap")
+        .menu(&menu)
+        .show_menu_on_left_click(true)
+        .on_menu_event(|app, event| match event.id().as_ref() {
+            "toggle" => overlay::toggle_visibility(app),
+            "quit" => {
+                app.state::<Shell>().save_now();
+                app.exit(0);
+            }
+            id => {
+                if let Some(mode) = id.strip_prefix("mode-").and_then(Mode::from_id) {
+                    overlay::apply_mode(app, mode);
+                }
+            }
+        })
+        .build(app)?;
+
+    app.manage(TrayHandles { tray, mode_items });
+    Ok(())
+}
+
+/// Reflect the active mode in the Mode submenu check marks.
+pub fn sync_mode(app: &AppHandle, mode: Mode) {
+    if let Some(handles) = app.try_state::<TrayHandles>() {
+        for (m, item) in &handles.mode_items {
+            let _ = item.set_checked(*m == mode);
+        }
+    }
+}
+
+/// Live state: amber glyph while captioning (template glyph otherwise).
+/// Called by the captioning pipeline (#11); defaults to false.
+pub fn set_live(app: &AppHandle, live: bool) {
+    let shell = app.state::<Shell>();
+    shell.live.store(live, Ordering::Relaxed);
+    if let Some(handles) = app.try_state::<TrayHandles>() {
+        // The live icon keeps its amber accent, so it must not be a
+        // template image (macOS would flatten it to monochrome).
+        let _ = handles.tray.set_icon_as_template(!live);
+        let _ = handles.tray.set_icon(Some(icon(live)));
+    }
+    if let Some(window) = overlay::overlay_window(app) {
+        let _ = window.emit(EVENT_MODE, overlay::shell_state(&shell));
+    }
+}

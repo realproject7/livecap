@@ -14,7 +14,10 @@
     "macOSPrivateApi": true,
     "windows": [
       {
+        "label": "main",
         "title": "LiveCap",
+        "visible": false,
+        "resizable": true,
         "width": 520,
         "height": 640,
         "minWidth": 360,
