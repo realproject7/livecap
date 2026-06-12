@@ -1,0 +1,66 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><link rel="stylesheet" href="tokens.css">
+<style>
+  body.backdrop { width: 1280px; height: 800px; }
+  .sheet { width: 480px; padding: 0; }
+  .head { padding: 18px 22px 12px; color: var(--text-original); font-size: 13px; font-weight: 600; letter-spacing: .06em; }
+  .grp { padding: 14px 22px; }
+  .lbl { color: var(--text-meta); font-size: 10.5px; font-weight: 600; letter-spacing: .09em; text-transform: uppercase; margin-bottom: 10px; }
+  .row { display: flex; align-items: center; gap: 10px; margin-bottom: 10px; color: var(--text-translation); font-size: 13.5px; }
+  .row:last-child { margin-bottom: 0; }
+  .seg { display: flex; background: rgba(255,255,255,.05); border-radius: var(--radius-control); padding: 3px; flex: 1; }
+  .seg div { flex: 1; text-align: center; padding: 7px; border-radius: 7px; font-size: 13px; color: var(--text-meta); }
+  .seg .on { background: rgba(255,255,255,.1); color: var(--text-original); font-weight: 600; }
+  .bar { height: 6px; border-radius: 3px; background: rgba(255,255,255,.07); flex: 1; overflow: hidden; }
+  .bar i { display: block; height: 100%; width: 37%; background: var(--accent-live); border-radius: 3px; }
+  .ok { color: var(--accent-live); }
+  .kbd { background: rgba(255,255,255,.07); border-radius: 5px; padding: 2px 7px; font-size: 11.5px; color: var(--text-translation); }
+</style></head>
+<body class="backdrop"><div class="blob1"></div><div class="blob2"></div>
+
+<div class="glass sheet">
+  <div class="head">SETTINGS</div>
+  <div class="hairline-h" style="margin:0 22px"></div>
+
+  <div class="grp">
+    <div class="lbl">Engine</div>
+    <div class="row"><div class="seg"><div class="on">Claude CLI · Haiku</div><div>Local · Qwen 4B</div></div></div>
+    <div class="row"><span class="t-meta">This month</span><div class="bar"><i></i></div><span class="mono" style="color:var(--text-original);font-size:12.5px">$7.40 / $20.00</span></div>
+    <div class="row t-meta">≈ 32 meeting-hours left · resets Jul 1</div>
+    <div class="row"><span class="ok">✓</span> Auto-switch to Local when pool runs low</div>
+  </div>
+  <div class="hairline-h" style="margin:0 22px"></div>
+
+  <div class="grp">
+    <div class="lbl">Language</div>
+    <div class="row">Translate into&nbsp; <b style="color:var(--text-original)">한국어 ▾</b></div>
+  </div>
+  <div class="hairline-h" style="margin:0 22px"></div>
+
+  <div class="grp">
+    <div class="lbl">Captions</div>
+    <div class="row">Size&nbsp; <span style="font-size:11px">Aa</span> <span style="font-size:14px;color:var(--text-original)">Aa</span> <span style="font-size:17px">Aa</span>
+      <span style="margin-left:auto">▢ Click-through (Strip)</span></div>
+  </div>
+  <div class="hairline-h" style="margin:0 22px"></div>
+
+  <div class="grp">
+    <div class="lbl">Archive</div>
+    <div class="row"><span class="ok">✓</span> Auto-save transcripts</div>
+    <div class="row">Folder&nbsp; <b style="color:var(--text-original)">~/Documents/LiveCap ▾</b><span style="margin-left:auto">keep <b style="color:var(--text-original)">forever ▾</b></span></div>
+  </div>
+  <div class="hairline-h" style="margin:0 22px"></div>
+
+  <div class="grp">
+    <div class="lbl">Privacy</div>
+    <div class="row"><span class="ok">✓</span> Hidden from screen sharing</div>
+    <div class="row"><span class="ok">✓</span> Audio never leaves this Mac</div>
+  </div>
+  <div class="hairline-h" style="margin:0 22px"></div>
+
+  <div class="grp" style="padding-bottom:20px">
+    <div class="lbl">Hotkeys</div>
+    <div class="row">Show / hide <span class="kbd">⌥ Space</span><span style="margin-left:auto">Mode <span class="kbd">⌥⇧ Space</span></span></div>
+  </div>
+</div>
+</body></html>

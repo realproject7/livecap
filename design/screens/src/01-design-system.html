@@ -1,0 +1,68 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><link rel="stylesheet" href="tokens.css">
+<style>
+  body { width: 1100px; background: #15171b; padding: 48px 56px; }
+  h1 { color: var(--text-original); font-size: 22px; font-weight: 700; margin-bottom: 6px; }
+  .sub { color: var(--text-meta); font-size: 13px; margin-bottom: 36px; }
+  h2 { color: var(--text-meta); font-size: 11px; font-weight: 600; letter-spacing: .1em; text-transform: uppercase; margin: 34px 0 16px; }
+  .swatches { display: flex; gap: 14px; }
+  .sw { width: 150px; }
+  .sw .c { height: 64px; border-radius: 10px; margin-bottom: 8px; border: 1px solid rgba(255,255,255,.07); }
+  .sw .n { color: var(--text-translation); font-size: 12px; }
+  .sw .v { color: var(--text-meta); font-size: 11px; }
+  .typerow { display: flex; align-items: baseline; gap: 24px; margin-bottom: 14px; }
+  .typerow .spec { width: 280px; color: var(--text-meta); font-size: 11.5px; }
+  .states { display: flex; flex-direction: column; gap: 0; width: 640px; }
+  .state { display: flex; gap: 24px; padding: 14px 0; border-bottom: 1px solid var(--hairline); }
+  .state .lbl { width: 170px; color: var(--text-meta); font-size: 11.5px; padding-top: 2px; flex-shrink: 0; }
+  .glasschip { display: inline-block; padding: 18px 26px; border-radius: var(--radius-panel);
+    background: var(--glass-bg); box-shadow: inset 0 .5px 0 rgba(255,255,255,.09); }
+  .rules { color: var(--text-translation); font-size: 13.5px; line-height: 1.7; max-width: 660px; }
+  .rules b { color: var(--text-original); }
+</style></head>
+<body>
+  <h1>LiveCap — Glass design system</h1>
+  <div class="sub">Proposal §7 · v1 · the words are the product; everything else must disappear</div>
+
+  <h2>The five rules</h2>
+  <div class="rules">
+    1 · <b>Text floats, chrome vanishes</b> — controls on hover only, fade after 3 s, no boxes.&nbsp;&nbsp;
+    2 · <b>Hierarchy is brightness</b> — original > translation > partial.&nbsp;&nbsp;
+    3 · <b>One accent</b> — amber, only for live things.&nbsp;&nbsp;
+    4 · <b>Motion is fade</b> — 150 ms, nothing slides.&nbsp;&nbsp;
+    5 · <b>Invisible to everyone else</b> — excluded from screen capture.
+  </div>
+
+  <h2>Color tokens</h2>
+  <div class="swatches">
+    <div class="sw"><div class="c" style="background:rgba(13,15,18,.58)"></div><div class="n">glass/bg</div><div class="v">#0D0F12 @ 58% + blur 24</div></div>
+    <div class="sw"><div class="c" style="background:#f2f4f6"></div><div class="n">text/original</div><div class="v">#F2F4F6</div></div>
+    <div class="sw"><div class="c" style="background:#b8bec6"></div><div class="n">text/translation</div><div class="v">#B8BEC6</div></div>
+    <div class="sw"><div class="c" style="background:#8a9099"></div><div class="n">text/partial</div><div class="v">#8A9099</div></div>
+    <div class="sw"><div class="c" style="background:#6b7178"></div><div class="n">text/meta</div><div class="v">#6B7178</div></div>
+    <div class="sw"><div class="c" style="background:#e8b84b"></div><div class="n">accent/live</div><div class="v">#E8B84B</div></div>
+  </div>
+
+  <h2>Type scale (system font · SF Pro)</h2>
+  <div class="typerow"><div class="spec">original · 15/1.45 · medium</div><div class="t-original">The quick brown fox jumps over the lazy dog</div></div>
+  <div class="typerow"><div class="spec">translation · 13.5/1.4 · regular</div><div class="t-translation">다람쥐 헌 쳇바퀴에 타고파 — 번역은 한 톤 아래</div></div>
+  <div class="typerow"><div class="spec">partial · 15/1.45 · regular</div><div class="t-partial">streaming words land two tones down</div></div>
+  <div class="typerow"><div class="spec">meta · 11/1.3</div><div class="t-meta">10:45 · them · reconnecting engine…</div></div>
+  <div class="typerow"><div class="spec">numerals · SF Mono tabular</div><div class="t-original mono">$7.40 / $20.00 · 47 min</div></div>
+
+  <h2>Caption block — five states</h2>
+  <div class="glasschip"><div class="states">
+    <div class="state"><div class="lbl">1 · streaming</div><div><div class="t-partial">And I had, um, I started by ju<span class="cursor"></span></div></div></div>
+    <div class="state"><div class="lbl">2 · finalized<br>(translation pending)</div><div><div class="t-original">And I had — I started by just listing</div><div class="t-meta">⋯</div></div></div>
+    <div class="state"><div class="lbl">3 · translated</div><div><div class="t-original">And I had — I started by just listing</div><div class="t-translation">목록을 만드는 것부터 시작했습니다</div></div></div>
+    <div class="state"><div class="lbl">4 · low confidence</div><div><div class="t-partial">(and treat it as a stack<span style="color:var(--text-meta)">(?)</span> rank…)</div><div class="t-translation" style="color:var(--text-partial)">그리고 그것을 스택 랭크(?)로 취급…</div></div></div>
+    <div class="state" style="border-bottom:none"><div class="lbl">5 · pinned</div><div><div class="t-original"><span class="pin">📌</span> …treat it as a stack rank rather than a raw excitement level.</div><div class="t-translation">단순 흥미도가 아니라 스택 랭킹으로 취급하자는 것.</div></div></div>
+  </div></div>
+
+  <h2>Atoms</h2>
+  <div style="display:flex;gap:18px;align-items:center">
+    <span class="live-dot"></span><span class="t-meta">live dot</span>
+    <span class="chip">✦ Suggest</span><span class="chip">👍 Agree</span><span class="t-meta">chips</span>
+    <div class="input-row" style="width:300px"><span class="ph">Quick translate…</span><span class="send">↑</span></div>
+  </div>
+</body></html>

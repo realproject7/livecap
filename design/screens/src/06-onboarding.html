@@ -1,0 +1,47 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><link rel="stylesheet" href="tokens.css">
+<style>
+  body.backdrop { width: 1280px; height: 620px; gap: 28px; }
+  .card { width: 340px; height: 440px; padding: 28px 26px; display: flex; flex-direction: column; }
+  .step { color: var(--text-meta); font-size: 10.5px; font-weight: 600; letter-spacing: .12em; margin-bottom: 14px; }
+  .ttl { color: var(--text-original); font-size: 19px; font-weight: 600; line-height: 1.3; margin-bottom: 14px; }
+  .desc { color: var(--text-translation); font-size: 13.5px; line-height: 1.55; }
+  .desc .dim { color: var(--text-meta); }
+  .rowi { display: flex; gap: 10px; align-items: center; margin: 10px 0; color: var(--text-translation); font-size: 13.5px; }
+  .cta { margin-top: auto; background: rgba(255,255,255,.1); color: var(--text-original);
+    border-radius: var(--radius-control); text-align: center; padding: 11px; font-size: 13.5px; font-weight: 600; }
+  .cta.quiet { background: transparent; color: var(--text-meta); font-weight: 400; padding: 8px; }
+  .ok { color: var(--accent-live); }
+  .sel { background: rgba(255,255,255,.055); border-radius: var(--radius-control); padding: 10px 14px;
+    color: var(--text-original); font-size: 14px; display: flex; }
+  .sel span:last-child { margin-left: auto; color: var(--text-meta); }
+  .gauge-note { margin-top: 12px; }
+</style></head>
+<body class="backdrop"><div class="blob1"></div><div class="blob2"></div>
+
+<div class="glass card">
+  <div class="step">1 · AUDIO</div>
+  <div class="ttl">LiveCap hears two things</div>
+  <div class="rowi">🔊 <span>What you hear <span class="dim">— system audio</span></span></div>
+  <div class="rowi">🎤 <span>What you say <span class="dim">— microphone</span></span></div>
+  <div class="desc" style="margin-top:10px"><span class="dim">Both stay on this Mac. Nothing is uploaded.</span></div>
+  <div class="cta">Grant audio access</div>
+</div>
+
+<div class="glass card">
+  <div class="step">2 · LANGUAGE</div>
+  <div class="ttl">Translate into…</div>
+  <div class="sel"><span>한국어</span><span>▾</span></div>
+  <div class="desc" style="margin-top:14px">Spoken language is detected automatically — there is no source language to pick.</div>
+  <div class="cta">Continue</div>
+</div>
+
+<div class="glass card">
+  <div class="step">3 · ENGINE</div>
+  <div class="ttl"><span class="ok">✓</span> Claude CLI found</div>
+  <div class="desc">Signed in on your Pro plan.<br>Meetings use your plan's SDK credits — about <b style="color:var(--text-original)">50 hrs/month</b>.</div>
+  <div class="desc gauge-note"><span class="dim">▢ Or use the local model instead — free, 2.4 GB download.</span></div>
+  <div class="cta">Start captioning</div>
+  <div class="cta quiet">Use local model</div>
+</div>
+</body></html>

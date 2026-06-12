@@ -1,0 +1,7 @@
+<svg width="36" height="36" viewBox="0 0 36 36" xmlns="http://www.w3.org/2000/svg">
+  <!-- LiveCap menu bar template glyph (black = template; macOS recolors automatically).
+       Matches app icon family: live dot + bright caption bar + dim caption bar. -->
+  <circle cx="5" cy="13" r="3" fill="#000"/>
+  <rect x="11" y="10" width="22" height="6" rx="3" fill="#000"/>
+  <rect x="11" y="21" width="22" height="5" rx="2.5" fill="none" stroke="#000" stroke-width="2"/>
+</svg>

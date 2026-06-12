@@ -1,0 +1,48 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><link rel="stylesheet" href="tokens.css">
+<style>
+  body.backdrop { width: 1280px; height: 800px; gap: 32px; }
+  .pane { width: 460px; height: 560px; padding: 0; display: flex; flex-direction: column; }
+  .head { padding: 16px 20px 12px; display: flex; align-items: baseline; }
+  .head .ttl { color: var(--text-original); font-size: 13px; font-weight: 600; letter-spacing: .06em; }
+  .head .meta { margin-left: auto; }
+  .body { padding: 16px 20px; flex: 1; }
+  .body ul { list-style: none; }
+  .body li { color: var(--text-translation); font-size: 13.5px; line-height: 1.5; margin-bottom: 12px; padding-left: 14px; position: relative; }
+  .body li::before { content: "•"; position: absolute; left: 0; color: var(--text-meta); }
+  .sec { color: var(--text-meta); font-size: 10.5px; font-weight: 600; letter-spacing: .09em; text-transform: uppercase; margin: 18px 0 10px; }
+  .sec:first-child { margin-top: 0; }
+  .todo { color: var(--text-translation); font-size: 13.5px; line-height: 1.5; margin-bottom: 10px; display: flex; gap: 9px; }
+  .todo .box { color: var(--text-meta); }
+  .foot { padding: 12px 20px 16px; display: flex; gap: 8px; }
+</style></head>
+<body class="backdrop"><div class="blob1"></div><div class="blob2"></div>
+
+<div class="glass pane">
+  <div class="head"><div class="ttl">MEETING SO FAR</div><div class="meta t-meta mono">47 min</div></div>
+  <div class="hairline-h" style="margin:0 20px"></div>
+  <div class="body">
+    <ul>
+      <li>Stack-rank vs raw excitement scoring for feature voting</li>
+      <li>Budget concern raised on contractor expansion</li>
+      <li>MAU threshold: 3 candidate definitions discussed</li>
+    </ul>
+  </div>
+  <div class="foot"><span class="chip">English ▾</span><span class="chip">⧉ Copy</span><span class="chip">Save .md</span></div>
+</div>
+
+<div class="glass pane">
+  <div class="head"><div class="ttl">MEETING BOARD</div><div class="meta t-meta">auto-updates · 60s</div></div>
+  <div class="hairline-h" style="margin:0 20px"></div>
+  <div class="body">
+    <div class="sec">Decisions</div>
+    <div class="todo"><span style="color:var(--accent-live)">●</span><span>Use stack rank, not raw excitement scores</span></div>
+    <div class="sec">Action items</div>
+    <div class="todo"><span class="box">□</span><span>Mike → share the apps list</span></div>
+    <div class="todo"><span class="box">□</span><span>Me → budget memo by Friday</span></div>
+    <div class="sec">Open questions</div>
+    <div class="todo"><span class="box">?</span><span>Which MAU definition wins</span></div>
+  </div>
+  <div class="foot"><span class="chip">⧉ Copy</span><span class="chip">Save .md</span></div>
+</div>
+</body></html>

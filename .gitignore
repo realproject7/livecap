@@ -1,0 +1,56 @@
+# --- credentials & secrets: never committed, no exceptions ---
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+*.p8
+*.mobileprovision
+*.keychain*
+credentials*.json
+secrets*
+.netrc
+.npmrc
+
+# --- AI / LLM runtime artifacts ---
+models/
+*.gguf
+*.onnx
+*.bin
+.claude/
+.od/
+
+# --- session data (user transcripts must never land in the repo) ---
+LiveCap/
+*.transcript.md
+archive-test-output/
+
+# --- node ---
+node_modules/
+dist/
+dist-ssr/
+*.local
+npm-debug.log*
+pnpm-debug.log*
+.pnpm-store/
+
+# --- rust / tauri ---
+target/
+src-tauri/target/
+src-tauri/gen/
+
+# --- macOS ---
+.DS_Store
+*.dSYM/
+build/
+DerivedData/
+
+# --- editors / misc ---
+.idea/
+*.swp
+.vscode/*
+!.vscode/extensions.json
+*.log
+.tmp/
+coverage/

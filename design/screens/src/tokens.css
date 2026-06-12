@@ -1,0 +1,87 @@
+/* LiveCap Glass design tokens — proposal §7.2 */
+:root {
+  --glass-bg: rgba(13, 15, 18, 0.58);
+  --glass-blur: 24px;
+  --text-original: #f2f4f6;
+  --text-translation: #b8bec6;
+  --text-partial: #8a9099;
+  --text-meta: #6b7178;
+  --accent-live: #e8b84b;
+  --hairline: rgba(255, 255, 255, 0.06);
+  --radius-panel: 16px;
+  --radius-control: 9px;
+  --font: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI", sans-serif;
+}
+* { margin: 0; padding: 0; box-sizing: border-box; }
+html, body { font-family: var(--font); -webkit-font-smoothing: antialiased; }
+
+/* ---- mock meeting backdrop (stands in for whatever is behind the overlay) ---- */
+.backdrop {
+  position: relative; overflow: hidden; background: #1a1d22;
+  display: flex; align-items: center; justify-content: center;
+}
+.backdrop::before, .backdrop::after { content: ""; position: absolute; border-radius: 12px; }
+.backdrop::before { /* big video tile */
+  inset: 4% 4% 4% 4%;
+  background: linear-gradient(135deg, #2a3038 0%, #232830 45%, #1e232b 100%);
+}
+.backdrop::after { /* self-view tile */
+  width: 17%; height: 22%; right: 6.5%; bottom: 7%;
+  background: linear-gradient(160deg, #343b45, #262c34);
+  box-shadow: 0 8px 28px rgba(0,0,0,.4);
+}
+.backdrop .blob1, .backdrop .blob2 { position: absolute; border-radius: 50%; filter: blur(70px); }
+.backdrop .blob1 { width: 420px; height: 420px; left: 14%; top: 12%; background: rgba(86, 109, 148, 0.22); }
+.backdrop .blob2 { width: 380px; height: 380px; right: 20%; top: 40%; background: rgba(148, 113, 86, 0.13); }
+
+/* ---- the glass ---- */
+.glass {
+  position: relative; z-index: 2;
+  background: var(--glass-bg);
+  -webkit-backdrop-filter: blur(var(--glass-blur)) saturate(1.1);
+  backdrop-filter: blur(var(--glass-blur)) saturate(1.1);
+  border-radius: var(--radius-panel);
+  box-shadow: 0 18px 60px rgba(0, 0, 0, 0.45), inset 0 0.5px 0 rgba(255, 255, 255, 0.09);
+}
+
+/* ---- text hierarchy (rule 2: hierarchy is brightness) ---- */
+.t-original { color: var(--text-original); font-size: 15px; line-height: 1.45; font-weight: 500; }
+.t-translation { color: var(--text-translation); font-size: 13.5px; line-height: 1.4; font-weight: 400; }
+.t-partial { color: var(--text-partial); font-size: 15px; line-height: 1.45; font-weight: 400; }
+.t-meta { color: var(--text-meta); font-size: 11px; line-height: 1.3; font-weight: 400; }
+.mono { font-family: "SF Mono", ui-monospace, Menlo, monospace; font-variant-numeric: tabular-nums; }
+
+/* ---- shared atoms ---- */
+.live-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--accent-live);
+  box-shadow: 0 0 8px rgba(232, 184, 75, 0.55); flex-shrink: 0; }
+.hairline-h { height: 1px; background: var(--hairline); }
+.cursor { display: inline-block; width: 2px; height: 14px; background: var(--text-partial);
+  vertical-align: -2px; margin-left: 1px; border-radius: 1px; }
+.chip {
+  display: inline-flex; align-items: center; gap: 6px;
+  color: var(--text-translation); font-size: 12px; padding: 6px 12px;
+  border-radius: 99px; background: rgba(255, 255, 255, 0.05);
+}
+.input-row {
+  display: flex; align-items: center; gap: 8px;
+  background: rgba(255, 255, 255, 0.055); border-radius: 12px; padding: 10px 14px;
+}
+.input-row .ph { color: var(--text-meta); font-size: 13px; }
+.send { margin-left: auto; width: 24px; height: 24px; border-radius: 50%;
+  background: rgba(255, 255, 255, 0.09); color: var(--text-translation);
+  display: flex; align-items: center; justify-content: center; font-size: 13px; }
+
+/* caption blocks */
+.cap { max-width: 86%; margin-bottom: 18px; }
+.cap.me { margin-left: auto; text-align: right; }
+.cap .row { display: flex; align-items: baseline; gap: 8px; }
+.cap.me .row { justify-content: flex-end; }
+.cap .tr { margin-top: 3px; }
+.pin { color: var(--accent-live); font-size: 12px; }
+
+/* window chrome (hover state shown) */
+.chrome { display: flex; align-items: center; gap: 14px; padding: 12px 16px 10px; }
+.chrome .btn { width: 22px; height: 22px; border-radius: 6px; background: rgba(255,255,255,.06);
+  color: var(--text-translation); font-size: 11px; display: flex; align-items: center; justify-content: center; }
+.chrome .tabs { display: flex; gap: 14px; font-size: 12.5px; color: var(--text-meta); margin: 0 auto; }
+.chrome .tabs .on { color: var(--text-original); font-weight: 600; }

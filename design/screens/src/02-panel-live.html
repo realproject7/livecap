@@ -1,0 +1,60 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><link rel="stylesheet" href="tokens.css">
+<style>
+  body.backdrop { width: 1280px; height: 800px; }
+  .panel { width: 520px; display: flex; flex-direction: column; }
+  .summary { display: flex; gap: 9px; align-items: flex-start; padding: 12px 18px 14px; }
+  .summary .live-dot { margin-top: 5px; }
+  .summary .txt { color: var(--text-translation); font-size: 12.5px; line-height: 1.45; }
+  .summary .lbl { color: var(--accent-live); font-size: 10.5px; font-weight: 600; letter-spacing: .08em; text-transform: uppercase; display:block; margin-bottom: 2px;}
+  .feed { padding: 18px 20px 6px; flex: 1; }
+  .chips { display: flex; gap: 8px; padding: 12px 18px 10px; }
+  .footer { padding: 0 16px 16px; }
+  .ghost { color: var(--text-meta); font-size: 11px; margin-left: 8px; opacity:.85;}
+</style></head>
+<body class="backdrop"><div class="blob1"></div><div class="blob2"></div>
+
+<div class="glass panel">
+  <div class="chrome">
+    <div style="display:flex;gap:8px"><div class="btn">⏸</div><div class="btn">⏹</div></div>
+    <div class="tabs"><span class="on">Live</span><span>Summary</span><span>Board</span></div>
+    <div style="display:flex;gap:8px"><div class="btn">⌃</div><div class="btn">⋯</div><div class="btn">✕</div></div>
+  </div>
+
+  <div class="summary">
+    <div class="live-dot"></div>
+    <div class="txt"><span class="lbl">Live summary</span>Discussing MAU criteria and how to rank feature interest across the team…</div>
+  </div>
+  <div class="hairline-h" style="margin:0 18px"></div>
+
+  <div class="feed">
+    <div class="cap">
+      <div class="row"><div class="t-original">Pat, thanks a lot.</div><div class="t-meta">10:45</div></div>
+      <div class="tr t-translation">Pat, 정말 고마워요.</div>
+    </div>
+    <div class="cap">
+      <div class="row"><div class="t-original">Have a good day.</div><div class="t-meta">10:45</div></div>
+      <div class="tr t-translation">좋은 하루 보내세요.</div>
+    </div>
+    <div class="cap me">
+      <div class="row"><div class="t-meta">10:45</div><div class="t-original">I agree, but I'm a bit worried about the budget.</div></div>
+      <div class="tr t-translation">동의하지만 예산이 조금 걱정돼요.</div>
+    </div>
+    <div class="cap">
+      <div class="row"><span class="pin">📌</span><div class="t-original">…treat it as a stack rank rather than a raw excitement level.</div><div class="t-meta">10:46</div></div>
+      <div class="tr t-translation">단순 흥미도가 아니라 스택 랭킹으로 취급하자는 것.<span class="ghost">⧉ copy · ⟳ retranslate</span></div>
+    </div>
+    <div class="cap">
+      <div class="t-partial">And I had, um, I started by ju<span class="cursor"></span></div>
+    </div>
+  </div>
+
+  <div class="chips">
+    <span class="chip" style="color:var(--text-original)">✦ Suggest</span>
+    <span class="chip">👍 Agree</span><span class="chip">✋ Push back</span><span class="chip">? Ask</span>
+  </div>
+  <div class="footer">
+    <div class="input-row"><span class="ph">Quick translate — type in your language…</span><span class="send">↑</span></div>
+  </div>
+</div>
+</body></html>
