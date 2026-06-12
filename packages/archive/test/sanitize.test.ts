@@ -45,6 +45,11 @@ describe("sanitizeTitle — path traversal defense (SECURITY.md)", () => {
     expect(safe.length).toBeLessThanOrEqual(MAX_TITLE_LENGTH);
   });
 
+  it("strips bidi/format controls (filename spoofing)", () => {
+    // U+202E RIGHT-TO-LEFT OVERRIDE, U+200F RLM, U+2066 LRI
+    expect(sanitizeTitle("a\u202eb\u200fc\u2066d")).toBe("abcd");
+  });
+
   it("preserves ordinary unicode titles (e.g. Korean)", () => {
     expect(sanitizeTitle("주간 회의 요약")).toBe("주간 회의 요약");
   });

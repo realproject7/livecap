@@ -69,7 +69,10 @@ export class SessionArchiveWriter {
   open(): void {
     if (this.opened) return;
     this.fs.mkdirp(this.folder);
-    this.workingPath = this.resolveInside(`${this.meta.fileNamePrefix} — ${WORKING_TITLE}.md`);
+    // resolveUnique (not resolveInside) so a same-minute restart after a crash
+    // never overwrites the orphaned `(recording).md` of the crashed session —
+    // that file is exactly what "crash loses nothing" must preserve.
+    this.workingPath = this.resolveUnique(`${this.meta.fileNamePrefix} — ${WORKING_TITLE}.md`);
     this.atomicWrite(this.workingPath, renderDocument(this.model));
     this.opened = true;
   }
@@ -129,7 +132,9 @@ export class SessionArchiveWriter {
     const candidate = this.fs.join(this.folder, fileName);
     const root = this.fs.resolve(this.folder);
     const resolved = this.fs.resolve(candidate);
-    if (resolved !== root && !resolved.startsWith(root + this.fs.sep)) {
+    // Must be strictly inside the folder — the folder itself is not a valid
+    // write target, so `resolved === root` is rejected too.
+    if (!resolved.startsWith(root + this.fs.sep)) {
       throw new Error("archive path escapes the configured folder");
     }
     return resolved;

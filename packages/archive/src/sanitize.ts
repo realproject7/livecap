@@ -20,6 +20,9 @@ const CONTROL_CHARS = /[\u0000-\u001f\u007f]/g;
 const PATH_SEPARATORS = /[/\\]/g;
 const WINDOWS_RESERVED = /[<>:"|?*]/g;
 const UNICODE_SEPARATOR_LOOKALIKES = /[\u2044\u2215\uff0f\uff3c\u29f8\u29f9]/g;
+// Bidi/format controls (RLO and friends, line/para separators) — a filename
+// spoofing risk, not traversal, but strip them so titles cannot be reordered.
+const BIDI_FORMAT_CONTROLS = /[\u200e\u200f\u202a-\u202e\u2066-\u2069\u2028\u2029]/g;
 
 /**
  * Sanitize an LLM-generated title into one safe filename segment.
@@ -30,6 +33,7 @@ const UNICODE_SEPARATOR_LOOKALIKES = /[\u2044\u2215\uff0f\uff3c\u29f8\u29f9]/g;
 export function sanitizeTitle(raw: string): string {
   let title = (raw ?? "").normalize("NFC");
   title = title.replace(CONTROL_CHARS, "");
+  title = title.replace(BIDI_FORMAT_CONTROLS, "");
   title = title.replace(PATH_SEPARATORS, " ");
   title = title.replace(UNICODE_SEPARATOR_LOOKALIKES, " ");
   title = title.replace(WINDOWS_RESERVED, "");

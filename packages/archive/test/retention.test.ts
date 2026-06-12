@@ -33,6 +33,15 @@ describe("sweepOldArchives", () => {
     expect(fs.exists(fs.join(FOLDER, "notes.txt"))).toBe(true);
   });
 
+  it("sweeps stale .md.tmp crash orphans too", () => {
+    const fs = seed();
+    fs.writeFile(fs.join(FOLDER, "2026-06-11 1045 — (recording).md.tmp"), "partial");
+    fs.setMtime(fs.join(FOLDER, "2026-06-11 1045 — (recording).md.tmp"), NOW - 30 * DAY);
+    const removed = sweepOldArchives({ fs, folder: FOLDER, maxAgeDays: 7, nowMs: NOW });
+    expect(removed).toContain("2026-06-11 1045 — (recording).md.tmp");
+    expect(fs.exists(fs.join(FOLDER, "2026-06-11 1045 — (recording).md.tmp"))).toBe(false);
+  });
+
   it("is a no-op when retention is disabled (default off)", () => {
     const fs = seed();
     expect(sweepOldArchives({ fs, folder: FOLDER, maxAgeDays: 0, nowMs: NOW })).toEqual([]);

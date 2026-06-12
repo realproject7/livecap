@@ -85,6 +85,29 @@ describe("SessionArchiveWriter — crash safety", () => {
     expect(fs.readFile(writer.path)).toBe(before);
   });
 
+  it("a same-minute restart after a crash never overwrites the orphaned working file", () => {
+    const fs = new FakeFs();
+
+    // Session A crashes after writing some transcript, leaving its orphan.
+    const a = new SessionArchiveWriter({ fs, folder: FOLDER, meta: META });
+    a.open();
+    a.appendCaption(entry(1));
+    const orphanPath = a.path;
+    const orphanContent = fs.readFile(orphanPath);
+    // (no finalize — A is abandoned, simulating a crash)
+
+    // Session B starts within the same minute → identical fileNamePrefix.
+    const b = new SessionArchiveWriter({ fs, folder: FOLDER, meta: META });
+    b.open();
+    b.appendCaption(entry(2));
+
+    expect(b.path).not.toBe(orphanPath);
+    expect(fs.exists(orphanPath)).toBe(true);
+    expect(fs.readFile(orphanPath)).toBe(orphanContent); // A's transcript intact
+    expect(fs.readFile(orphanPath)).toContain("line 1");
+    expect(fs.readFile(b.path)).toContain("line 2");
+  });
+
   it("a crash mid-append does not corrupt earlier finalized content", () => {
     const fs = new FakeFs();
     const writer = new SessionArchiveWriter({ fs, folder: FOLDER, meta: META });

@@ -33,7 +33,10 @@ export function sweepOldArchives(options: RetentionOptions): string[] {
   const cutoff = nowMs - maxAgeDays * 24 * 60 * 60 * 1000;
   const removed: string[] = [];
   for (const name of names) {
-    if (!name.endsWith(".md")) continue;
+    // Sweep finished archives and also stale `.md.tmp` orphans — a crash
+    // between the temp write and rename leaves one behind, and it would
+    // otherwise accumulate one per crash in the user's folder.
+    if (!name.endsWith(".md") && !name.endsWith(".md.tmp")) continue;
     const path = fs.join(folder, name);
     if (fs.mtimeMs(path) < cutoff) {
       fs.unlink(path);
