@@ -87,8 +87,24 @@ describe("LocalLlmEngine — real spawn + HTTP (fake llama-server)", () => {
 
   it("errors when the server never becomes healthy", async () => {
     // Point at a bin that exits immediately — health never comes up.
-    const engine = await makeEngine({ bin: process.execPath, extraArgs: ["-e", ""] , startupTimeoutMs: 1500 });
+    const engine = await makeEngine({ bin: process.execPath, extraArgs: ["-e", ""], startupTimeoutMs: 1500 });
     await expect(engine.start()).rejects.toThrow();
     expect(engine.health().status).toBe("error");
+  });
+
+  it("kills a live-but-unhealthy server on startup timeout and stays restartable", async () => {
+    // The fake server runs (and holds the port) but /health stays 503 well past
+    // the timeout — exactly the live-but-unhealthy case.
+    const engine = await makeEngine({
+      env: { ...process.env, LLAMA_FAKE_HEALTH_DELAY_MS: "5000" },
+      startupTimeoutMs: 600,
+    });
+    await expect(engine.start()).rejects.toThrow(/health timeout/);
+    expect(engine.health().status).toBe("error");
+    // If the timed-out child had been left attached, this second start() would
+    // early-return (resolve) instead of re-attempting — so a reject proves the
+    // child was killed and the handle cleared (the engine is restartable).
+    await expect(engine.start()).rejects.toThrow();
+    await engine.stop();
   });
 });

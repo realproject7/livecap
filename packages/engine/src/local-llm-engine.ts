@@ -140,7 +140,15 @@ export class LocalLlmEngine implements TranslationEngine {
     child.stdout.resume();
     child.once("exit", (code, signal) => this.onExit(code, signal));
 
-    await this.waitForHealth();
+    try {
+      await this.waitForHealth();
+    } catch (err) {
+      // A live-but-unhealthy server must not be left running, or it keeps the
+      // port/model open and the next start() early-returns into a non-ready
+      // engine. Kill it and clear the handle before rethrowing.
+      this.killChild();
+      throw err;
+    }
     this.statusValue = { status: "ready" };
   }
 
@@ -150,6 +158,13 @@ export class LocalLlmEngine implements TranslationEngine {
     this.child = null;
     this.statusValue = { status: "stopped" };
     child.kill("SIGTERM");
+  }
+
+  /** Force-terminate the child and clear the handle (failed-startup cleanup). */
+  private killChild(): void {
+    const child = this.child;
+    this.child = null;
+    child?.kill("SIGKILL");
   }
 
   async *translate(batch: Sentence[], ctx: RollingContext): AsyncIterable<Translation> {
@@ -206,7 +221,10 @@ export class LocalLlmEngine implements TranslationEngine {
 
   private onExit(code: number | null, signal: string | null): void {
     this.child = null;
-    if (this.statusValue.status !== "stopped") {
+    // Only an exit while running counts as a new error — don't clobber a
+    // deliberate stop() or an already-recorded startup error (e.g. the health
+    // timeout that just killed this child) with a less useful exit message.
+    if (this.statusValue.status === "starting" || this.statusValue.status === "ready") {
       let detail = `llama-server exited (code=${code ?? "null"}, signal=${signal ?? "null"})`;
       const tail = this.stderrTail.trim();
       if (tail !== "") detail += `; stderr tail: ${tail}`;
