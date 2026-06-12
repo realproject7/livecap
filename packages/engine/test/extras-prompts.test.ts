@@ -61,6 +61,23 @@ describe("parseSummaryBoard", () => {
     expect(board.decisions).toEqual([]);
     expect(board.actionItems).toEqual(["a → b"]);
   });
+
+  it("preserves leading digits in content, stripping only ordered-list markers", () => {
+    const { summary, board } = parseSummaryBoard(
+      [
+        "SUMMARY",
+        "- 2026 budget approved",
+        "DECISIONS",
+        "1. Use stack rank",
+        "2) Ship by Q3",
+        "OPEN QUESTIONS",
+        "- 3 hires by Q3?",
+      ].join("\n"),
+    );
+    expect(summary).toEqual(["2026 budget approved"]);
+    expect(board.decisions).toEqual(["Use stack rank", "Ship by Q3"]);
+    expect(board.openQuestions).toEqual(["3 hires by Q3?"]);
+  });
 });
 
 describe("buildReplyPrompt", () => {

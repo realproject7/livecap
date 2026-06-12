@@ -21,6 +21,37 @@ import process from "node:process";
 const stderrNoise = process.env.LIVECAP_FAKE_STDERR;
 if (stderrNoise) process.stderr.write(stderrNoise + "\n");
 
+// Echo mode: instead of replaying a fixture, parse each stdin user message and
+// emit a stream-json turn that echoes its text back. Lets a test assert what the
+// adapter actually sent (e.g. the [TASK] marker on complete()/summarize()).
+const echoMode = process.env.LIVECAP_FAKE_ECHO === "1";
+if (echoMode) {
+  const rl = createInterface({ input: process.stdin });
+  rl.on("line", (line) => {
+    let text = "";
+    try {
+      text = JSON.parse(line).message.content[0].text;
+    } catch {
+      text = "";
+    }
+    const assistant = {
+      type: "assistant",
+      message: { id: "echo", role: "assistant", content: [{ type: "text", text }] },
+    };
+    const result = {
+      type: "result",
+      subtype: "success",
+      is_error: false,
+      total_cost_usd: 0.001,
+      stop_reason: "end_turn",
+      result: text,
+      usage: { input_tokens: 1, output_tokens: 1, cache_read_input_tokens: 0 },
+    };
+    process.stdout.write(JSON.stringify(assistant) + "\n");
+    process.stdout.write(JSON.stringify(result) + "\n");
+  });
+} else {
+
 const fixturePath = process.env.LIVECAP_FAKE_FIXTURE;
 if (!fixturePath) {
   process.stderr.write("fake-cli: LIVECAP_FAKE_FIXTURE not set\n");
@@ -55,3 +86,5 @@ rl.on("line", () => {
   if (!block) return;
   for (const line of block) process.stdout.write(line + "\n");
 });
+
+}

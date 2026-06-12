@@ -115,7 +115,10 @@ function headerKey(line: string): keyof SectionBuckets | null {
 }
 
 function stripBulletMarker(line: string): string {
-  return line.replace(/^[-•□?▪*·\d.)\s]+/u, "").trim();
+  // Strip ONE leading marker: a bullet glyph or an ordered-list marker
+  // (`1.`, `2)`). Plain leading digits are content (e.g. "2026 budget") and
+  // must be preserved.
+  return line.replace(/^(?:[-•□?▪*·]|\d+[.)])\s*/u, "").trim();
 }
 
 /**

@@ -15,6 +15,7 @@ import { sanitizeChildEnv } from "./env";
 import { AsyncChannel } from "./internal/channel";
 import { Mutex } from "./internal/mutex";
 import {
+  asTaskMessage,
   buildSummaryMessage,
   buildSystemPrompt,
   buildTranslateMessage,
@@ -203,15 +204,20 @@ export class ClaudeCliEngine implements TranslationEngine {
   }
 
   async summarize(transcript: string): Promise<MeetingBrief> {
-    const text = await this.runTextTurn(buildSummaryMessage(transcript), "summary");
+    // [TASK]-marked so the session's translation system prompt yields to the
+    // summary instructions (see buildSystemPrompt).
+    const text = await this.runTextTurn(asTaskMessage(buildSummaryMessage(transcript)), "summary");
     return { ...parseBrief(text), usage: this.latestUsage };
   }
 
   async complete(request: CompletionRequest): Promise<Completion> {
     // The CLI session's system prompt is fixed at spawn, so a per-call system
-    // instruction is folded into the message.
-    const message = request.system ? `${request.system}\n\n${request.user}` : request.user;
-    const text = await this.runTextTurn(message, "completion");
+    // instruction is folded into the message and marked [TASK] so it overrides
+    // the default "translate only" contract instead of being translated.
+    const folded = request.system ? `${request.system}\n\n${request.user}` : request.user;
+    const text = await this.runTextTurn(asTaskMessage(folded), "completion");
+    // latestUsage is the just-completed turn's usage — safe because runTurn
+    // serializes turns through the mutex (one in flight at a time).
     return { text, usage: this.latestUsage };
   }
 
