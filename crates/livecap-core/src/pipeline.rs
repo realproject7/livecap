@@ -182,6 +182,15 @@ impl CaptionPipeline {
         Ok(())
     }
 
+    /// Stop live capture WITHOUT shutting the pipeline down (#11 pause):
+    /// capture threads stop and each channel's VAD state flushes (any
+    /// trailing speech is finalized). Capture can be started again on the
+    /// same pipeline to resume.
+    pub fn stop_capture(&mut self) {
+        self.mic_capture.take();
+        self.system_capture.take();
+    }
+
     /// Create a raw PCM feeder for `channel`, spawning its processing
     /// worker. Capture threads use this internally; tests and other audio
     /// sources can use it directly — close the feeder (drop the sender) to
