@@ -71,5 +71,17 @@ export function runTranslationEngineConformance(target: ConformanceTarget): void
         await engine.stop();
       }
     });
+
+    it("complete returns text + usage for a generic request", async () => {
+      const engine = await target.makeEngine();
+      await engine.start();
+      try {
+        const result = await engine.complete({ system: "Be brief.", user: "Say hi." });
+        expect(typeof result.text).toBe("string");
+        expect(result.usage).toBeDefined();
+      } finally {
+        await engine.stop();
+      }
+    });
   });
 }

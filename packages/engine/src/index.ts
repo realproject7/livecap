@@ -12,6 +12,8 @@ export type {
   EngineStatus,
   EngineHealth,
   TranslationEngine,
+  CompletionRequest,
+  Completion,
   ParsedEvent,
 } from "./types";
 
@@ -59,3 +61,21 @@ export type {
 export { nodeLedgerFs } from "./credit-fs";
 export { FallbackRouter } from "./fallback-router";
 export type { FallbackRouterOptions } from "./fallback-router";
+
+// Issue #9 — LLM extras pipeline (live summary/board, reply suggestions, quick translate).
+export { ExtrasPipeline } from "./extras-pipeline";
+export type {
+  ExtrasPipelineConfig,
+  CompletionEngine,
+  SummaryBoardResult,
+  TextResult,
+} from "./extras-pipeline";
+export {
+  buildSummaryBoardPrompt,
+  buildReplyPrompt,
+  buildQuickTranslatePrompt,
+  parseSummaryBoard,
+} from "./extras-prompts";
+export type { MeetingBoard, ReplyIntent, SummaryBoardParse } from "./extras-prompts";
+export { SummaryCadence } from "./summary-cadence";
+export type { SummaryCadenceOptions } from "./summary-cadence";

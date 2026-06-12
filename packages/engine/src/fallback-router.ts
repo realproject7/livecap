@@ -13,6 +13,8 @@
 // it externally; stop() handles both engines.
 
 import type {
+  Completion,
+  CompletionRequest,
   EngineHealth,
   MeetingBrief,
   RollingContext,
@@ -98,6 +100,10 @@ export class FallbackRouter implements TranslationEngine {
 
   summarize(transcript: string): Promise<MeetingBrief> {
     return this.active.summarize(transcript);
+  }
+
+  complete(request: CompletionRequest): Promise<Completion> {
+    return this.active.complete(request);
   }
 
   /** Subscribe to usage from BOTH engines, so accounting is continuous across a switch. */

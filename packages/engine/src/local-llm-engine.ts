@@ -8,8 +8,10 @@ import { spawn } from "node:child_process";
 import type { ChildProcessWithoutNullStreams } from "node:child_process";
 
 import { buildSummaryMessage, buildSystemPrompt, buildTranslateMessage } from "./prompt";
-import { stripNonTranslation } from "./translation-guard";
+import { stripNonTranslation, stripThinking } from "./translation-guard";
 import type {
+  Completion,
+  CompletionRequest,
   EngineHealth,
   MeetingBrief,
   RollingContext,
@@ -199,8 +201,15 @@ export class LocalLlmEngine implements TranslationEngine {
     return { ...parseBrief(content), usage: this.latestUsage };
   }
 
+  async complete(request: CompletionRequest): Promise<Completion> {
+    // Generic generation: use the caller's system (not the translation prompt)
+    // and keep the full output — only the hybrid-thinking block is stripped.
+    const { content } = await this.chat(request.user, request.system ?? "");
+    return { text: stripThinking(content).trim(), usage: this.latestUsage };
+  }
+
   /** One chat-completions round-trip against the local server. */
-  private async chat(userMessage: string): Promise<{ content: string }> {
+  private async chat(userMessage: string, system: string = this.systemPrompt): Promise<{ content: string }> {
     if (!this.child) throw new Error("engine not started");
     // Abort a hung (not dead) server so translate()/summarize() reject and #7's
     // auto-fallback gets a failure signal instead of stalling forever.
@@ -210,7 +219,7 @@ export class LocalLlmEngine implements TranslationEngine {
       headers: { "content-type": "application/json" },
       body: JSON.stringify({
         messages: [
-          { role: "system", content: this.systemPrompt },
+          ...(system ? [{ role: "system", content: system }] : []),
           { role: "user", content: userMessage },
         ],
         temperature: 0,

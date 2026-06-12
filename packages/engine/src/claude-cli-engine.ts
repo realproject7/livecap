@@ -22,6 +22,8 @@ import {
 } from "./prompt";
 import { StreamJsonParser } from "./stream-parser";
 import type {
+  Completion,
+  CompletionRequest,
   EngineHealth,
   MeetingBrief,
   ParsedEvent,
@@ -201,7 +203,21 @@ export class ClaudeCliEngine implements TranslationEngine {
   }
 
   async summarize(transcript: string): Promise<MeetingBrief> {
-    const line = formatUserMessageLine(buildSummaryMessage(transcript));
+    const text = await this.runTextTurn(buildSummaryMessage(transcript), "summary");
+    return { ...parseBrief(text), usage: this.latestUsage };
+  }
+
+  async complete(request: CompletionRequest): Promise<Completion> {
+    // The CLI session's system prompt is fixed at spawn, so a per-call system
+    // instruction is folded into the message.
+    const message = request.system ? `${request.system}\n\n${request.user}` : request.user;
+    const text = await this.runTextTurn(message, "completion");
+    return { text, usage: this.latestUsage };
+  }
+
+  /** Run one turn over stdin, returning the trimmed assistant text. */
+  private async runTextTurn(message: string, label: string): Promise<string> {
+    const line = formatUserMessageLine(message);
     let text = "";
     for await (const event of this.runTurn(line)) {
       if (event.kind === "text_delta") {
@@ -209,10 +225,10 @@ export class ClaudeCliEngine implements TranslationEngine {
       } else if (event.kind === "usage") {
         this.recordUsage(event);
       } else if (event.kind === "turn_end" && event.isError) {
-        throw new EngineTurnError(event.message ?? "summary turn failed", event.apiErrorStatus);
+        throw new EngineTurnError(event.message ?? `${label} turn failed`, event.apiErrorStatus);
       }
     }
-    return { ...parseBrief(text), usage: this.latestUsage };
+    return text.trim();
   }
 
   /** Run a single turn: write one stdin line, stream its events until turn_end. */
