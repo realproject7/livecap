@@ -213,6 +213,37 @@ pub fn run() {
             overlay::apply_mode(app.handle(), initial_mode);
             window.show()?;
 
+            // #54 debug probe: LIVECAP_UI_PROBE=1 makes Rust eval() a JS
+            // snippet inside the webview every 3s that reports page state via
+            // the ui_beat IPC command — works even when the app's own module
+            // failed to evaluate. If no heartbeat file appears, IPC itself is
+            // broken (e.g. CSP).
+            if std::env::var("LIVECAP_UI_PROBE").as_deref() == Ok("1") {
+                let probe_window = window.clone();
+                tauri::async_runtime::spawn(async move {
+                    let js = r##"(function(){
+                        try {
+                            var beat = {
+                                ts: Date.now(),
+                                mode: "probe",
+                                feedBlocks: document.querySelectorAll("#feed > *").length,
+                                latestSource: "readyState=" + document.readyState,
+                                latestTranslation: "bodyBytes=" + (document.body ? document.body.innerHTML.length : -1),
+                                capsuleText: "scripts=" + document.scripts.length,
+                                bootError: (window.__lcBootError || null)
+                            };
+                            window.__TAURI_INTERNALS__.invoke("ui_beat", { beat: beat });
+                        } catch (e) {
+                            try { window.__TAURI_INTERNALS__.invoke("ui_beat", { beat: { ts: Date.now(), mode: "probe-error", feedBlocks: 0, latestSource: String(e), latestTranslation: "", capsuleText: "", bootError: String(e) } }); } catch (_) {}
+                        }
+                    })()"##;
+                    loop {
+                        let _ = probe_window.eval(js);
+                        tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+                    }
+                });
+            }
+
             // Headless E2E support (also used by #13): start a captioning
             // session at launch when LIVECAP_AUTOSTART=1 — same code path as
             // the tray/chrome start, just triggered without UI.

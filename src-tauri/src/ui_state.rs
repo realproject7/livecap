@@ -40,7 +40,22 @@ fn now_ms() -> u64 {
 }
 
 #[tauri::command]
-pub fn ui_beat(state: tauri::State<'_, UiState>, beat: UiBeat) {
+pub fn ui_beat(app: tauri::AppHandle, state: tauri::State<'_, UiState>, beat: UiBeat) {
+    // Mirror every 5th beat to <app-data>/ui-heartbeat.json (atomic) so
+    // headless verification can read the webview's render state without a
+    // webview-side invoke path.
+    if beat.ts / 1000 % 5 == 0 {
+        if let (Ok(dir), Ok(json)) = (
+            tauri::Manager::path(&app).app_data_dir(),
+            serde_json::to_vec(&beat),
+        ) {
+            let tmp = dir.join("ui-heartbeat.json.tmp");
+            let dst = dir.join("ui-heartbeat.json");
+            if std::fs::write(&tmp, &json).is_ok() {
+                let _ = std::fs::rename(&tmp, &dst);
+            }
+        }
+    }
     *state.0.lock().expect("ui beat lock") = Some(beat);
 }
 

@@ -516,6 +516,20 @@ function showToast(text: string): void {
 
 /* ================= event streams ================= */
 
+// #54: 1 Hz render-state heartbeat at module top level — beats even if the
+// async init below hangs or rejects, so a missing beat means the module
+// itself never evaluated.
+startUiHeartbeat(() => {
+  const latest = feed.latest();
+  return {
+    mode: state.mode,
+    feedBlocks: feed.blocks.length,
+    latestSource: latest?.source ?? "",
+    latestTranslation: latest?.translation ?? "",
+    capsuleText: capsuleTxt.textContent ?? "",
+  };
+});
+
 void listen<CaptionBridgeEvent>("caption://event", (event) => {
   const block = feed.applyCaption(event.payload);
   const isNew = !blockEls.has(block.key);
@@ -693,19 +707,6 @@ void (async () => {
   applyCaptionSize(settings.captionSize);
   render();
   syncMiniViews();
-
-  // #54: 1 Hz render-state heartbeat so headless verification can see what
-  // the webview is actually showing (ui_snapshot command).
-  startUiHeartbeat(() => {
-    const latest = feed.latest();
-    return {
-      mode: state.mode,
-      feedBlocks: feed.blocks.length,
-      latestSource: latest?.source ?? "",
-      latestTranslation: latest?.translation ?? "",
-      capsuleText: capsuleTxt.textContent ?? "",
-    };
-  });
 
   // First run (§8.6): no completed onboarding → the three cards, then
   // straight into a session.

@@ -334,3 +334,8 @@ Checks while the sheet is open:
   stderr at launch instead of failing startup.
 - Menu item accelerator labels are display hints; the working bindings are
   the global shortcuts.
+
+## #54 — running the app for verification (READ FIRST)
+- `cargo run -p livecap-app` (debug) loads **devUrl (http://localhost:1420)** — it requires `pnpm dev` running from THE SAME checkout. A dead or different-checkout vite on 1420 = blank webview. This was #54's entire mystery.
+- Headless verification: prefer the bundled app (`pnpm tauri build --debug --bundles app`, run the binary inside) — it embeds `dist/` and needs no server.
+- UI render state is externally observable: `~/Library/Application Support/app.livecap.desktop/ui-heartbeat.json` (1 Hz from the webview; `bootError` carries any module-evaluation failure). `LIVECAP_UI_PROBE=1` adds a Rust-side eval probe that reports page state even if the app module never ran. `LIVECAP_CAPTURE_VISIBLE=1` disables capture exclusion (dev only) for screenshot-based checks.
