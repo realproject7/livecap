@@ -12,6 +12,7 @@ mod session;
 mod settings;
 mod snap;
 mod tray;
+mod ui_state;
 
 use std::time::Duration;
 
@@ -171,6 +172,8 @@ pub fn run() {
             session::session_phase,
             session::host_request,
             session::gauge_state,
+            ui_state::ui_beat,
+            ui_state::ui_snapshot,
             session::host_probe,
             settings::get_settings,
             settings::set_settings,
@@ -189,6 +192,7 @@ pub fn run() {
 
             app.manage(session::SessionState::default());
             app.manage(session::GaugeCache::default());
+            app.manage(ui_state::UiState::default());
 
             // Persisted app settings (#12): onboarding state + the Settings
             // sheet values, loaded once and managed for the whole app.
