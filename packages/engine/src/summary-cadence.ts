@@ -42,8 +42,13 @@ export class SummaryCadence {
   shouldRun(nowMs: number, transcript: string): boolean {
     if (transcript.trim() === "") return false;
     if (this.lastRunAt === null) return true;
+    const changed = transcript !== this.lastTranscript;
+    // New content resets the cadence to base BEFORE the due check, so a meeting
+    // that resumes after an idle backoff becomes due on the base interval again
+    // rather than waiting out the backed-off one.
+    if (changed) this.intervalMs = this.baseMs;
     if (nowMs - this.lastRunAt < this.intervalMs) return false;
-    if (transcript === this.lastTranscript) {
+    if (!changed) {
       // Due by time but nothing new — back off and reset the timer.
       this.intervalMs = Math.min(this.maxMs, this.intervalMs * this.backoffFactor);
       this.lastRunAt = nowMs;

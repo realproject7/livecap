@@ -35,6 +35,19 @@ describe("SummaryCadence", () => {
     expect(c.currentIntervalMs).toBe(4 * MIN); // backs off further
   });
 
+  it("becomes due on the base cadence when new content arrives mid-backoff", () => {
+    const c = new SummaryCadence({ baseMs: MIN, backoffFactor: 2, maxMs: 10 * MIN });
+    c.markRun(T0, "a");
+    expect(c.shouldRun(T0 + MIN, "a")).toBe(false); // unchanged → backoff to 2*MIN, lastRunAt = T0+MIN
+    expect(c.currentIntervalMs).toBe(2 * MIN);
+
+    // New content 10s later: must reset to base and become due at T0+2*MIN
+    // (base cadence), NOT wait out the backed-off T0+3*MIN.
+    expect(c.shouldRun(T0 + MIN + 10_000, "a NEW")).toBe(false); // only 10s in
+    expect(c.currentIntervalMs).toBe(MIN); // reset by new content
+    expect(c.shouldRun(T0 + 2 * MIN, "a NEW")).toBe(true); // due on the base cadence
+  });
+
   it("resets to the base interval once new content arrives", () => {
     const c = new SummaryCadence({ baseMs: MIN });
     c.markRun(T0, "a");
