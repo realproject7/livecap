@@ -44,7 +44,7 @@ pub fn ui_beat(app: tauri::AppHandle, state: tauri::State<'_, UiState>, beat: Ui
     // Mirror every 5th beat to <app-data>/ui-heartbeat.json (atomic) so
     // headless verification can read the webview's render state without a
     // webview-side invoke path.
-    if beat.ts / 1000 % 5 == 0 {
+    if (beat.ts / 1000).is_multiple_of(5) {
         if let (Ok(dir), Ok(json)) = (
             tauri::Manager::path(&app).app_data_dir(),
             serde_json::to_vec(&beat),
