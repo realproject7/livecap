@@ -104,6 +104,29 @@ describe("FallbackRouter", () => {
     expect((await inFlight.next()).done).toBe(true);
   });
 
+  it("is restart-safe after an auto-fallback: a new Stop/Start session begins on the primary", async () => {
+    const primary = new StubEngine("primary");
+    const fallback = new StubEngine("fallback");
+    const router = new FallbackRouter({ primary, fallback });
+
+    await router.start();
+    await router.switchToFallback(); // this session crossed the threshold
+    expect(router.onFallback).toBe(true);
+    await router.stop();
+
+    // Next captioning session: must start fresh on the primary, not the
+    // stopped fallback.
+    await router.start();
+    expect(router.onFallback).toBe(false);
+    expect(router.health().status).toBe("ready");
+    expect(primary.health().status).toBe("ready");
+    expect((await collect(router.translate(batch, { pairs: [] }))).at(-1)?.text).toBe("primary:final");
+
+    // And it can still switch again within the new session.
+    await router.switchToFallback();
+    expect((await collect(router.translate(batch, { pairs: [] }))).at(-1)?.text).toBe("fallback:final");
+  });
+
   it("switchToFallback is idempotent", async () => {
     const primary = new StubEngine("primary");
     const fallback = new StubEngine("fallback");

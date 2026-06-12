@@ -40,13 +40,19 @@ export class FallbackRouter implements TranslationEngine {
   }
 
   async start(): Promise<void> {
-    await this.primary.start();
+    // Start whichever engine is active — normally the primary, but if a switch
+    // happened without an intervening stop() this keeps routing consistent.
+    await this.active.start();
   }
 
   async stop(): Promise<void> {
     for (const off of this.unsubscribers.splice(0)) off();
     // Stop both; the fallback may have been started on a switch.
     await Promise.all([this.primary.stop(), this.fallback.stop()]);
+    // Reset routing so the NEXT session begins on the primary again — otherwise
+    // a Stop/Start after an auto-fallback would route to the stopped fallback.
+    this.active = this.primary;
+    this.usingFallback = false;
   }
 
   health(): EngineHealth {
