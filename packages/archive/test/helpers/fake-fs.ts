@@ -92,9 +92,14 @@ export class FakeFs implements ArchiveFs {
 
   /** Paths whose stat should throw ENOENT (simulate a file vanishing mid-sweep). */
   readonly enoentOnStat = new Set<string>();
+  /** Paths whose stat should throw EACCES (simulate a non-ENOENT permission error). */
+  readonly eaccesOnStat = new Set<string>();
 
   mtimeMs(path: string): number {
     if (this.enoentOnStat.has(path)) throw new Error(`ENOENT: ${path}`);
+    if (this.eaccesOnStat.has(path)) {
+      throw Object.assign(new Error(`EACCES: permission denied, stat '${path}'`), { code: "EACCES" });
+    }
     return this.mtimes.get(path) ?? 0;
   }
 
