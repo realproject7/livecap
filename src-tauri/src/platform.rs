@@ -32,7 +32,15 @@ mod imp {
                 | NSWindowCollectionBehavior::FullScreenAuxiliary;
             ns.setCollectionBehavior(behavior);
             ns.setLevel(STATUS_WINDOW_LEVEL);
-            ns.setSharingType(NSWindowSharingType::None);
+            // LIVECAP_CAPTURE_VISIBLE=1 keeps the overlay visible to screen
+            // capture — DEV/VERIFICATION ONLY (the operator's screenshot-based
+            // checks can't see an excluded window, #54). Production default is
+            // exclusion; the privacy row in Settings reads the real state.
+            if std::env::var("LIVECAP_CAPTURE_VISIBLE").as_deref() == Ok("1") {
+                eprintln!("WARNING: capture exclusion DISABLED via LIVECAP_CAPTURE_VISIBLE=1");
+            } else {
+                ns.setSharingType(NSWindowSharingType::None);
+            }
         }
     }
 

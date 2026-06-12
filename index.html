@@ -7,6 +7,22 @@
     <link rel="stylesheet" href="/src/styles.css" />
   </head>
   <body>
+    <script>
+      // Blank-screen guard (#54): if the UI module crashes during evaluation,
+      // paint the error where a human (or ui_snapshot) can see it instead of
+      // leaving bare glass.
+      window.__lcBootError = null;
+      function lcPaint(kind, msg) {
+        window.__lcBootError = kind + ": " + msg;
+        var el = document.getElementById("boot-error") || document.createElement("pre");
+        el.id = "boot-error";
+        el.style.cssText = "color:#e8b84b;font:11px/1.5 ui-monospace,monospace;padding:14px;white-space:pre-wrap;margin:0";
+        el.textContent = "LiveCap UI failed to start\n" + window.__lcBootError;
+        document.body.appendChild(el);
+      }
+      window.addEventListener("error", function (e) { lcPaint("error", (e.error && e.error.stack) || e.message); });
+      window.addEventListener("unhandledrejection", function (e) { lcPaint("unhandledrejection", (e.reason && e.reason.stack) || String(e.reason)); });
+    </script>
     <script type="module" src="/src/main.ts"></script>
   </body>
 </html>

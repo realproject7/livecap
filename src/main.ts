@@ -19,6 +19,7 @@ import type {
   SessionStatus,
 } from "./protocol";
 import { createSettingsSheet } from "./settings-sheet";
+import { startUiHeartbeat } from "./ui-heartbeat";
 
 type Mode = "panel" | "strip" | "capsule";
 
@@ -514,6 +515,20 @@ function showToast(text: string): void {
 }
 
 /* ================= event streams ================= */
+
+// #54: 1 Hz render-state heartbeat at module top level — beats even if the
+// async init below hangs or rejects, so a missing beat means the module
+// itself never evaluated.
+startUiHeartbeat(() => {
+  const latest = feed.latest();
+  return {
+    mode: state.mode,
+    feedBlocks: feed.blocks.length,
+    latestSource: latest?.source ?? "",
+    latestTranslation: latest?.translation ?? "",
+    capsuleText: capsuleTxt.textContent ?? "",
+  };
+});
 
 void listen<CaptionBridgeEvent>("caption://event", (event) => {
   const block = feed.applyCaption(event.payload);
