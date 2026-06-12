@@ -1,0 +1,26 @@
+{
+  "name": "livecap",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc && vite build",
+    "preview": "vite preview",
+    "tauri": "tauri",
+    "lint": "eslint .",
+    "test": "pnpm -r --filter './packages/*' test",
+    "no-stub": "scripts/no-stub-gate.sh"
+  },
+  "dependencies": {
+    "@tauri-apps/api": "^2"
+  },
+  "devDependencies": {
+    "@eslint/js": "^9",
+    "@tauri-apps/cli": "^2",
+    "eslint": "^9",
+    "typescript": "~5.6.2",
+    "typescript-eslint": "^8",
+    "vite": "^6.0.3"
+  }
+}

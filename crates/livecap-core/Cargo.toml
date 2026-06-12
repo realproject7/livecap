@@ -1,0 +1,9 @@
+[package]
+name = "livecap-core"
+version = "0.1.0"
+description = "LiveCap core: audio capture, VAD, on-device STT (no UI, no Tauri)"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]

@@ -1,0 +1,18 @@
+[package]
+name = "livecap-app"
+version = "0.1.0"
+description = "LiveCap — live captions & translation overlay"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lib]
+name = "livecap_app_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = ["macos-private-api"] }
+livecap-core = { path = "../crates/livecap-core" }
