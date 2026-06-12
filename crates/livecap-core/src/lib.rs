@@ -17,6 +17,7 @@ pub mod event;
 pub mod model;
 pub mod pipeline;
 pub mod resample;
+mod suppression;
 pub mod vad;
 pub mod whisper;
 

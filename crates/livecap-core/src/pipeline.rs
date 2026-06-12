@@ -30,6 +30,7 @@ use crate::audio::AudioChunk;
 use crate::event::{CaptionEvent, CaptionKind, Channel};
 use crate::model::ModelManager;
 use crate::resample::StreamResampler;
+use crate::suppression::{rms, CrossChannelSuppressor, SuppressionConfig};
 use crate::vad::{ContinuousVadProcessor, VAD_SAMPLE_RATE};
 use crate::whisper::WhisperEngine;
 
@@ -93,6 +94,11 @@ pub struct CaptionPipeline {
     worker_tasks: Vec<JoinHandle<()>>,
     mic_capture: Option<MicCapture>,
     system_capture: Option<SystemAudioCapture>,
+    /// Shared cross-channel speaker-bleed suppression (#56).
+    suppressor: Arc<CrossChannelSuppressor>,
+    /// Monotonic session clock: the common timeline both channels report
+    /// energy/finalizations against, so the suppressor can correlate them (#56).
+    start: Instant,
 }
 
 impl CaptionPipeline {
@@ -116,11 +122,16 @@ impl CaptionPipeline {
         let (events_tx, events_rx) = mpsc::unbounded_channel();
         let (transcribe_tx, transcribe_rx) = mpsc::unbounded_channel();
 
+        let suppressor = Arc::new(CrossChannelSuppressor::new(SuppressionConfig::default()));
+        let start = Instant::now();
+
         let transcribe_task = tokio::spawn(transcribe_worker(
             engine,
             config.language.clone(),
             transcribe_rx,
             events_tx.clone(),
+            suppressor.clone(),
+            start,
         ));
 
         Ok((
@@ -132,6 +143,8 @@ impl CaptionPipeline {
                 worker_tasks: Vec::new(),
                 mic_capture: None,
                 system_capture: None,
+                suppressor,
+                start,
             },
             events_rx,
         ))
@@ -219,8 +232,14 @@ impl CaptionPipeline {
             vad_redemption_ms: self.config.vad_redemption_ms,
             max_utterance_ms: self.config.max_utterance_ms,
         };
-        self.worker_tasks
-            .push(tokio::spawn(channel_worker(channel, rx, transcribe_tx, params)));
+        self.worker_tasks.push(tokio::spawn(channel_worker(
+            channel,
+            rx,
+            transcribe_tx,
+            params,
+            self.suppressor.clone(),
+            self.start,
+        )));
         tx
     }
 
@@ -258,8 +277,11 @@ async fn channel_worker(
     rx: mpsc::UnboundedReceiver<AudioChunk>,
     transcribe_tx: mpsc::UnboundedSender<TranscribeRequest>,
     params: WorkerParams,
+    suppressor: Arc<CrossChannelSuppressor>,
+    start: Instant,
 ) {
-    if let Err(e) = channel_worker_inner(channel, rx, transcribe_tx, params).await {
+    if let Err(e) = channel_worker_inner(channel, rx, transcribe_tx, params, suppressor, start).await
+    {
         log::error!("Channel worker for {channel} failed: {e:#}");
     }
 }
@@ -269,6 +291,8 @@ async fn channel_worker_inner(
     mut rx: mpsc::UnboundedReceiver<AudioChunk>,
     transcribe_tx: mpsc::UnboundedSender<TranscribeRequest>,
     params: WorkerParams,
+    suppressor: Arc<CrossChannelSuppressor>,
+    start: Instant,
 ) -> Result<()> {
     let samples_per_ms = VAD_SAMPLE_RATE as usize / 1000;
     let partial_step = params.partial_interval_ms as usize * samples_per_ms;
@@ -279,7 +303,24 @@ async fn channel_worker_inner(
     let mut vad = ContinuousVadProcessor::new(VAD_SAMPLE_RATE, params.vad_redemption_ms)?;
     let mut last_partial_len = 0usize;
 
+    // Energy gate (#56): on the mic channel, drop a segment that is attenuated
+    // speaker bleed concurrent with the system channel, before it costs a
+    // transcription. Always false on the system channel and when there is no
+    // concurrent system energy, so distinct mic speech is untouched.
+    let is_mic_bleed = |samples: &[f32], duration_ms: u64| -> bool {
+        if channel != Channel::Mic {
+            return false;
+        }
+        let now_ms = start.elapsed().as_millis() as u64;
+        suppressor.mic_segment_is_energy_bleed(now_ms, duration_ms, rms(samples))
+    };
+
     let send_final = |segment: crate::vad::SpeechSegment| {
+        let duration_ms = (segment.end_timestamp_ms - segment.start_timestamp_ms).max(0.0) as u64;
+        if is_mic_bleed(segment.samples.as_slice(), duration_ms) {
+            log::info!("[mic] energy-gated speaker bleed ({duration_ms} ms) suppressed (#56)");
+            return;
+        }
         let _ = transcribe_tx.send(TranscribeRequest {
             channel,
             samples: segment.samples,
@@ -295,6 +336,12 @@ async fn channel_worker_inner(
         let samples_16k = resampler.process(&chunk.samples, chunk.sample_rate)?;
         if samples_16k.is_empty() {
             continue;
+        }
+
+        // Publish the system channel's energy envelope for the gate (#56).
+        if channel == Channel::System {
+            let now_ms = start.elapsed().as_millis() as u64;
+            suppressor.record_system_energy(now_ms, rms(&samples_16k));
         }
 
         for segment in vad.process_audio(&samples_16k)? {
@@ -313,12 +360,18 @@ async fn channel_worker_inner(
             } else if current_len >= min_partial && current_len >= last_partial_len + partial_step
             {
                 last_partial_len = current_len;
-                let _ = transcribe_tx.send(TranscribeRequest {
-                    channel,
-                    samples: vad.current_speech().to_vec(),
-                    kind: RequestKind::Partial,
-                    queued_at: Instant::now(),
-                });
+                let partial_samples = vad.current_speech().to_vec();
+                let duration_ms = (current_len / samples_per_ms) as u64;
+                // Suppress in-progress bleed partials too, so the live mic view
+                // doesn't stream the speaker's garbled echo (#56).
+                if !is_mic_bleed(partial_samples.as_slice(), duration_ms) {
+                    let _ = transcribe_tx.send(TranscribeRequest {
+                        channel,
+                        samples: partial_samples,
+                        kind: RequestKind::Partial,
+                        queued_at: Instant::now(),
+                    });
+                }
             }
         } else {
             last_partial_len = 0;
@@ -339,6 +392,8 @@ async fn transcribe_worker(
     language: Option<String>,
     mut rx: mpsc::UnboundedReceiver<TranscribeRequest>,
     events_tx: mpsc::UnboundedSender<CaptionEvent>,
+    suppressor: Arc<CrossChannelSuppressor>,
+    start: Instant,
 ) {
     while let Some(req) = rx.recv().await {
         // Backpressure: drop partials that sat in the queue too long —
@@ -375,16 +430,32 @@ async fn transcribe_worker(
         let kind = match req.kind {
             RequestKind::Partial => CaptionKind::Partial(utterance.text),
             RequestKind::Finalized { start_ms, end_ms } => {
+                let text = utterance.text;
+                let now_ms = start.elapsed().as_millis() as u64;
+                match req.channel {
+                    // Remember system finalizations so a later mic re-hearing can
+                    // be recognized as a duplicate (#56).
+                    Channel::System => suppressor.record_system_final(now_ms, &text),
+                    // Drop a mic finalization that re-states a recent system one —
+                    // the speaker bled through loudly enough to pass the energy
+                    // gate but is still a duplicate caption (#56).
+                    Channel::Mic => {
+                        if suppressor.mic_text_is_duplicate(now_ms, &text) {
+                            log::info!("[mic] dropping near-duplicate of a system finalization (#56)");
+                            continue;
+                        }
+                    }
+                }
                 log::info!(
                     "[{}] finalized {}..{}ms ({} ms after segment close): '{}'",
                     req.channel,
                     start_ms,
                     end_ms,
                     req.queued_at.elapsed().as_millis(),
-                    utterance.text
+                    text
                 );
                 CaptionKind::Finalized {
-                    text: utterance.text,
+                    text,
                     lang: utterance.lang,
                     confidence: utterance.confidence,
                     start_ms,
