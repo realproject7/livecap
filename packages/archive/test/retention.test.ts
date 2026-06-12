@@ -21,8 +21,9 @@ function seed(): FakeFs {
 describe("sweepOldArchives", () => {
   it("deletes .md archives older than maxAgeDays, keeps newer ones", () => {
     const fs = seed();
-    const removed = sweepOldArchives({ fs, folder: FOLDER, maxAgeDays: 90, nowMs: NOW });
+    const { removed, failed } = sweepOldArchives({ fs, folder: FOLDER, maxAgeDays: 90, nowMs: NOW });
     expect(removed).toEqual(["old.md"]);
+    expect(failed).toEqual([]);
     expect(fs.exists(fs.join(FOLDER, "old.md"))).toBe(false);
     expect(fs.exists(fs.join(FOLDER, "recent.md"))).toBe(true);
   });
@@ -37,38 +38,73 @@ describe("sweepOldArchives", () => {
     const fs = seed();
     fs.writeFile(fs.join(FOLDER, "2026-06-11 1045 — (recording).md.tmp"), "partial");
     fs.setMtime(fs.join(FOLDER, "2026-06-11 1045 — (recording).md.tmp"), NOW - 30 * DAY);
-    const removed = sweepOldArchives({ fs, folder: FOLDER, maxAgeDays: 7, nowMs: NOW });
+    const { removed } = sweepOldArchives({ fs, folder: FOLDER, maxAgeDays: 7, nowMs: NOW });
     expect(removed).toContain("2026-06-11 1045 — (recording).md.tmp");
     expect(fs.exists(fs.join(FOLDER, "2026-06-11 1045 — (recording).md.tmp"))).toBe(false);
   });
 
   it("is a no-op when retention is disabled (default off)", () => {
     const fs = seed();
-    expect(sweepOldArchives({ fs, folder: FOLDER, maxAgeDays: 0, nowMs: NOW })).toEqual([]);
-    expect(sweepOldArchives({ fs, folder: FOLDER, nowMs: NOW })).toEqual([]);
+    expect(sweepOldArchives({ fs, folder: FOLDER, maxAgeDays: 0, nowMs: NOW })).toEqual({
+      removed: [],
+      failed: [],
+    });
+    expect(sweepOldArchives({ fs, folder: FOLDER, nowMs: NOW })).toEqual({ removed: [], failed: [] });
     expect(fs.exists(fs.join(FOLDER, "old.md"))).toBe(true);
   });
 
   it("is a no-op when the folder does not exist", () => {
     const fs = new FakeFs();
-    expect(sweepOldArchives({ fs, folder: "/missing", maxAgeDays: 30, nowMs: NOW })).toEqual([]);
+    expect(sweepOldArchives({ fs, folder: "/missing", maxAgeDays: 30, nowMs: NOW })).toEqual({
+      removed: [],
+      failed: [],
+    });
   });
 
-  it("continues the sweep when a file vanishes mid-sweep — no crash on ENOENT (#33)", () => {
+  it("tolerates a file vanishing mid-sweep silently (ENOENT) — not in removed or failed (#33/#48)", () => {
     const fs = seed();
-    // An old .md that would be swept, but its stat throws ENOENT (a sync tool /
-    // the user deleted it between readdir and stat).
     const vanished = fs.join(FOLDER, "vanished.md");
     fs.writeFile(vanished, "x");
     fs.setMtime(vanished, NOW - 200 * DAY);
     fs.enoentOnStat.add(vanished);
 
-    let removed: string[] = [];
+    let result = { removed: [] as string[], failed: [] as string[] };
     expect(() => {
-      removed = sweepOldArchives({ fs, folder: FOLDER, maxAgeDays: 90, nowMs: NOW });
+      result = sweepOldArchives({ fs, folder: FOLDER, maxAgeDays: 90, nowMs: NOW });
     }).not.toThrow();
-    // The other old archive is still swept; the vanished one is skipped.
+    expect(result.removed).toContain("old.md"); // others still swept
+    expect(result.removed).not.toContain("vanished.md");
+    expect(result.failed).toEqual([]); // ENOENT is tolerated silently
+  });
+
+  it("surfaces a non-ENOENT error (permission) in `failed` while still sweeping the rest (#48)", () => {
+    const fs = seed();
+    const locked = fs.join(FOLDER, "locked.md");
+    fs.writeFile(locked, "x");
+    fs.setMtime(locked, NOW - 200 * DAY); // old → would be swept, but stat throws EACCES
+    fs.eaccesOnStat.add(locked);
+
+    let result = { removed: [] as string[], failed: [] as string[] };
+    expect(() => {
+      result = sweepOldArchives({ fs, folder: FOLDER, maxAgeDays: 90, nowMs: NOW });
+    }).not.toThrow(); // never crashes app start
+    expect(result.removed).toContain("old.md"); // the rest is still swept
+    expect(result.failed).toContain("locked.md"); // surfaced, NOT silently treated as swept
+    expect(fs.exists(locked)).toBe(true); // and not deleted
+  });
+
+  it("a structured EACCES is surfaced even if the filename contains 'no such file' (#48)", () => {
+    // Adversarial: a user-derived filename embeds the missing-file trigger text,
+    // so the EACCES error message contains it — but the structured code is the
+    // authority, so it must still be surfaced, not misclassified as missing.
+    const fs = seed();
+    const tricky = fs.join(FOLDER, "no such file.md");
+    fs.writeFile(tricky, "x");
+    fs.setMtime(tricky, NOW - 200 * DAY);
+    fs.eaccesOnStat.add(tricky); // throws an EACCES whose message includes the path
+
+    const { removed, failed } = sweepOldArchives({ fs, folder: FOLDER, maxAgeDays: 90, nowMs: NOW });
+    expect(failed).toContain("no such file.md"); // surfaced (not dropped as "missing")
     expect(removed).toContain("old.md");
-    expect(removed).not.toContain("vanished.md");
   });
 });
