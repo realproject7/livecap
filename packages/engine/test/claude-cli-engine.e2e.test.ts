@@ -94,6 +94,26 @@ describe("ClaudeCliEngine — real spawn/stdio (fake-cli replay)", () => {
     }
   });
 
+  it("marks complete() requests with [TASK] so they override the translation prompt", async () => {
+    // Echo mode: the fake CLI replies with exactly the message it received, so
+    // we can assert what the adapter actually sent over stdin.
+    const engine = new ClaudeCliEngine({
+      bin: FAKE_CLI,
+      cwd: tmpdir(),
+      env: { ...process.env, LIVECAP_FAKE_ECHO: "1" },
+      includePartialMessages: false,
+    });
+    await engine.start();
+    try {
+      const result = await engine.complete({ system: "Be a board generator.", user: "the transcript" });
+      expect(result.text.startsWith("[TASK]")).toBe(true);
+      expect(result.text).toContain("Be a board generator.");
+      expect(result.text).toContain("the transcript");
+    } finally {
+      await engine.stop();
+    }
+  });
+
   it("summarizes a transcript and attaches usage", async () => {
     const engine = makeEngine("session-without-partials.jsonl", false);
     await engine.start();

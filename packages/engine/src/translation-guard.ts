@@ -28,7 +28,7 @@ function stripLabelsAndQuotes(line: string): string {
 }
 
 /** Remove Qwen3 hybrid-thinking reasoning, defensively (belt to the request flag). */
-function stripThinking(text: string): string {
+export function stripThinking(text: string): string {
   // Whole <think>…</think> blocks.
   let out = text.replace(/<think>[\s\S]*?<\/think>/gi, "");
   // A dangling close (server emitted reasoning then a stray </think>): keep what follows.

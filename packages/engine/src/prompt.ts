@@ -14,6 +14,19 @@ export interface PromptOptions {
 
 const DEFAULT_TARGET = "Korean";
 
+/**
+ * Task-override marker. The session system prompt is the translation contract,
+ * but summary/board, reply, and quick-translate (#9) reuse the SAME session.
+ * A message prefixed with this marker tells the model to follow that message's
+ * instructions instead of translating. See buildSystemPrompt / asTaskMessage.
+ */
+export const TASK_MARKER = "[TASK]";
+
+/** Prefix a message so it overrides the session's default translation behavior. */
+export function asTaskMessage(message: string): string {
+  return `${TASK_MARKER}\n${message}`;
+}
+
 function glossaryLines(glossary: Record<string, string>): string[] {
   return Object.entries(glossary).map(([term, target]) => `- ${term} → ${target}`);
 }
@@ -27,6 +40,7 @@ export function buildSystemPrompt(options: PromptOptions = {}): string {
     "Keep names, numbers, and financial terms accurate. Prefer natural spoken language over literal wording.",
     "If a fragment is untranslatable noise, output an empty line for it.",
     "Output exactly one line per input sentence, in order.",
+    `Exception: if a message begins with ${TASK_MARKER}, ignore the translation rule and follow that message's instructions exactly instead.`,
   ];
   if (options.glossary && Object.keys(options.glossary).length > 0) {
     lines.push("Use these preferred term translations:");

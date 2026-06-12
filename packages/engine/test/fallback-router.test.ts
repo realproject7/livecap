@@ -2,6 +2,8 @@ import { describe, it, expect } from "vitest";
 
 import { FallbackRouter } from "../src/fallback-router";
 import type {
+  Completion,
+  CompletionRequest,
   EngineHealth,
   EngineStatus,
   MeetingBrief,
@@ -48,6 +50,9 @@ class StubEngine implements TranslationEngine {
   }
   async summarize(): Promise<MeetingBrief> {
     return { summary: this.label, board: [], usage: ZERO_USAGE };
+  }
+  async complete(request: CompletionRequest): Promise<Completion> {
+    return { text: `${this.label}:${request.user}`, usage: ZERO_USAGE };
   }
   onUsage(listener: (u: Usage) => void): () => void {
     this.usageListeners.add(listener);

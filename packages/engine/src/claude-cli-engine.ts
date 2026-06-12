@@ -15,6 +15,7 @@ import { sanitizeChildEnv } from "./env";
 import { AsyncChannel } from "./internal/channel";
 import { Mutex } from "./internal/mutex";
 import {
+  asTaskMessage,
   buildSummaryMessage,
   buildSystemPrompt,
   buildTranslateMessage,
@@ -22,6 +23,8 @@ import {
 } from "./prompt";
 import { StreamJsonParser } from "./stream-parser";
 import type {
+  Completion,
+  CompletionRequest,
   EngineHealth,
   MeetingBrief,
   ParsedEvent,
@@ -201,7 +204,26 @@ export class ClaudeCliEngine implements TranslationEngine {
   }
 
   async summarize(transcript: string): Promise<MeetingBrief> {
-    const line = formatUserMessageLine(buildSummaryMessage(transcript));
+    // [TASK]-marked so the session's translation system prompt yields to the
+    // summary instructions (see buildSystemPrompt).
+    const text = await this.runTextTurn(asTaskMessage(buildSummaryMessage(transcript)), "summary");
+    return { ...parseBrief(text), usage: this.latestUsage };
+  }
+
+  async complete(request: CompletionRequest): Promise<Completion> {
+    // The CLI session's system prompt is fixed at spawn, so a per-call system
+    // instruction is folded into the message and marked [TASK] so it overrides
+    // the default "translate only" contract instead of being translated.
+    const folded = request.system ? `${request.system}\n\n${request.user}` : request.user;
+    const text = await this.runTextTurn(asTaskMessage(folded), "completion");
+    // latestUsage is the just-completed turn's usage — safe because runTurn
+    // serializes turns through the mutex (one in flight at a time).
+    return { text, usage: this.latestUsage };
+  }
+
+  /** Run one turn over stdin, returning the trimmed assistant text. */
+  private async runTextTurn(message: string, label: string): Promise<string> {
+    const line = formatUserMessageLine(message);
     let text = "";
     for await (const event of this.runTurn(line)) {
       if (event.kind === "text_delta") {
@@ -209,10 +231,10 @@ export class ClaudeCliEngine implements TranslationEngine {
       } else if (event.kind === "usage") {
         this.recordUsage(event);
       } else if (event.kind === "turn_end" && event.isError) {
-        throw new EngineTurnError(event.message ?? "summary turn failed", event.apiErrorStatus);
+        throw new EngineTurnError(event.message ?? `${label} turn failed`, event.apiErrorStatus);
       }
     }
-    return { ...parseBrief(text), usage: this.latestUsage };
+    return text.trim();
   }
 
   /** Run a single turn: write one stdin line, stream its events until turn_end. */

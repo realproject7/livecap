@@ -89,8 +89,29 @@ export interface TranslationEngine {
   translate(batch: Sentence[], ctx: RollingContext): AsyncIterable<Translation>;
   /** Summarize the accumulated transcript into a brief + board. */
   summarize(transcript: string): Promise<MeetingBrief>;
+  /**
+   * Generic single-turn completion over the same meeting session. Powers the
+   * LLM-extras pipeline (#9) — summary/board in a chosen language, reply
+   * suggestions, quick translate — uniformly across both engine tiers.
+   */
+  complete(request: CompletionRequest): Promise<Completion>;
   /** Subscribe to usage events. Returns an unsubscribe function. */
   onUsage(listener: (usage: Usage) => void): () => void;
+}
+
+/** A single-turn generation request. */
+export interface CompletionRequest {
+  /** System/instruction text. The CLI tier folds this into the message (its
+   *  session system prompt is fixed); the local tier uses a system role. */
+  system?: string;
+  /** User message text. */
+  user: string;
+}
+
+/** The result of a `complete()` call. */
+export interface Completion {
+  text: string;
+  usage: Usage;
 }
 
 /**

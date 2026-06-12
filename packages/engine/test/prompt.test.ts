@@ -1,9 +1,11 @@
 import { describe, it, expect } from "vitest";
 
 import {
+  asTaskMessage,
   buildSystemPrompt,
   buildTranslateMessage,
   formatUserMessageLine,
+  TASK_MARKER,
 } from "../src/prompt";
 import type { RollingContext, Sentence } from "../src/types";
 
@@ -12,6 +14,18 @@ describe("buildSystemPrompt", () => {
     const prompt = buildSystemPrompt({ targetLanguage: "Korean", glossary: { FOMC: "연방공개시장위원회" } });
     expect(prompt).toContain("Output ONLY the Korean translation");
     expect(prompt).toContain("FOMC → 연방공개시장위원회");
+  });
+
+  it("carries the [TASK] override clause so extras can reuse the session", () => {
+    const prompt = buildSystemPrompt();
+    expect(prompt).toContain(TASK_MARKER);
+    expect(prompt.toLowerCase()).toContain("follow that message");
+  });
+});
+
+describe("asTaskMessage", () => {
+  it("prefixes the marker on its own line", () => {
+    expect(asTaskMessage("do the thing")).toBe("[TASK]\ndo the thing");
   });
 });
 
