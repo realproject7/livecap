@@ -335,6 +335,65 @@ Checks while the sheet is open:
 - Menu item accelerator labels are display hints; the working bindings are
   the global shortcuts.
 
+# #53 Per-channel capture toggles + mic on/off
+
+Automated coverage (green): settings sanitization keeps at least one channel
+(`cargo test -p livecap-app` — settings.rs), channel-note plumbing
+(`pnpm test:app` — start-config.test.ts), header rendering
+(`pnpm -r test` — archive writer.golden.test.ts).
+
+1. Settings → **Channels**: uncheck "Capture microphone" → the system-audio
+   toggle locks (the last enabled channel can never be unchecked); persisted
+   immediately (`captureMic: false` in
+   `~/Library/Application Support/app.livecap.desktop/settings.json`).
+2. Start a session with mic off → status line "microphone is off —
+   captioning system audio only"; speaking into the mic produces NO right-
+   aligned (me) captions while a playing video still captions (them).
+3. Stop the session → the archive header meta line ends with
+   `· system audio only`. With both channels on, no note is appended.
+4. Mic toggle mid-session (both channels on): hover the panel chrome → the
+   mic button (between ⏹ and the spacer) shows the mic icon. Click it →
+   icon gains a slash, tray "Microphone" check mark clears, and speech into
+   the mic no longer captions; system audio continues uninterrupted. Click
+   again → mic captions resume on the SAME session/archive.
+5. Tray mirror: menu bar → "Microphone" toggles the same state (enabled only
+   while a session is running); the panel button stays in sync both ways.
+6. Mic-only guard: with system audio off in Settings and a session running,
+   the mic toggle refuses ("the microphone is the only active channel —
+   pause the session instead") — a session always keeps one channel.
+7. The toggle is capture-level (pause/resume of the mic stream): trailing
+   speech finalizes when muting (VAD flush), nothing is recorded while off.
+
+# #57 Feed windowing (DOM cap)
+
+Automated coverage (green): eviction order, pin immunity, cap under 1000
+synthetic captions (`pnpm test:app` — feed-state.test.ts, FEED_WINDOW=200).
+
+1. Long session (or feed many short sentences): once more than 200 caption
+   blocks have arrived, the DOM stays capped — check
+   `~/Library/Application Support/app.livecap.desktop/ui-heartbeat.json`:
+   `domBlocks` ≤ 200 (+ pinned overflow) while `feedBlocks` tracks the same
+   windowed model; the archive keeps every line regardless.
+2. Scroll to the very top of the feed after eviction started → a one-line
+   meta notice "older captions are in the archive" sits above the oldest
+   rendered block.
+3. Pinned blocks are never evicted: pin an early block, let 200+ more
+   arrive → the pinned block is still rendered (and in the pinned dock).
+4. Memory: RSS growth from caption DOM flattens (#57's Rust-side
+   heap-profiling half remains open — RSS may still grow from audio/whisper
+   buffers; that is not this fix's scope).
+
+## Known limits for the reviewer (#53/#57)
+
+- The archive header note reflects the channel config AT SESSION START; a
+  mid-session mic toggle does not rewrite the header (the transcript itself
+  shows the absence of "Me" lines).
+- The panel mic button and tray item act on the running session only; while
+  idle, channel choice lives in Settings → Channels.
+- `feedBlocks` in the heartbeat now reports the windowed model size (it can
+  no longer exceed the window + pinned overflow); `domBlocks` is the
+  DOM-level count used for cap verification.
+
 ## #54 — running the app for verification (READ FIRST)
 - `cargo run -p livecap-app` (debug) loads **devUrl (http://localhost:1420)** — it requires `pnpm dev` running from THE SAME checkout. A dead or different-checkout vite on 1420 = blank webview. This was #54's entire mystery.
 - Headless verification: prefer the bundled app (`pnpm tauri build --debug --bundles app`, run the binary inside) — it embeds `dist/` and needs no server.
