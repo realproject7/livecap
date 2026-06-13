@@ -11,6 +11,11 @@ export type Channel = "them" | "me";
  *  (wrapped as a HostInbound "caption" message). */
 export type CaptionBridgeEvent =
   | { type: "partial"; channel: Channel; text: string }
+  /** The channel's in-progress partial was dropped WITHOUT finalizing — a mic
+   *  utterance suppressed as speaker bleed (#56) after it had already streamed
+   *  partials. The webview clears the channel's streaming block; never enters
+   *  the translation queue (#62). */
+  | { type: "cleared"; channel: Channel }
   | {
       type: "finalized";
       /** Monotonic per-session id; doubles as the queue sequence number. */

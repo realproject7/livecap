@@ -129,6 +129,9 @@ async fn main() -> anyhow::Result<()> {
                     CaptionKind::Partial(text) => {
                         println!("[{t:8.2}s] [{who}] … {text}");
                     }
+                    CaptionKind::PartialDropped => {
+                        println!("[{t:8.2}s] [{who}] ⨯ (partial suppressed)");
+                    }
                     CaptionKind::Finalized { text, lang, confidence, start_ms, end_ms } => {
                         println!(
                             "[{t:8.2}s] [{who}] ✓ ({lang}, conf {confidence:.2}, {start_ms}–{end_ms}ms) {text}"

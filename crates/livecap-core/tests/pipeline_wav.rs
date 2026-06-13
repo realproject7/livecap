@@ -131,6 +131,9 @@ async fn wav_fixture_yields_finalized_text() {
                 println!("partial: {text}");
                 partials += 1;
             }
+            // A suppressed-bleed partial-clear (#62); not expected for this
+            // single-channel mic fixture, but the match must be exhaustive.
+            CaptionKind::PartialDropped => println!("partial dropped"),
             CaptionKind::Finalized {
                 text,
                 lang,

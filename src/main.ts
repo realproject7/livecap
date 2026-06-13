@@ -537,6 +537,17 @@ startUiHeartbeat(() => {
 });
 
 void listen<CaptionBridgeEvent>("caption://event", (event) => {
+  // #62: a suppressed mic utterance clears its orphaned streaming block instead
+  // of finalizing — drop its DOM node and stop (it never entered translation).
+  if (event.payload.type === "cleared") {
+    const gone = feed.clearPartial(event.payload.channel);
+    if (gone) {
+      blockEls.get(gone.key)?.remove();
+      blockEls.delete(gone.key);
+      afterFeedChange(false);
+    }
+    return;
+  }
   const block = feed.applyCaption(event.payload);
   const isNew = !blockEls.has(block.key);
   const el = blockEl(block);

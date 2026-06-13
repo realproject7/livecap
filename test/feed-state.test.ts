@@ -109,6 +109,57 @@ describe("FeedState", () => {
   });
 });
 
+// #62: a mic finalization suppressed as speaker bleed (#56/#64) never emits a
+// finalized event, so the streaming partial it already pushed must be cleared —
+// otherwise the orphaned bleed block lingers and the next genuine mic utterance
+// reuses it. The pipeline signals this with a `cleared` caption event.
+describe("FeedState — suppressed-utterance partial clear (#62)", () => {
+  it("clearPartial drops the channel's streaming block and reports it", () => {
+    const feed = new FeedState();
+    const partial = feed.applyCaption({ type: "partial", channel: "me", text: "the quick brown fox" });
+    expect(feed.blocks).toHaveLength(1);
+    const gone = feed.clearPartial("me");
+    expect(gone?.key).toBe(partial.key);
+    expect(feed.blocks).toHaveLength(0);
+    expect(feed.latest()).toBeNull();
+  });
+
+  it("clearPartial is a no-op (null) when nothing is streaming on the channel", () => {
+    const feed = new FeedState();
+    expect(feed.clearPartial("me")).toBeNull();
+    // A finalized (non-streaming) block is not a live partial and is untouched.
+    feed.applyCaption(finalized(1, "me", "Have a good day."));
+    expect(feed.clearPartial("me")).toBeNull();
+    expect(feed.blocks).toHaveLength(1);
+  });
+
+  it("clears only the named channel, leaving the other channel's partial intact", () => {
+    const feed = new FeedState();
+    const them = feed.applyCaption({ type: "partial", channel: "them", text: "their audio" });
+    feed.applyCaption({ type: "partial", channel: "me", text: "bleed echo" });
+    feed.clearPartial("me");
+    expect(feed.blocks).toHaveLength(1);
+    expect(feed.blocks[0].key).toBe(them.key);
+    expect(feed.latest()?.channel).toBe("them");
+  });
+
+  it("does NOT poison the next genuine utterance after a suppressed one", () => {
+    const feed = new FeedState();
+    // A bleed utterance streams partials, then its finalization is suppressed.
+    feed.applyCaption({ type: "partial", channel: "me", text: "the quick brown fox" });
+    feed.clearPartial("me");
+    // The next genuine mic utterance opens a FRESH block and finalizes normally.
+    const next = feed.applyCaption({ type: "partial", channel: "me", text: "let us begin the" });
+    const final = feed.applyCaption(finalized(1, "me", "Let us begin the quarterly review."));
+    expect(final.key).toBe(next.key);
+    expect(final.state).toBe("pending");
+    expect(final.source).toBe("Let us begin the quarterly review.");
+    expect(feed.blocks).toHaveLength(1);
+    // The finalized block resolves for translation — not orphaned.
+    expect(feed.get(1)?.id).toBe(1);
+  });
+});
+
 describe("FeedState — render window (#57)", () => {
   /** Feed `count` finalized captions, evicting after each like main.ts does. */
   function fill(feed: FeedState, count: number, startId = 1): void {
