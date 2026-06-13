@@ -264,12 +264,28 @@ fn spawn_host(app: &AppHandle, start_message: &serde_json::Value) -> Result<Host
             let Ok(value) = serde_json::from_str::<serde_json::Value>(&line) else {
                 continue;
             };
-            if value.get("type").and_then(|t| t.as_str()) == Some("gauge") {
+            let kind = value.get("type").and_then(|t| t.as_str());
+            if kind == Some("gauge") {
                 if let Some(cache) = reader_app.try_state::<GaugeCache>() {
                     if let Ok(mut guard) = cache.0.lock() {
                         *guard = value.get("gauge").cloned();
                     }
                 }
+            }
+            if kind == Some("startFailed") {
+                // Terminal engine-readiness failure (#65): drive a real teardown
+                // to idle with a durable status, rather than forwarding a
+                // transient event the live UI would only flash as a toast.
+                let detail = value
+                    .get("detail")
+                    .and_then(|d| d.as_str())
+                    .unwrap_or("the translation engine did not start")
+                    .to_string();
+                let fail_app = reader_app.clone();
+                tauri::async_runtime::spawn(async move {
+                    fail_session(&fail_app, detail).await;
+                });
+                continue;
             }
             let _ = reader_app.emit("host://event", &value);
         }
@@ -632,6 +648,27 @@ async fn cleanup(inner: &mut Inner) {
     if let Some(task) = inner.events_task.take() {
         task.abort();
     }
+}
+
+/// Tear down a session whose engine never became ready (#65). The host reports a
+/// terminal `startFailed`; Rust had already marked the session live (captions
+/// flow before translation is ready), so here it cleans up the host + pipeline,
+/// returns to Idle, and republishes the content-free `detail` as a durable
+/// `session://status` error. No-op if a deliberate stop (or a duplicate failure)
+/// already moved the session out of an active phase.
+async fn fail_session(app: &AppHandle, detail: String) {
+    let state = app.state::<SessionState>();
+    let mut inner = state.inner.lock().await;
+    if matches!(state.phase(), Phase::Idle | Phase::Stopping) {
+        return;
+    }
+    cleanup(&mut inner).await;
+    state.set_phase(Phase::Idle);
+    inner.channels = ChannelConfig::default();
+    drop(inner);
+    tray::set_live(app, false);
+    tray::sync_mic(app, false, false);
+    emit_status(app, Phase::Idle, Some(detail));
 }
 
 /* ---- commands ---- */

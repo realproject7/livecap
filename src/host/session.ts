@@ -207,15 +207,17 @@ export class HostSession {
     try {
       // Bound engine readiness (#65): a wedged first-run model acquisition must
       // not hang the host's serialized message chain forever (the #13 symptom —
-      // captions queued behind start were never processed). The content-free
-      // status surfaces the failure; the throw fails the start cleanly.
+      // captions queued behind start were never processed).
       await withTimeout(engine.start(), ENGINE_READY_TIMEOUT_MS);
     } catch (error) {
+      // Terminal: surface a content-free failure the Rust shell acts on — it
+      // tears the half-started session down to idle with a durable status
+      // (instead of leaving it "live" with captions but no translation, #65).
       this.emit({
-        type: "status",
+        type: "startFailed",
         detail: `translation engine did not start (${errorDetail(error)})`,
       });
-      throw error;
+      return;
     }
     if (this.router?.onFallback) {
       engineLabel = LOCAL_ENGINE_LABEL;

@@ -23,6 +23,7 @@ import type {
   ShellState,
 } from "./protocol";
 import { createSettingsSheet } from "./settings-sheet";
+import { summaryStripContent } from "./summary-strip";
 import { startUiHeartbeat } from "./ui-heartbeat";
 
 interface ChromePayload {
@@ -251,23 +252,10 @@ function render(): void {
 }
 
 function renderSummaryStrip(): void {
-  if (phase === "idle") {
-    summaryLabel.textContent = "LiveCap";
-    summaryLineEl.textContent = "Start captioning from the menu bar, or press ▶ above.";
-    summaryDot.classList.remove("on");
-  } else if (phase === "starting" || phase === "stopping") {
-    summaryLabel.textContent = phase === "starting" ? "Starting" : "Saving";
-    summaryLineEl.textContent = statusDetail !== "" ? statusDetail : "…";
-    summaryDot.classList.remove("on");
-  } else if (phase === "paused") {
-    summaryLabel.textContent = "Paused";
-    summaryLineEl.textContent = "Captions are paused — press ▶ to resume.";
-    summaryDot.classList.remove("on");
-  } else {
-    summaryLabel.textContent = "Live summary";
-    summaryLineEl.textContent = summaryLine !== "" ? summaryLine : "Listening…";
-    summaryDot.classList.add("on");
-  }
+  const { label, line, live } = summaryStripContent(phase, statusDetail, summaryLine);
+  summaryLabel.textContent = label;
+  summaryLineEl.textContent = line;
+  summaryDot.classList.toggle("on", live);
 }
 
 /* ---- caption blocks (the five states) ---- */
