@@ -194,6 +194,12 @@ export class LazyLocalEngine implements TranslationEngine {
     await this.engine?.stop();
   }
 
+  /** Synchronous force-kill of the spawned llama-server (#66 process teardown). */
+  dispose(): void {
+    this.starting = null;
+    this.engine?.dispose();
+  }
+
   translate(batch: Sentence[], ctx: RollingContext): AsyncIterable<Translation> {
     return this.required().translate(batch, ctx);
   }

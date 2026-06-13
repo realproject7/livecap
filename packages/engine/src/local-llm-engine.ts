@@ -190,6 +190,16 @@ export class LocalLlmEngine implements TranslationEngine {
     child?.kill("SIGKILL");
   }
 
+  /**
+   * Synchronous, best-effort force-kill of the llama-server child (#66). Used by
+   * the host's process-termination path, where there is no time to await the
+   * graceful stop(): a SIGKILL guarantees the spawned server dies with the host
+   * rather than being orphaned. Safe to call when no child is running.
+   */
+  dispose(): void {
+    this.killChild();
+  }
+
   async *translate(batch: Sentence[], ctx: RollingContext): AsyncIterable<Translation> {
     const userMessage = buildTranslateMessage(batch, ctx, this.config.contextPairs);
     const { content } = await this.chat(userMessage);

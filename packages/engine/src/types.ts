@@ -87,6 +87,13 @@ export interface TranslationEngine {
   start(): Promise<void>;
   /** Tear it down. Safe to call when already stopped. */
   stop(): Promise<void>;
+  /**
+   * Synchronous, best-effort teardown for process termination (#66): force-kill
+   * any spawned child (e.g. the local llama-server) so it is never orphaned when
+   * the host exits without time to await {@link stop}. Optional — engines with
+   * no OS child (the CLI adapter spawns per turn) need not implement it.
+   */
+  dispose?(): void;
   /** Current lifecycle state. */
   health(): EngineHealth;
   /** Translate a batch, streaming progressive snapshots until `done`. */

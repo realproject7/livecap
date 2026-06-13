@@ -534,4 +534,17 @@ export class HostSession {
     }
     this.emit({ type: "stopped" });
   }
+
+  /**
+   * Synchronous, best-effort teardown for process termination (#66). The
+   * graceful {@link stop} can stall (a wedged drain/summary, or a half-built
+   * start), so the host's signal/exit handlers call this to force-kill the
+   * spawned llama-server before the process dies — guaranteeing it is never
+   * orphaned. Idempotent and safe before/after start.
+   */
+  dispose(): void {
+    this.stopping = true;
+    for (const handle of this.intervals.splice(0)) clearInterval(handle);
+    this.engine?.dispose?.();
+  }
 }

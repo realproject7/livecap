@@ -104,8 +104,13 @@ pub fn create(app: &AppHandle, initial_mode: Mode) -> tauri::Result<()> {
             }
             "settings" => overlay::open_settings(app),
             "quit" => {
-                app.state::<Shell>().save_now();
-                app.exit(0);
+                // Full clean teardown (#66): stop the session (reaping the host
+                // and the spawned llama-server, finalizing any #64 WAV dump),
+                // destroy the overlay, persist shell state, then exit. Runs the
+                // SAME path as the SIGTERM/SIGINT handler. Spawned off the menu
+                // callback so the async stop is not driven on the menu thread.
+                let app = app.clone();
+                std::thread::spawn(move || crate::teardown_blocking(&app));
             }
             id => {
                 if let Some(mode) = id.strip_prefix("mode-").and_then(Mode::from_id) {

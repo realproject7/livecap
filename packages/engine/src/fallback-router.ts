@@ -78,6 +78,12 @@ export class FallbackRouter implements TranslationEngine {
     this.usingFallback = false;
   }
 
+  /** Synchronous force-kill of both tiers' OS children (#66 process teardown). */
+  dispose(): void {
+    this.primary.dispose?.();
+    this.fallback.dispose?.();
+  }
+
   health(): EngineHealth {
     return this.active.health();
   }
