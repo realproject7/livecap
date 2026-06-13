@@ -12,6 +12,7 @@
 //! confidence, and timestamps.
 
 pub mod audio;
+mod debug_dump;
 pub mod error;
 pub mod event;
 pub mod model;
