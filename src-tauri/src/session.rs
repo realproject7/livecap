@@ -134,6 +134,19 @@ impl SessionState {
     fn set_phase(&self, phase: Phase) {
         self.phase.store(phase as u8, Ordering::Relaxed);
     }
+
+    /// Promote a still-Starting session to Live (#65). Returns false if the phase
+    /// already moved — a `startFailed` (or stop) tore the start down mid-build —
+    /// so the caller must NOT publish a live session. Call under the `inner` lock
+    /// so the check-and-set is serialized against `fail_session`.
+    fn try_begin_live(&self) -> bool {
+        if self.phase() == Phase::Starting {
+            self.set_phase(Phase::Live);
+            true
+        } else {
+            false
+        }
+    }
 }
 
 /// Latest credit gauge from the host, cached for the `gauge_state` command
@@ -349,12 +362,20 @@ pub async fn start(app: AppHandle) -> Result<(), String> {
 
     match start_inner(&app).await {
         Ok(detail) => {
-            let channels = {
-                let state = app.state::<SessionState>();
-                let inner = state.inner.lock().await;
-                state.set_phase(Phase::Live);
-                inner.channels
-            };
+            let state = app.state::<SessionState>();
+            let mut inner = state.inner.lock().await;
+            // A startFailed (or stop) can tear the session down to Idle WHILE
+            // start_inner is still building. Because start_inner stores the
+            // host/pipeline handles only at the end, fail_session's cleanup may
+            // have run with nothing to kill. Re-check under the lock: only go Live
+            // if still Starting; otherwise kill the just-stored handles and stay
+            // Idle, leaving the durable failure status intact (#65 / RE2).
+            if !state.try_begin_live() {
+                cleanup(&mut inner).await;
+                return Ok(());
+            }
+            let channels = inner.channels;
+            drop(inner);
             tray::set_live(&app, true);
             tray::sync_mic(&app, true, channels.mic);
             emit_channels(&app, channels);
@@ -802,6 +823,32 @@ mod tests {
             assert_eq!(Phase::from_u8(phase as u8), phase);
         }
         assert_eq!(Phase::from_u8(255), Phase::Idle); // unknown byte → Idle
+    }
+
+    #[test]
+    fn try_begin_live_refuses_to_resurrect_a_torn_down_start() {
+        // Regression for the RE2 race: start()'s Ok-branch must not flip a session
+        // back to Live after a startFailed tore it down mid-build (#65).
+        let state = SessionState::default();
+        state.set_phase(Phase::Starting);
+
+        // fail_session won the race: Starting → Idle.
+        state.set_phase(Phase::Idle);
+
+        // The Ok-branch re-check now refuses to publish Live.
+        assert!(!state.try_begin_live());
+        assert_eq!(state.phase(), Phase::Idle);
+    }
+
+    #[test]
+    fn try_begin_live_promotes_a_clean_start_exactly_once() {
+        let state = SessionState::default();
+        assert!(!state.try_begin_live()); // not Starting yet
+        state.set_phase(Phase::Starting);
+        assert!(state.try_begin_live()); // Starting → Live
+        assert_eq!(state.phase(), Phase::Live);
+        assert!(!state.try_begin_live()); // already Live → refuses
+        assert_eq!(state.phase(), Phase::Live);
     }
 
     #[test]

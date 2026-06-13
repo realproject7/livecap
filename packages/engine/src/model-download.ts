@@ -203,8 +203,12 @@ export async function ensureModel(options: EnsureModelOptions): Promise<string> 
       // retrying cannot fix that, so surface it immediately.
       if (error instanceof ModelChecksumError) throw error;
       lastError = error;
-      options.onRetry?.(n, error);
-      if (n < maxAttempts) await sleep(retryBackoffMs * 2 ** (n - 1));
+      // Only announce a retry when one actually follows — never on the final
+      // attempt right before we give up (RE2 note).
+      if (n < maxAttempts) {
+        options.onRetry?.(n, error);
+        await sleep(retryBackoffMs * 2 ** (n - 1));
+      }
     }
   }
   throw lastError ?? new Error("model download failed");
