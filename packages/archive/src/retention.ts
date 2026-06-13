@@ -3,6 +3,26 @@
 // maxAgeDays to enable it, typically on app start.
 
 import type { ArchiveFs } from "./fs";
+import { WORKING_TITLE } from "./writer";
+
+/** ` — (recording)` — the in-progress marker in a working file's name. */
+const RECORDING_MARKER = ` — ${WORKING_TITLE}`;
+
+/**
+ * Whether `name` is an in-progress / unfinalized recording — `<prefix> —
+ * (recording).md` (or a ` (N)` collision variant). Its transcript is live
+ * session data the crash-safety guarantee must preserve ("a crash loses
+ * nothing", writer.ts), so the retention sweep must NEVER reap it by age (#63).
+ *
+ * NOTE: a `(recording).md.tmp` orphan is deliberately NOT matched — that is a
+ * crash-mid-rewrite temp whose `.md` sibling holds the real data, so it stays
+ * reapable like any other `.md.tmp` orphan.
+ */
+export function isInProgressRecording(name: string): boolean {
+  if (!name.endsWith(".md")) return false;
+  const stem = name.slice(0, -".md".length).replace(/ \(\d+\)$/, "");
+  return stem.endsWith(RECORDING_MARKER);
+}
 
 export interface RetentionOptions {
   fs: ArchiveFs;
@@ -64,6 +84,12 @@ export function sweepOldArchives(options: RetentionOptions): RetentionResult {
     // between the temp write and rename leaves one behind, and it would
     // otherwise accumulate one per crash in the user's folder.
     if (!name.endsWith(".md") && !name.endsWith(".md.tmp")) continue;
+    // NEVER reap an unfinalized recording (#63): `<prefix> — (recording).md`
+    // is the live (or a crashed session's) transcript — exactly the data the
+    // crash-safety guarantee preserves. The active session's file isn't present
+    // during this start-time sweep, but a prior crashed session's is, and any
+    // future call order must not be able to delete in-progress data.
+    if (isInProgressRecording(name)) continue;
     const path = fs.join(folder, name);
     try {
       if (fs.mtimeMs(path) < cutoff) {

@@ -27,7 +27,10 @@ export interface SessionArchiveWriterOptions {
   workingTitle?: string;
 }
 
-const WORKING_TITLE = "(recording)";
+/** Title shown in the in-progress working file's name (`<prefix> — (recording).md`)
+ *  until the session finalizes. Exported so the retention sweep can recognize —
+ *  and never reap — an unfinalized recording (#63). */
+export const WORKING_TITLE = "(recording)";
 
 export class SessionArchiveWriter {
   private readonly fs: ArchiveFs;
