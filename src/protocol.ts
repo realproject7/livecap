@@ -25,6 +25,22 @@ export type CaptionBridgeEvent =
 
 export type SessionPhase = "idle" | "starting" | "live" | "paused" | "stopping";
 
+/** Overlay window display mode (#10). */
+export type Mode = "panel" | "strip" | "capsule";
+
+/** Shell window state, served by the `get_shell_state` command. */
+export interface ShellState {
+  mode: Mode;
+  clickThrough: boolean;
+  live: boolean;
+}
+
+/** Webview capabilities (window role), served by the `capabilities` command. */
+export interface Capabilities {
+  captioning: boolean;
+  settings: boolean;
+}
+
 /** Session lifecycle, emitted by Rust on `session://status`. */
 export interface SessionStatus {
   phase: SessionPhase;
@@ -124,7 +140,12 @@ export type HostOutbound =
   | { type: "silence"; sinceMs: number }
   | { type: "archived"; path: string }
   | { type: "stopped" }
-  | { type: "hostError"; detail: string };
+  | { type: "hostError"; detail: string }
+  /** Terminal: the engine never became ready (#65). The Rust shell consumes
+   *  this — it tears the session down to `idle` and republishes the (content-
+   *  free) `detail` as a durable `session://status` error — and does NOT forward
+   *  it to the webview as a transient `host://event`. */
+  | { type: "startFailed"; detail: string };
 
 /* ---- #12 probe mode (no session) ----------------------------------------
  * `node dist-host/main.mjs --probe '<ProbeRequest JSON>'` runs real CLI

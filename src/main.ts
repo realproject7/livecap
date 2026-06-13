@@ -9,31 +9,22 @@ import { writeText } from "@tauri-apps/plugin-clipboard-manager";
 import { ask } from "@tauri-apps/plugin-dialog";
 
 import { applyCaptionSize, type AppSettings } from "./app-settings";
+import { bootstrap } from "./bootstrap";
 import { FeedState, type CaptionBlock } from "./feed-state";
 import { startOnboarding } from "./onboarding";
 import type {
+  Capabilities,
   CaptionBridgeEvent,
   HostInbound,
   HostOutbound,
   ReplyIntentWire,
   SessionChannels,
   SessionStatus,
+  ShellState,
 } from "./protocol";
 import { createSettingsSheet } from "./settings-sheet";
+import { summaryStripContent } from "./summary-strip";
 import { startUiHeartbeat } from "./ui-heartbeat";
-
-type Mode = "panel" | "strip" | "capsule";
-
-interface Capabilities {
-  captioning: boolean;
-  settings: boolean;
-}
-
-interface ShellState {
-  mode: Mode;
-  clickThrough: boolean;
-  live: boolean;
-}
 
 interface ChromePayload {
   interactive: boolean;
@@ -261,23 +252,10 @@ function render(): void {
 }
 
 function renderSummaryStrip(): void {
-  if (phase === "idle") {
-    summaryLabel.textContent = "LiveCap";
-    summaryLineEl.textContent = "Start captioning from the menu bar, or press ▶ above.";
-    summaryDot.classList.remove("on");
-  } else if (phase === "starting" || phase === "stopping") {
-    summaryLabel.textContent = phase === "starting" ? "Starting" : "Saving";
-    summaryLineEl.textContent = statusDetail !== "" ? statusDetail : "…";
-    summaryDot.classList.remove("on");
-  } else if (phase === "paused") {
-    summaryLabel.textContent = "Paused";
-    summaryLineEl.textContent = "Captions are paused — press ▶ to resume.";
-    summaryDot.classList.remove("on");
-  } else {
-    summaryLabel.textContent = "Live summary";
-    summaryLineEl.textContent = summaryLine !== "" ? summaryLine : "Listening…";
-    summaryDot.classList.add("on");
-  }
+  const { label, line, live } = summaryStripContent(phase, statusDetail, summaryLine);
+  summaryLabel.textContent = label;
+  summaryLineEl.textContent = line;
+  summaryDot.classList.toggle("on", live);
 }
 
 /* ---- caption blocks (the five states) ---- */
@@ -735,26 +713,20 @@ void listen<ChromePayload>("shell://chrome", (event) => {
 
 /* ================= initial state ================= */
 
-void (async () => {
-  const [shellState, caps, initialPhase, settings, initialChannels] = await Promise.all([
-    invoke<ShellState>("get_shell_state"),
-    invoke<Capabilities>("capabilities"),
-    invoke<SessionStatus["phase"]>("session_phase"),
-    invoke<AppSettings>("get_settings"),
-    invoke<SessionChannels>("session_channels"),
-  ]);
-  Object.assign(state, shellState);
-  capabilities = caps;
-  phase = initialPhase;
-  channels = initialChannels;
-  appSettings = settings;
-  applyCaptionSize(settings.captionSize);
-  render();
-  syncMiniViews();
+// Boot WITHOUT gating the first paint on any backend command (#65): the window
+// renders defaults immediately, then each piece of state is applied as its
+// invoke resolves. A session start wedged on a stalled model download (which
+// once held the `session_phase` query) can no longer leave the window blank.
+let bootCapabilities: Capabilities | null = null;
+let bootSettings: AppSettings | null = null;
+let onboardingDecided = false;
 
-  // First run (§8.6): no completed onboarding → the three cards, then
-  // straight into a session.
-  if (capabilities.settings && !settings.onboardingComplete) {
+// First run (§8.6): the three onboarding cards, then straight into a session.
+// Needs BOTH capabilities and settings, so it runs once both have arrived.
+function maybeStartOnboarding(): void {
+  if (onboardingDecided || bootCapabilities === null || bootSettings === null) return;
+  onboardingDecided = true;
+  if (bootCapabilities.settings && !bootSettings.onboardingComplete) {
     startOnboarding({
       host: onboardingEl,
       settings: appSettings,
@@ -771,4 +743,42 @@ void (async () => {
       },
     });
   }
-})();
+}
+
+bootstrap(
+  {
+    shellState: () => invoke<ShellState>("get_shell_state"),
+    capabilities: () => invoke<Capabilities>("capabilities"),
+    phase: () => invoke<SessionStatus["phase"]>("session_phase"),
+    settings: () => invoke<AppSettings>("get_settings"),
+    channels: () => invoke<SessionChannels>("session_channels"),
+  },
+  {
+    applyShellState: (shellState) => Object.assign(state, shellState),
+    applyCapabilities: (caps) => {
+      capabilities = caps;
+      bootCapabilities = caps;
+      maybeStartOnboarding();
+    },
+    applyPhase: (initialPhase) => {
+      phase = initialPhase;
+    },
+    applySettings: (settings) => {
+      appSettings = settings;
+      bootSettings = settings;
+      applyCaptionSize(settings.captionSize);
+      maybeStartOnboarding();
+    },
+    applyChannels: (initialChannels) => {
+      channels = initialChannels;
+    },
+    render: () => {
+      render();
+      syncMiniViews();
+    },
+    onError: () => {
+      // A command failed to answer — keep the already-painted defaults; the live
+      // event streams (session://status, etc.) will correct state as it changes.
+    },
+  },
+);

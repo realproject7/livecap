@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { describe, it, expect } from "vitest";
 
-import { ensureModel, ModelChecksumError } from "../src/model-download";
+import { ensureModel, ModelChecksumError, ModelDownloadStallError } from "../src/model-download";
 import type { DownloadFs, RangeFetcher } from "../src/model-download";
 import type { ModelArtifact } from "../src/pins";
 
@@ -142,6 +142,104 @@ describe("ensureModel", () => {
 
     const path = await ensureModel({ fs, fetch, dataDir: DATA_DIR, artifact: ARTIFACT });
     expect(fetch.calls).toBe(1);
+    expect(await fs.sha256(path)).toBe(GOOD_SHA);
+  });
+
+  // --- stall detection + retry/backoff (#65) -------------------------------
+
+  const NO_WAIT = (): Promise<void> => Promise.resolve();
+  const hangForever = (): Promise<never> => new Promise<never>(() => {});
+
+  /**
+   * A fetcher whose first `stallCalls` streams yield one chunk and then freeze
+   * (no more data, connection open) — the #13 HuggingFace-throttle shape. Later
+   * calls serve the rest normally, resuming from the Range offset.
+   */
+  function stallingFetcher(
+    bytes: Uint8Array,
+    stallCalls: number,
+  ): RangeFetcher & { calls: number } {
+    const f = (async (_url: string, startByte: number) => {
+      f.calls += 1;
+      const thisCall = f.calls;
+      const slice = bytes.slice(startByte);
+      async function* chunks(): AsyncIterable<Uint8Array> {
+        if (slice.length > 0) yield slice.slice(0, 8); // one chunk of progress
+        if (thisCall <= stallCalls) {
+          await hangForever(); // then the connection freezes → stall guard fires
+        }
+        for (let i = 8; i < slice.length; i += 8) yield slice.slice(i, i + 8);
+      }
+      return { status: startByte > 0 ? 206 : 200, chunks: chunks() };
+    }) as RangeFetcher & { calls: number };
+    f.calls = 0;
+    return f;
+  }
+
+  it("aborts a stalled stream and retries from the .part offset until it completes (#65)", async () => {
+    const fs = new MemFs();
+    const fetch = stallingFetcher(GOOD, 2); // stall twice, then succeed
+    const retries: number[] = [];
+
+    const path = await ensureModel({
+      fs,
+      fetch,
+      dataDir: DATA_DIR,
+      artifact: ARTIFACT,
+      stallTimeoutMs: 20,
+      retryBackoffMs: 0,
+      sleep: NO_WAIT,
+      onRetry: (n) => retries.push(n),
+    });
+
+    expect(retries).toEqual([1, 2]); // two stalls surfaced before success
+    expect(fetch.calls).toBe(3);
+    expect(await fs.sha256(path)).toBe(GOOD_SHA);
+    expect(fs.exists("/data/models/model.gguf.part")).toBe(false);
+  });
+
+  it("gives up with a ModelDownloadStallError after maxAttempts of no progress (#65)", async () => {
+    const fs = new MemFs();
+    const fetch = stallingFetcher(GOOD, Number.POSITIVE_INFINITY); // never recovers
+
+    await expect(
+      ensureModel({
+        fs,
+        fetch,
+        dataDir: DATA_DIR,
+        artifact: ARTIFACT,
+        stallTimeoutMs: 20,
+        maxAttempts: 3,
+        retryBackoffMs: 0,
+        sleep: NO_WAIT,
+      }),
+    ).rejects.toBeInstanceOf(ModelDownloadStallError);
+    expect(fetch.calls).toBe(3); // all attempts used
+  });
+
+  it("aborts a fetch that never responds and retries (#65)", async () => {
+    const fs = new MemFs();
+    let calls = 0;
+    const fetch: RangeFetcher = async (_url, startByte) => {
+      calls += 1;
+      if (calls === 1) return hangForever(); // the connection itself hangs
+      const slice = GOOD.slice(startByte);
+      async function* chunks(): AsyncIterable<Uint8Array> {
+        for (let i = 0; i < slice.length; i += 8) yield slice.slice(i, i + 8);
+      }
+      return { status: startByte > 0 ? 206 : 200, chunks: chunks() };
+    };
+
+    const path = await ensureModel({
+      fs,
+      fetch,
+      dataDir: DATA_DIR,
+      artifact: ARTIFACT,
+      stallTimeoutMs: 20,
+      retryBackoffMs: 0,
+      sleep: NO_WAIT,
+    });
+    expect(calls).toBe(2);
     expect(await fs.sha256(path)).toBe(GOOD_SHA);
   });
 
