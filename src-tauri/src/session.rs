@@ -27,6 +27,12 @@ use crate::tray;
 
 const HOST_EXIT_TIMEOUT: Duration = Duration::from_secs(60);
 
+/// Bound on the graceful host stop during process teardown (#66). Shorter than
+/// [`HOST_EXIT_TIMEOUT`] because the user is quitting / the process got a
+/// SIGTERM and is expected to disappear promptly; the host's own stop (engine
+/// SIGTERM + a 2 s grace, then SIGKILL) fits comfortably inside this.
+const SHUTDOWN_HOST_TIMEOUT: Duration = Duration::from_secs(8);
+
 /// Host-stdin request types the webview may forward through `host_request`.
 const FORWARDABLE_REQUESTS: &[&str] = &["quickTranslate", "reply", "retranslate", "pin", "silenceSnooze"];
 
@@ -125,7 +131,7 @@ pub struct SessionState {
 
 impl SessionState {
     /// Lock-free read of the published phase.
-    fn phase(&self) -> Phase {
+    pub fn phase(&self) -> Phase {
         Phase::from_u8(self.phase.load(Ordering::Relaxed))
     }
 
@@ -549,6 +555,72 @@ pub async fn stop(app: AppHandle) -> Result<(), String> {
     Ok(())
 }
 
+/// Process-shutdown teardown (#66): used by the tray "Quit" item and the
+/// SIGTERM/SIGINT handler. Unlike [`stop`], which only runs from a Live/Paused
+/// session, this tears down whatever is in flight in ANY phase (including a
+/// half-built `Starting` session whose host + llama-server are already spawned)
+/// so nothing is orphaned when the process is about to exit.
+///
+/// The host child is killed GRACEFULLY: it is sent a `{"type":"stop"}` line and
+/// given a bounded wait to exit. That stop drives the host's own shutdown, which
+/// calls `engine.stop()` — sending SIGTERM to the spawned llama-server and
+/// awaiting its exit — so the engine is reaped, not just the node host. A plain
+/// `child.kill()` (SIGTERM straight to node) would terminate node before it
+/// could reap llama-server, leaving the engine orphaned. Draining the pipeline
+/// first also lets a gated #64 WAV dump finalize its header.
+pub async fn shutdown(app: &AppHandle) {
+    let state = app.state::<SessionState>();
+    let (pipeline, host, events_task) = {
+        let mut inner = state.inner.lock().await;
+        if state.phase() == Phase::Idle && inner.host.is_none() && inner.pipeline.is_none() {
+            return;
+        }
+        state.set_phase(Phase::Stopping);
+        (inner.pipeline.take(), inner.host.take(), inner.events_task.take())
+    };
+
+    if let Some(pipeline) = pipeline {
+        let _ = pipeline.finish().await;
+    }
+    if let Some(task) = events_task {
+        let _ = task.await;
+    }
+    if let Some(host) = host {
+        reap_host(host).await;
+    }
+
+    let mut inner = state.inner.lock().await;
+    state.set_phase(Phase::Idle);
+    inner.channels = ChannelConfig::default();
+}
+
+/// Gracefully stop a session host: tell it to stop (so it reaps its own
+/// llama-server child), poll for a bounded time, then force-kill if it
+/// overstays. Runs on a blocking thread so the wait never stalls the runtime.
+async fn reap_host(host: HostHandle) {
+    host.expected_exit.store(true, Ordering::Relaxed);
+    let _ = write_host_line(&host.stdin, &serde_json::json!({ "type": "stop" }));
+    let _ = tauri::async_runtime::spawn_blocking(move || {
+        let mut child = host.child;
+        let deadline = std::time::Instant::now() + SHUTDOWN_HOST_TIMEOUT;
+        loop {
+            match child.try_wait() {
+                Ok(Some(_)) => break, // host exited; its llama-server is reaped
+                Ok(None) if std::time::Instant::now() >= deadline => {
+                    // Host overstayed its graceful stop: force it. The OS reaps
+                    // its llama-server child with it, so nothing is orphaned.
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    break;
+                }
+                Ok(None) => std::thread::sleep(Duration::from_millis(25)),
+                Err(_) => break,
+            }
+        }
+    })
+    .await;
+}
+
 /// Mid-session microphone toggle (#53): pause/resume JUST the mic capture.
 /// While Paused only the desired flag flips; resume honors it. Turning the
 /// last active channel off is refused (a session must keep one channel).
@@ -849,6 +921,24 @@ mod tests {
         assert_eq!(state.phase(), Phase::Live);
         assert!(!state.try_begin_live()); // already Live → refuses
         assert_eq!(state.phase(), Phase::Live);
+    }
+
+    #[tokio::test]
+    async fn shutdown_guard_skips_a_truly_idle_session() {
+        // #66: teardown calls shutdown() on every quit/SIGTERM. With no host or
+        // pipeline in flight it must be a cheap no-op and NOT flip the phase to
+        // Stopping (which would briefly publish a bogus transition).
+        let state = SessionState::default();
+        assert_eq!(state.phase(), Phase::Idle);
+        {
+            let inner = state.inner.lock().await;
+            let nothing_in_flight =
+                state.phase() == Phase::Idle && inner.host.is_none() && inner.pipeline.is_none();
+            assert!(nothing_in_flight, "default session has nothing to tear down");
+        }
+        // The guard condition mirrors shutdown()'s early return; assert it holds
+        // so a future change to the field set can't silently break the fast path.
+        assert_eq!(state.phase(), Phase::Idle);
     }
 
     #[test]

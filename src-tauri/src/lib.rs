@@ -134,9 +134,107 @@ fn set_live(app: AppHandle, live: bool) {
     tray::set_live(&app, live);
 }
 
+/// Shared clean-shutdown path for both the tray "Quit" item and a received
+/// SIGTERM/SIGINT (#66). Stopping the session drains the caption pipeline (so a
+/// gated #64 WAV dump finalizes its header), tells the session host to stop —
+/// which reaps the spawned llama-server, not just the node host — and waits for
+/// it to exit. The overlay window is then destroyed so no frozen webview is
+/// left on screen, and the process exits. Without this, a SIGTERM left a zombie
+/// overlay + orphaned children behind.
+async fn teardown(app: AppHandle) {
+    // shutdown() tears down a session in ANY phase — including a half-built
+    // `Starting` one whose host + llama-server are already spawned — so a
+    // SIGTERM mid-startup can never orphan them.
+    session::shutdown(&app).await;
+    if let Some(window) = overlay::overlay_window(&app) {
+        let _ = window.destroy();
+    }
+    app.state::<Shell>().save_now();
+    app.exit(0);
+}
+
+/// Run [`teardown`] from a synchronous context (tray click, signal thread):
+/// drive it on the async runtime and block until it returns, so the process is
+/// not killed out from under an in-flight session stop.
+pub(crate) fn teardown_blocking(app: &AppHandle) {
+    tauri::async_runtime::block_on(teardown(app.clone()));
+}
+
+/// Block SIGTERM/SIGINT for the calling (main) thread BEFORE any other threads
+/// are spawned (#66). Because threads inherit the signal mask, every later
+/// thread — Tauri's runtime workers, our watchers — also blocks these signals,
+/// so the disposition is decided solely by the dedicated `sigwait` thread
+/// instead of the default "terminate the process now" behavior.
+#[cfg(unix)]
+fn block_termination_signals() {
+    // SAFETY: standard libc sigset construction + mask install on the current
+    // thread; no aliasing, and the mask is plain POD.
+    unsafe {
+        let mut set: libc::sigset_t = std::mem::zeroed();
+        libc::sigemptyset(&mut set);
+        libc::sigaddset(&mut set, libc::SIGTERM);
+        libc::sigaddset(&mut set, libc::SIGINT);
+        libc::pthread_sigmask(libc::SIG_BLOCK, &set, std::ptr::null_mut());
+    }
+}
+
+#[cfg(not(unix))]
+fn block_termination_signals() {}
+
+/// Install a SIGTERM/SIGINT handler that runs the SAME teardown as Quit (#66).
+/// A dedicated thread blocks in `sigwait` so the teardown — which awaits async
+/// session shutdown — runs on a normal thread rather than in an async-signal
+/// unsafe handler. Pairs with [`block_termination_signals`], which must have
+/// already masked these signals on every thread. On macOS `pkill -TERM` /
+/// Ctrl-C therefore reaps children and removes the overlay instead of leaving a
+/// zombie window.
+#[cfg(unix)]
+fn install_signal_handler(app: AppHandle) {
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    // Guard against a second teardown if both signals arrive (or one arrives
+    // while Quit is already tearing down).
+    static HANDLING: AtomicBool = AtomicBool::new(false);
+
+    std::thread::spawn(move || {
+        let mut set: libc::sigset_t = unsafe { std::mem::zeroed() };
+        // SAFETY: libc sigset construction + sigwait on the dedicated handler
+        // thread; the signals are already process-wide blocked so sigwait owns
+        // their delivery.
+        unsafe {
+            libc::sigemptyset(&mut set);
+            libc::sigaddset(&mut set, libc::SIGTERM);
+            libc::sigaddset(&mut set, libc::SIGINT);
+        }
+        let mut signum: libc::c_int = 0;
+        let waited = unsafe { libc::sigwait(&set, &mut signum) };
+        if waited == 0 && !HANDLING.swap(true, Ordering::SeqCst) {
+            teardown_blocking(&app);
+        }
+    });
+}
+
+#[cfg(not(unix))]
+fn install_signal_handler(_app: AppHandle) {}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    // Mask SIGTERM/SIGINT before any threads spawn so the dedicated sigwait
+    // thread owns their delivery and can run a clean teardown (#66).
+    block_termination_signals();
+
     tauri::Builder::default()
+        // Single-instance guard (#66): registered FIRST per the plugin's docs.
+        // A second launch hands its argv/cwd to this callback in the EXISTING
+        // process instead of spawning a second overlay; we just surface the one
+        // window (restore mode to Panel if it was wedged, show, focus).
+        .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
+            if let Some(window) = overlay::overlay_window(app) {
+                let _ = window.unminimize();
+                let _ = window.show();
+                let _ = window.set_focus();
+            }
+        }))
         .plugin(
             tauri_plugin_global_shortcut::Builder::new()
                 .with_handler(|app, shortcut, event| {
@@ -268,6 +366,9 @@ pub fn run() {
 
             overlay::spawn_click_through_watcher(app.handle().clone());
             overlay::spawn_config_saver(app.handle().clone());
+
+            // Clean teardown on SIGTERM/SIGINT (#66): same path as tray Quit.
+            install_signal_handler(app.handle().clone());
             Ok(())
         })
         .on_window_event(|window, event| {

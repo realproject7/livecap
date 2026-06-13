@@ -123,6 +123,30 @@ describe("LocalLlmEngine — real spawn + HTTP (fake llama-server)", () => {
     await engine.stop();
   });
 
+  it("dispose() synchronously force-kills the running server so it is not orphaned (#66)", async () => {
+    const engine = await makeEngine();
+    await engine.start();
+    expect(engine.health().status).toBe("ready");
+    const port = (engine as unknown as { config: { port: number } }).config.port;
+
+    // Synchronous teardown for process termination — no await on a graceful stop.
+    engine.dispose();
+
+    // The server must actually be gone: poll until the port stops answering.
+    let alive = true;
+    for (let i = 0; i < 50 && alive; i++) {
+      try {
+        await fetch(`http://127.0.0.1:${port}/health`, { signal: AbortSignal.timeout(100) });
+      } catch {
+        alive = false;
+      }
+      if (alive) await new Promise((r) => setTimeout(r, 50));
+    }
+    expect(alive).toBe(false);
+    // Idempotent: a second dispose() (e.g. signal + stdin-close both firing) is safe.
+    engine.dispose();
+  });
+
   it("redacts server stderr content from the health timeout detail (#23)", async () => {
     const SECRET = "CAPTION-SECRET-merger-terms";
     const engine = await makeEngine({

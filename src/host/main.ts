@@ -86,13 +86,33 @@ lines.on("line", (line) => {
     });
 });
 
-lines.on("close", () => {
-  // Rust hung up (app quit / crash): finalize what we can, then exit.
+// Process-termination teardown (#66): a graceful session stop can stall (a
+// wedged drain/summary, or a stop issued mid-startup), which previously left
+// the host — and its spawned llama-server — orphaned after the Rust shell exited
+// or was SIGTERM'd. Force-kill the engine synchronously and exit, bounding the
+// graceful attempt so the process can never hang.
+const FORCE_EXIT_MS = 4000;
+
+function terminate(): void {
   if (exiting) return;
   exiting = true;
+  // Guarantee the spawned llama-server dies even if the graceful stop never
+  // resolves: a hard SIGKILL of the engine child up front, then a bounded
+  // attempt to finalize the archive.
+  session.dispose();
+  const force = setTimeout(() => process.exit(0), FORCE_EXIT_MS);
+  force.unref?.();
   chain = chain
     .then(() => session.handle({ type: "stop" }))
     .catch(() => undefined)
-    .finally(() => process.exit(0));
-});
+    .finally(() => {
+      clearTimeout(force);
+      process.exit(0);
+    });
+}
+
+// Rust hung up (app quit / crash) or sent a termination signal.
+lines.on("close", terminate);
+process.on("SIGTERM", terminate);
+process.on("SIGINT", terminate);
 }
