@@ -54,15 +54,64 @@ pub struct SuppressionConfig {
 }
 
 impl Default for SuppressionConfig {
+    /// Tuned for REAL speaker acoustics (#64). vs the #56 synthetic-fixture
+    /// values, this catches more residual bleed: `atten_ratio` 0.7 → 0.8 (AGC
+    /// boosts the bleed toward the system level), `dedup_window_ms` 8s → 15s and
+    /// `dedup_similarity` 0.6 → 0.55 (real timing skew + acoustic divergence make
+    /// the mic re-hearing arrive later and transcribe slightly differently), with
+    /// wider energy windows to match. Every field is `LIVECAP_BLEED_*`-overridable
+    /// (see [`SuppressionConfig::from_env`]) so it can be dialed in against
+    /// captured fixtures without a rebuild.
     fn default() -> Self {
         Self {
             speech_floor_rms: 0.012,
-            atten_ratio: 0.7,
-            energy_window_ms: 1_500,
-            energy_retain_ms: 12_000,
-            dedup_window_ms: 8_000,
-            dedup_similarity: 0.6,
+            atten_ratio: 0.8,
+            energy_window_ms: 2_000,
+            energy_retain_ms: 20_000,
+            dedup_window_ms: 15_000,
+            dedup_similarity: 0.55,
         }
+    }
+}
+
+/// Parse an environment override `name` as `T`, ignoring an unset/blank/malformed
+/// value (so a typo can never wedge suppression — it just keeps the default).
+fn env_override<T: std::str::FromStr>(
+    get: &impl Fn(&str) -> Option<String>,
+    name: &str,
+) -> Option<T> {
+    get(name).and_then(|raw| raw.trim().parse::<T>().ok())
+}
+
+impl SuppressionConfig {
+    /// The tuned defaults overlaid with any `LIVECAP_BLEED_*` env overrides (#64)
+    /// — `SPEECH_FLOOR`, `ATTEN_RATIO`, `ENERGY_WINDOW_MS`, `ENERGY_RETAIN_MS`,
+    /// `DEDUP_WINDOW_MS`, `DEDUP_SIMILARITY` — so an operator can tune against
+    /// captured fixtures (see the gated WAV dump) without recompiling.
+    pub fn from_env() -> Self {
+        Self::default().with_overrides(|name| std::env::var(name).ok())
+    }
+
+    fn with_overrides(mut self, get: impl Fn(&str) -> Option<String>) -> Self {
+        if let Some(v) = env_override(&get, "LIVECAP_BLEED_SPEECH_FLOOR") {
+            self.speech_floor_rms = v;
+        }
+        if let Some(v) = env_override(&get, "LIVECAP_BLEED_ATTEN_RATIO") {
+            self.atten_ratio = v;
+        }
+        if let Some(v) = env_override(&get, "LIVECAP_BLEED_ENERGY_WINDOW_MS") {
+            self.energy_window_ms = v;
+        }
+        if let Some(v) = env_override(&get, "LIVECAP_BLEED_ENERGY_RETAIN_MS") {
+            self.energy_retain_ms = v;
+        }
+        if let Some(v) = env_override(&get, "LIVECAP_BLEED_DEDUP_WINDOW_MS") {
+            self.dedup_window_ms = v;
+        }
+        if let Some(v) = env_override(&get, "LIVECAP_BLEED_DEDUP_SIMILARITY") {
+            self.dedup_similarity = v;
+        }
+        self
     }
 }
 
@@ -231,12 +280,53 @@ fn token_jaccard(a: &str, b: &str) -> f32 {
 mod tests {
     use super::*;
 
+    /// Fixed config so the algorithm tests below are pinned to known thresholds,
+    /// independent of the tunable production defaults (#64).
     fn suppressor() -> CrossChannelSuppressor {
-        CrossChannelSuppressor::new(SuppressionConfig::default())
+        CrossChannelSuppressor::new(SuppressionConfig {
+            speech_floor_rms: 0.012,
+            atten_ratio: 0.7,
+            energy_window_ms: 1_500,
+            energy_retain_ms: 12_000,
+            dedup_window_ms: 8_000,
+            dedup_similarity: 0.6,
+        })
     }
 
     fn approx(a: f32, b: f32) -> bool {
         (a - b).abs() < 1e-6
+    }
+
+    #[test]
+    fn tuned_defaults_are_more_aggressive_than_the_56_synthetic_values() {
+        let d = SuppressionConfig::default();
+        assert!(d.atten_ratio >= 0.8); // catches AGC-boosted bleed
+        assert!(d.dedup_window_ms >= 15_000); // tolerates real timing skew
+        assert!(d.dedup_similarity <= 0.55); // tolerates acoustic divergence
+    }
+
+    #[test]
+    fn env_overrides_apply_over_defaults_and_ignore_malformed() {
+        use std::collections::HashMap;
+        let base = SuppressionConfig::default();
+        let env: HashMap<&str, &str> = [
+            ("LIVECAP_BLEED_ATTEN_RATIO", "0.9"),
+            ("LIVECAP_BLEED_DEDUP_WINDOW_MS", "30000"),
+            ("LIVECAP_BLEED_DEDUP_SIMILARITY", "0.4"),
+            ("LIVECAP_BLEED_ENERGY_WINDOW_MS", "not-a-number"),
+        ]
+        .into_iter()
+        .collect();
+        let cfg = SuppressionConfig::default()
+            .with_overrides(|name| env.get(name).map(|s| (*s).to_string()));
+
+        assert!(approx(cfg.atten_ratio, 0.9));
+        assert_eq!(cfg.dedup_window_ms, 30_000);
+        assert!(approx(cfg.dedup_similarity, 0.4));
+        // A malformed value is ignored — the field keeps its default.
+        assert_eq!(cfg.energy_window_ms, base.energy_window_ms);
+        // An unset field keeps its default.
+        assert!(approx(cfg.speech_floor_rms, base.speech_floor_rms));
     }
 
     #[test]

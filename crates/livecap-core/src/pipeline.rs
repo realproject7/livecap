@@ -15,7 +15,7 @@
 //! WAV chunks through [`CaptionPipeline::feeder`], exactly like the capture
 //! threads do.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -27,6 +27,7 @@ use crate::audio::device::AudioDevice;
 use crate::audio::mic::MicCapture;
 use crate::audio::system::SystemAudioCapture;
 use crate::audio::AudioChunk;
+use crate::debug_dump::ChannelDump;
 use crate::event::{CaptionEvent, CaptionKind, Channel};
 use crate::model::ModelManager;
 use crate::resample::StreamResampler;
@@ -122,7 +123,7 @@ impl CaptionPipeline {
         let (events_tx, events_rx) = mpsc::unbounded_channel();
         let (transcribe_tx, transcribe_rx) = mpsc::unbounded_channel();
 
-        let suppressor = Arc::new(CrossChannelSuppressor::new(SuppressionConfig::default()));
+        let suppressor = Arc::new(CrossChannelSuppressor::new(SuppressionConfig::from_env()));
         let start = Instant::now();
 
         let transcribe_task = tokio::spawn(transcribe_worker(
@@ -303,6 +304,22 @@ async fn channel_worker_inner(
     let mut vad = ContinuousVadProcessor::new(VAD_SAMPLE_RATE, params.vad_redemption_ms)?;
     let mut last_partial_len = 0usize;
 
+    // Gated raw-WAV fixture dump (#64): OFF unless LIVECAP_BLEED_DUMP_DIR is set.
+    // Captures the exact 16 kHz stream the VAD/suppressor see, for tuning bleed
+    // thresholds against real acoustics. Privacy: explicit opt-in only (EPIC #1).
+    let mut dump = std::env::var_os("LIVECAP_BLEED_DUMP_DIR").and_then(|dir| {
+        match ChannelDump::create(Path::new(&dir), channel) {
+            Ok(d) => {
+                log::warn!("[#64] bleed audio dump ENABLED for {channel} (raw 16 kHz WAV, debug only)");
+                Some(d)
+            }
+            Err(e) => {
+                log::error!("[#64] could not open bleed dump for {channel}: {e}");
+                None
+            }
+        }
+    });
+
     // Energy gate (#56): on the mic channel, drop a segment that is attenuated
     // speaker bleed concurrent with the system channel, before it costs a
     // transcription. Always false on the system channel and when there is no
@@ -336,6 +353,11 @@ async fn channel_worker_inner(
         let samples_16k = resampler.process(&chunk.samples, chunk.sample_rate)?;
         if samples_16k.is_empty() {
             continue;
+        }
+
+        // Capture the resampled stream for offline tuning when the dump is on (#64).
+        if let Some(d) = dump.as_mut() {
+            d.write(&samples_16k);
         }
 
         // Publish the system channel's energy envelope for the gate (#56).
