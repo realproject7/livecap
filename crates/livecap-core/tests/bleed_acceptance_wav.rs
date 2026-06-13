@@ -153,10 +153,22 @@ async fn bleed_meets_acceptance_through_the_real_pipeline() {
             }
         }
     }
-    println!("system finals: {system_finals:?}");
+    let system_text = system_finals.join(" ");
+    println!("system finals ({}): {system_finals:?}", system_finals.len());
     println!("mic finals ({}): {mic_finals:?}", mic_finals.len());
 
     if is_real {
+        // System-channel sanity (#64 / RE1): the real fixture is 208 s of speech,
+        // so the system channel MUST produce meaningful finalizations. Without
+        // this guard a pipeline that processed nothing (model load failed, audio
+        // not fed, …) yields 0/0 and the `mic <= 1` acceptance passes VACUOUSLY.
+        assert!(
+            system_finals.len() >= 5 && system_text.trim().len() >= 50,
+            "system channel produced too little ({} finals, {} chars) — the fixture was not \
+             actually transcribed, so the mic acceptance would be vacuous: {system_finals:?}",
+            system_finals.len(),
+            system_text.trim().len()
+        );
         // Pure speaker→mic bleed (operator stayed silent): every mic final is
         // bleed. Acceptance: <= 1 over the clip (the `Me <= 5 / hr` target).
         assert!(
@@ -165,6 +177,12 @@ async fn bleed_meets_acceptance_through_the_real_pipeline() {
             mic_finals.len()
         );
     } else {
+        // System-channel sanity: the system actually transcribed its sentence, so
+        // a vacuous 0/0 pass is impossible in the synthetic mode either.
+        assert!(
+            contains_any(&system_text, &["fox", "brown", "quick", "system"]),
+            "system channel did not transcribe its sentence — harness ran vacuously: '{system_text}'"
+        );
         let mic_text = mic_finals.join(" ");
         // Bleed (concurrent + gap copies of the system sentence) suppressed...
         assert!(
