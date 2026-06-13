@@ -82,6 +82,18 @@ export class SessionArchiveWriter {
     this.opened = true;
   }
 
+  /**
+   * Bump the working file's mtime so a concurrent session start sees this
+   * recording as ALIVE and never adopts it as a crashed orphan (#69). The host
+   * calls this on a fixed heartbeat; a crashed session stops heartbeating, so
+   * its file ages past the staleness threshold and becomes adoptable. No-op
+   * before open() or after finalize() (no live working file to keep warm).
+   */
+  heartbeat(): void {
+    if (!this.opened || this.finalized) return;
+    this.fs.touch(this.workingPath);
+  }
+
   /** Append a finalized caption to the transcript (durable on return). */
   appendCaption(entry: CaptionEntry): void {
     this.ensureWritable();

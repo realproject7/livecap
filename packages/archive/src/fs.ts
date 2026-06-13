@@ -31,6 +31,8 @@ export interface ArchiveFs {
   readdir(dir: string): string[];
   /** Last-modified time in epoch milliseconds. */
   mtimeMs(path: string): number;
+  /** Bump a file's last-modified time to now (liveness heartbeat, #69). */
+  touch(path: string): void;
 }
 
 /** A node-backed ArchiveFs for production use (the consumer wires this in). */
@@ -48,5 +50,9 @@ export function nodeArchiveFs(): ArchiveFs {
     unlink: (p) => fs.unlinkSync(p),
     readdir: (dir) => fs.readdirSync(dir),
     mtimeMs: (p) => fs.statSync(p).mtimeMs,
+    touch: (p) => {
+      const now = new Date();
+      fs.utimesSync(p, now, now);
+    },
   };
 }

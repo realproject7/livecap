@@ -24,6 +24,18 @@ export interface AdoptionOptions {
   fs: ArchiveFs;
   /** Archive folder to scan for orphaned recordings (the user data dir). */
   folder: string;
+  /** Current time in epoch milliseconds (injected for testability). */
+  nowMs: number;
+  /**
+   * Only adopt a recording untouched for at least this many ms. A still-running
+   * session keeps its working file warm via a liveness heartbeat (writer.ts), so
+   * a fresh file may belong to a live session/instance and must NOT be finalized
+   * out from under it (#69); a crashed session stops heartbeating and ages past
+   * this threshold. The single-instance guard (#66) is the primary guarantee
+   * that no other writer shares the folder — this is defense-in-depth. Must
+   * exceed the host's heartbeat interval by a wide margin.
+   */
+  staleAfterMs: number;
 }
 
 export interface AdoptionResult {
@@ -68,7 +80,7 @@ function baseName(fs: ArchiveFs, path: string): string {
  * only ever sees crashed sessions' orphans — never the live recording.
  */
 export function adoptOrphanRecordings(options: AdoptionOptions): AdoptionResult {
-  const { fs, folder } = options;
+  const { fs, folder, nowMs, staleAfterMs } = options;
   const adopted: { from: string; to: string }[] = [];
   const failed: string[] = [];
 
@@ -85,6 +97,12 @@ export function adoptOrphanRecordings(options: AdoptionOptions): AdoptionResult 
     if (prefix === null) continue; // not an in-progress recording
     try {
       const from = containedPath(fs, folder, name);
+      // Leave a recently-touched recording alone: it may be a live session/
+      // instance heartbeating this very file, and adopting it would finalize a
+      // running recording out from under it (#69). Crashed sessions stop
+      // heartbeating and age past the threshold. (ENOENT here = vanished mid-
+      // sweep → handled by the catch below as a tolerated miss.)
+      if (nowMs - fs.mtimeMs(from) < staleAfterMs) continue;
       const title = sanitizeTitle(firstSummaryLine(fs.readFile(from)));
       const to = uniquePath(fs, folder, `${prefix} — ${title}.md`);
       fs.rename(from, to);

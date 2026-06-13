@@ -103,7 +103,12 @@ export class FakeFs implements ArchiveFs {
     return this.mtimes.get(path) ?? 0;
   }
 
-  /** Set a file's mtime directly (for retention tests). */
+  touch(path: string): void {
+    if (!this.files.has(path)) throw new Error(`ENOENT: ${path}`);
+    this.mtimes.set(path, ++this.clock);
+  }
+
+  /** Set a file's mtime directly (for retention/adoption tests). */
   setMtime(path: string, mtimeMs: number): void {
     this.mtimes.set(path, mtimeMs);
   }

@@ -39,6 +39,13 @@ const LOCAL_ENGINE_LABEL = "Local (Qwen3 4B)";
 const SUMMARY_TICK_MS = 5_000;
 const WATCHDOG_TICK_MS = 15_000;
 const DRAIN_TIMEOUT_MS = 20_000;
+/** Liveness heartbeat for the in-progress recording (#69): the writer touches
+ *  its working file this often so a concurrent session start sees it as ALIVE. */
+const RECORDING_HEARTBEAT_MS = 10_000;
+/** A recording untouched for longer than this is treated as a crashed orphan
+ *  eligible for adoption (#69). Wide margin over RECORDING_HEARTBEAT_MS so a live
+ *  session's heartbeat always keeps its file comfortably "fresh". */
+const RECORDING_STALE_AFTER_MS = 60_000;
 /** Hard backstop on engine startup (#65). The per-chunk download stall detection
  *  (ensureModel) is the primary guard; no healthy first-run download approaches
  *  this. If it fires, the session start fails with a content-free status instead
@@ -245,7 +252,12 @@ export class HostSession {
     // (#63). Promote each to a titled archive now — AFTER the sweep (so the sweep
     // never reaps a fresh promotion) and BEFORE this session opens its own
     // working file (so we only ever see crashed sessions' orphans, not our own).
-    const adoption = adoptOrphanRecordings({ fs: nodeArchiveFs(), folder: config.archiveDir });
+    const adoption = adoptOrphanRecordings({
+      fs: nodeArchiveFs(),
+      folder: config.archiveDir,
+      nowMs: Date.now(),
+      staleAfterMs: RECORDING_STALE_AFTER_MS,
+    });
     for (const { to } of adoption.adopted) {
       this.emit({ type: "status", detail: `adopted a recovered recording: ${to}` });
     }
@@ -304,6 +316,10 @@ export class HostSession {
 
     this.intervals.push(setInterval(() => void this.summaryTick(), SUMMARY_TICK_MS));
     this.intervals.push(setInterval(() => this.watchdog?.check(Date.now()), WATCHDOG_TICK_MS));
+    // Keep this recording's working file warm so a concurrent session start does
+    // not mistake it for a crashed orphan and adopt it (#69). Cleared on stop()
+    // before finalize(), so it never races the rename.
+    this.intervals.push(setInterval(() => this.writer?.heartbeat(), RECORDING_HEARTBEAT_MS));
 
     this.emit({ type: "gauge", gauge: this.withExtrasBudget(accountant.gauge()) });
     this.emit({ type: "ready", engine: engineLabel });

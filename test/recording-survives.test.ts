@@ -56,18 +56,24 @@ afterEach(() => {
   rmSync(archiveDir, { recursive: true, force: true });
 });
 
+// Mirrors the host's RECORDING_STALE_AFTER_MS (session.ts): a recording untouched
+// for longer than this is treated as a crashed orphan eligible for adoption.
+const STALE_AFTER_MS = 60_000;
+
 /** Replicate the host's start-time archive sequence (session.ts): sweep first
- *  (only when retention is enabled), adopt any orphaned recordings (#69), then
- *  open this session's working file. */
+ *  (only when retention is enabled), adopt any STALE orphaned recordings (#69),
+ *  then open this session's working file. `adoptNowMs` is the clock the adoption
+ *  staleness check sees (default real now → a just-written file looks live). */
 function startSession(
   retentionDays: number,
   autoSave: boolean,
   fileNamePrefix = "2026-06-13 0101",
+  adoptNowMs = Date.now(),
 ): SessionArchiveWriter | null {
   if (retentionDays > 0) {
     sweepOldArchives({ fs, folder: archiveDir, maxAgeDays: retentionDays, nowMs: Date.now() });
   }
-  adoptOrphanRecordings({ fs, folder: archiveDir });
+  adoptOrphanRecordings({ fs, folder: archiveDir, nowMs: adoptNowMs, staleAfterMs: STALE_AFTER_MS });
   if (!autoSave) return null;
   const writer = new SessionArchiveWriter({
     fs,
@@ -156,10 +162,11 @@ describe("#63 — in-progress recording survives a minimal-settings session", ()
     const orphanPath = s1!.path; // <prefix> — (recording).md, left on disk
     expect(existsSync(orphanPath)).toBe(true);
 
-    // Session 2 starts (retention OFF, like minimal settings): the orphan is
-    // promoted to a titled archive — title from its own first summary line —
-    // and this session opens its OWN, separate working file.
-    const s2 = startSession(0, true, "2026-06-13 0202");
+    // Session 2 starts LATER (retention OFF, like minimal settings): the orphan,
+    // now stale (session 1 stopped heartbeating when it crashed), is promoted to
+    // a titled archive — title from its own first summary line — and this session
+    // opens its OWN, separate working file.
+    const s2 = startSession(0, true, "2026-06-13 0202", Date.now() + 2 * STALE_AFTER_MS);
     const adopted = join(archiveDir, "2026-06-13 0101 — Migration planning.md");
     expect(existsSync(orphanPath)).toBe(false); // renamed, not deleted...
     expect(existsSync(adopted)).toBe(true); // ...to its titled name
@@ -170,6 +177,25 @@ describe("#63 — in-progress recording survives a minimal-settings session", ()
     expect(s2!.path.endsWith(`${WORKING_TITLE}.md`)).toBe(true);
     expect(s2!.path).not.toBe(orphanPath);
     expect(recordingFiles()).toEqual([s2!.path.split("/").pop()]);
+  });
+
+  it("an ACTIVE recording is NOT adopted out from under a running session (#69)", () => {
+    // Session 1 is live and recording (its working file was just written).
+    const s1 = startSession(0, true);
+    s1!.updateBrief({ summary: ["In progress"] });
+    const livePath = s1!.path;
+    expect(existsSync(livePath)).toBe(true);
+
+    // A concurrent/internal start runs adoption at the REAL now: session 1's file
+    // is fresh (a live session keeps it warm via heartbeat), so it must be left
+    // exactly as-is — never finalized out from under the running session.
+    adoptOrphanRecordings({ fs, folder: archiveDir, nowMs: Date.now(), staleAfterMs: STALE_AFTER_MS });
+
+    expect(existsSync(livePath)).toBe(true);
+    expect(livePath.endsWith(`${WORKING_TITLE}.md`)).toBe(true); // still the live recording
+    // And session 1 can keep writing to it.
+    s1!.updateBrief({ durationMin: 3 });
+    expect(existsSync(livePath)).toBe(true);
   });
 
   it("finalize on an empty/music-only transcript preserves the data under a titled name", () => {
