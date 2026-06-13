@@ -14,6 +14,7 @@
 // At every step the on-disk file is a complete, valid, readable document.
 
 import type { ArchiveFs } from "./fs";
+import { uniquePath } from "./paths";
 import { renderDocument, renderEntryAppend, type ArchiveModel } from "./render";
 import { sanitizeTitle } from "./sanitize";
 import type { BriefUpdate, CaptionEntry, FinalBrief, SessionMeta } from "./types";
@@ -131,28 +132,9 @@ export class SessionArchiveWriter {
     this.fs.rename(tmp, target);
   }
 
-  /** Join a filename into the folder and assert it cannot escape it. */
-  private resolveInside(fileName: string): string {
-    const candidate = this.fs.join(this.folder, fileName);
-    const root = this.fs.resolve(this.folder);
-    const resolved = this.fs.resolve(candidate);
-    // Must be strictly inside the folder — the folder itself is not a valid
-    // write target, so `resolved === root` is rejected too.
-    if (!resolved.startsWith(root + this.fs.sep)) {
-      throw new Error("archive path escapes the configured folder");
-    }
-    return resolved;
-  }
-
-  /** A contained path for `fileName`, suffixed " (2)", " (3)" … on collision. */
+  /** A contained, collision-suffixed path for `fileName` in the archive folder. */
   private resolveUnique(fileName: string): string {
-    let candidate = this.resolveInside(fileName);
-    if (!this.fs.exists(candidate)) return candidate;
-    const stem = fileName.replace(/\.md$/, "");
-    for (let i = 2; ; i++) {
-      candidate = this.resolveInside(`${stem} (${i}).md`);
-      if (!this.fs.exists(candidate)) return candidate;
-    }
+    return uniquePath(this.fs, this.folder, fileName);
   }
 
   private ensureWritable(): void {

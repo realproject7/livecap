@@ -18,7 +18,12 @@ import {
   SummaryCadence,
 } from "@livecap/engine";
 import type { GaugeState, ReplyIntent, TranslationEngine, Usage } from "@livecap/engine";
-import { nodeArchiveFs, SessionArchiveWriter, sweepOldArchives } from "@livecap/archive";
+import {
+  adoptOrphanRecordings,
+  nodeArchiveFs,
+  SessionArchiveWriter,
+  sweepOldArchives,
+} from "@livecap/archive";
 import type { BoardData, CaptionEntry } from "@livecap/archive";
 
 import type { Channel, GaugeWire, HostInbound, HostOutbound } from "../protocol.ts";
@@ -233,6 +238,19 @@ export class HostSession {
         maxAgeDays: resolved.archiveRetentionDays,
         nowMs: Date.now(),
       });
+    }
+
+    // Adopt orphaned recordings (#69): a prior session that crashed before
+    // finalize() left a `(recording).md` the sweep above intentionally spared
+    // (#63). Promote each to a titled archive now — AFTER the sweep (so the sweep
+    // never reaps a fresh promotion) and BEFORE this session opens its own
+    // working file (so we only ever see crashed sessions' orphans, not our own).
+    const adoption = adoptOrphanRecordings({ fs: nodeArchiveFs(), folder: config.archiveDir });
+    for (const { to } of adoption.adopted) {
+      this.emit({ type: "status", detail: `adopted a recovered recording: ${to}` });
+    }
+    for (const name of adoption.failed) {
+      this.emit({ type: "status", detail: `could not adopt a recovered recording (${name})` });
     }
 
     if (resolved.archiveAutoSave) {

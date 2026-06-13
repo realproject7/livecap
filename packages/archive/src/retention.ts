@@ -24,6 +24,18 @@ export function isInProgressRecording(name: string): boolean {
   return stem.endsWith(RECORDING_MARKER);
 }
 
+/**
+ * The `<prefix>` of an in-progress recording filename, or `null` when `name` is
+ * not one. `<prefix> — (recording).md` (or a ` (N)` collision variant) →
+ * `<prefix>`. The adoption sweep (#69) uses this to rebuild the finalized name
+ * `<prefix> — <title>.md`, so the recording-name grammar lives in one place.
+ */
+export function recordingPrefix(name: string): string | null {
+  if (!isInProgressRecording(name)) return null;
+  const stem = name.slice(0, -".md".length).replace(/ \(\d+\)$/, "");
+  return stem.slice(0, -RECORDING_MARKER.length);
+}
+
 export interface RetentionOptions {
   fs: ArchiveFs;
   folder: string;
@@ -45,8 +57,9 @@ export interface RetentionResult {
   failed: string[];
 }
 
-/** Whether an error is a "file is missing" race (tolerated silently). */
-function isMissingFile(error: unknown): boolean {
+/** Whether an error is a "file is missing" race (tolerated silently). Shared
+ *  with the adoption sweep (#69) so both classify ENOENT identically (#48). */
+export function isMissingFile(error: unknown): boolean {
   const code = (error as { code?: string } | null)?.code;
   // A structured errno is authoritative — trust ONLY `code === "ENOENT"`, never
   // the message. Otherwise an EACCES/EPERM on a file whose user-derived name

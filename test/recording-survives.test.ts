@@ -12,6 +12,7 @@ import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import {
+  adoptOrphanRecordings,
   nodeArchiveFs,
   SessionArchiveWriter,
   sweepOldArchives,
@@ -56,17 +57,23 @@ afterEach(() => {
 });
 
 /** Replicate the host's start-time archive sequence (session.ts): sweep first
- *  (only when retention is enabled), then open the working file. */
-function startSession(retentionDays: number, autoSave: boolean): SessionArchiveWriter | null {
+ *  (only when retention is enabled), adopt any orphaned recordings (#69), then
+ *  open this session's working file. */
+function startSession(
+  retentionDays: number,
+  autoSave: boolean,
+  fileNamePrefix = "2026-06-13 0101",
+): SessionArchiveWriter | null {
   if (retentionDays > 0) {
     sweepOldArchives({ fs, folder: archiveDir, maxAgeDays: retentionDays, nowMs: Date.now() });
   }
+  adoptOrphanRecordings({ fs, folder: archiveDir });
   if (!autoSave) return null;
   const writer = new SessionArchiveWriter({
     fs,
     folder: archiveDir,
     meta: {
-      fileNamePrefix: "2026-06-13 0101",
+      fileNamePrefix,
       headerDate: "2026-06-13",
       startClock: "01:01",
       sourceLang: "EN",
@@ -131,6 +138,38 @@ describe("#63 — in-progress recording survives a minimal-settings session", ()
     // And retention OFF (the real minimal-settings case) is a no-op anyway.
     sweepOldArchives({ fs, folder: archiveDir, maxAgeDays: 0, nowMs: Date.now() });
     expect(existsSync(recPath)).toBe(true);
+  });
+
+  it("a crashed session's (recording).md is ADOPTED on the next start (#69)", () => {
+    // Session 1 records, gets a summary, then CRASHES (never finalized).
+    const s1 = startSession(0, true);
+    const entry: CaptionEntry = {
+      speaker: "them",
+      timestamp: "01:02",
+      source: "Let us cover the migration plan.",
+      target: "마이그레이션 계획을 다룹시다.",
+      pinned: false,
+      lowConfidence: false,
+    };
+    s1!.appendCaption(entry);
+    s1!.updateBrief({ summary: ["Migration planning", "Cutover next week"] });
+    const orphanPath = s1!.path; // <prefix> — (recording).md, left on disk
+    expect(existsSync(orphanPath)).toBe(true);
+
+    // Session 2 starts (retention OFF, like minimal settings): the orphan is
+    // promoted to a titled archive — title from its own first summary line —
+    // and this session opens its OWN, separate working file.
+    const s2 = startSession(0, true, "2026-06-13 0202");
+    const adopted = join(archiveDir, "2026-06-13 0101 — Migration planning.md");
+    expect(existsSync(orphanPath)).toBe(false); // renamed, not deleted...
+    expect(existsSync(adopted)).toBe(true); // ...to its titled name
+    expect(readdirSync(archiveDir)).toContain("2026-06-13 0101 — Migration planning.md");
+    // The recovered transcript survived intact.
+    expect(fs.readFile(adopted)).toContain("Let us cover the migration plan.");
+    // Session 2's live recording is a distinct file, untouched by adoption.
+    expect(s2!.path.endsWith(`${WORKING_TITLE}.md`)).toBe(true);
+    expect(s2!.path).not.toBe(orphanPath);
+    expect(recordingFiles()).toEqual([s2!.path.split("/").pop()]);
   });
 
   it("finalize on an empty/music-only transcript preserves the data under a titled name", () => {
