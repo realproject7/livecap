@@ -2,9 +2,9 @@
 // Writes each meeting to a Markdown file (PROPOSAL §8.9), append-as-you-go with
 // atomic front-matter rewrites; finalizes to a sanitized, collision-safe name.
 
-export { SessionArchiveWriter } from "./writer";
+export { SessionArchiveWriter, WORKING_TITLE } from "./writer";
 export type { SessionArchiveWriterOptions } from "./writer";
-export { sweepOldArchives } from "./retention";
+export { sweepOldArchives, isInProgressRecording } from "./retention";
 export type { RetentionOptions, RetentionResult } from "./retention";
 export { sanitizeTitle, archiveFileName, MAX_TITLE_BYTES, FALLBACK_TITLE } from "./sanitize";
 export { nodeArchiveFs } from "./fs";

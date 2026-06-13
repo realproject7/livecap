@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest";
 
-import { sweepOldArchives } from "../src/retention";
+import { isInProgressRecording, sweepOldArchives } from "../src/retention";
 import { FakeFs } from "./helpers/fake-fs";
 
 const FOLDER = "/data/LiveCap";
@@ -59,6 +59,32 @@ describe("sweepOldArchives", () => {
       removed: [],
       failed: [],
     });
+  });
+
+  it("NEVER reaps an unfinalized (recording).md, however old — crash-safe data (#63)", () => {
+    const fs = seed();
+    const rec = fs.join(FOLDER, "2026-01-02 0900 — (recording).md");
+    fs.writeFile(rec, "live transcript, never finalized");
+    fs.setMtime(rec, NOW - 365 * DAY); // ancient — would be reaped if it weren't a recording
+    const collision = fs.join(FOLDER, "2026-01-02 0900 — (recording) (2).md");
+    fs.writeFile(collision, "another crashed recording");
+    fs.setMtime(collision, NOW - 400 * DAY);
+
+    const { removed } = sweepOldArchives({ fs, folder: FOLDER, maxAgeDays: 90, nowMs: NOW });
+
+    expect(removed).toEqual(["old.md"]); // the finished archive is still reaped...
+    expect(fs.exists(rec)).toBe(true); // ...but the in-progress recordings survive
+    expect(fs.exists(collision)).toBe(true);
+  });
+
+  it("isInProgressRecording matches working files but not finished archives or temps", () => {
+    expect(isInProgressRecording("2026-06-13 0101 — (recording).md")).toBe(true);
+    expect(isInProgressRecording("2026-06-13 0101 — (recording) (3).md")).toBe(true);
+    // A finished, titled archive is reapable...
+    expect(isInProgressRecording("2026-06-13 0101 — Budget review.md")).toBe(false);
+    // ...and a crash-mid-rewrite temp stays reapable (its .md sibling holds the data).
+    expect(isInProgressRecording("2026-06-13 0101 — (recording).md.tmp")).toBe(false);
+    expect(isInProgressRecording("notes.txt")).toBe(false);
   });
 
   it("tolerates a file vanishing mid-sweep silently (ENOENT) — not in removed or failed (#33/#48)", () => {
