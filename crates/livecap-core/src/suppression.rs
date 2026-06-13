@@ -54,21 +54,31 @@ pub struct SuppressionConfig {
 }
 
 impl Default for SuppressionConfig {
-    /// The #56 baseline. #64 ships the *mechanism* to tune these against real
-    /// speaker acoustics — every field is `LIVECAP_BLEED_*`-overridable (see
-    /// [`SuppressionConfig::from_env`]) so an operator can dial them in against
-    /// captured fixtures without a rebuild — but the evidence-based default
-    /// retune (toward `Me ≤ 5` etc.) lands in the follow-up that runs the real
-    /// E2E, so these defaults are deliberately unchanged here (no behavioral
-    /// change without an explicit env override).
+    /// Tuned against the #64 real two-channel speaker-bleed fixtures (208 s,
+    /// captured via #70's dump). Energy analysis of those fixtures drove every
+    /// change from the #56 synthetic baseline:
+    /// - `speech_floor_rms` 0.012 → 0.008: real system RMS was ~0.029, so 0.012
+    ///   was ~0.4× the system level and missed moderate system activity (the gate
+    ///   needs the system "active" to fire); 0.008 (~0.27×) detects it.
+    /// - `atten_ratio` 0.7 → 0.8: the concurrent mic/system ratio was p50 0.17
+    ///   but p90 0.71 / p95 0.98 — louder bleed moments (reverb/AGC) slipped past
+    ///   0.7; 0.8 catches through ~p93 while genuine mic speech (ratio > 1) passes.
+    /// - `dedup_window_ms` 8s → 20s and `dedup_similarity` 0.6 → 0.5: ~13 s of the
+    ///   clip was gap-bleed (mic re-hearing while the system was momentarily quiet
+    ///   → the energy gate is blind, dedup must catch it), arriving seconds later
+    ///   and transcribing with real acoustic divergence.
+    /// - wider energy window/retain to match.
+    ///
+    /// All fields stay `LIVECAP_BLEED_*`-overridable (see [`from_env`]) for
+    /// fixture-specific dial-in; final acceptance is operator E2E verified.
     fn default() -> Self {
         Self {
-            speech_floor_rms: 0.012,
-            atten_ratio: 0.7,
-            energy_window_ms: 1_500,
-            energy_retain_ms: 12_000,
-            dedup_window_ms: 8_000,
-            dedup_similarity: 0.6,
+            speech_floor_rms: 0.008,
+            atten_ratio: 0.8,
+            energy_window_ms: 2_500,
+            energy_retain_ms: 30_000,
+            dedup_window_ms: 20_000,
+            dedup_similarity: 0.5,
         }
     }
 }
