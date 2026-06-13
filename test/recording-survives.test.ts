@@ -5,7 +5,7 @@
 // SessionArchiveWriter — through that exact scenario against a real temp folder,
 // and asserts the working file is never deleted mid-session.
 
-import { mkdtempSync, rmSync, existsSync, readdirSync } from "node:fs";
+import { mkdtempSync, rmSync, existsSync, readdirSync, utimesSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -177,6 +177,37 @@ describe("#63 — in-progress recording survives a minimal-settings session", ()
     expect(s2!.path.endsWith(`${WORKING_TITLE}.md`)).toBe(true);
     expect(s2!.path).not.toBe(orphanPath);
     expect(recordingFiles()).toEqual([s2!.path.split("/").pop()]);
+  });
+
+  it("adopts an IMMEDIATE crash-restart orphan on the in-session periodic pass — no third start (#69)", () => {
+    // Session 1 records then crashes (never finalized); its file is fresh.
+    const s1 = startSession(0, true);
+    s1!.updateBrief({ summary: ["Roadmap review"] });
+    const orphanPath = s1!.path;
+
+    // IMMEDIATE restart: at start the orphan is still fresh, so the start-time
+    // adoption skips it (it could be a live instance) and session 2 opens its own
+    // working file. The orphan is NOT adopted yet.
+    const s2 = startSession(0, true, "2026-06-13 0202");
+    expect(existsSync(orphanPath)).toBe(true);
+    expect(readdirSync(archiveDir)).toContain("2026-06-13 0101 — (recording).md");
+
+    // Time passes within session 2: the crashed session stopped heartbeating so
+    // its file ages past the staleness window, while session 2 keeps its OWN file
+    // warm via the heartbeat.
+    const aged = new Date(Date.now() - 2 * STALE_AFTER_MS);
+    utimesSync(orphanPath, aged, aged);
+    s2!.heartbeat();
+
+    // The periodic adoption pass (what session.ts schedules) runs WITHIN session 2
+    // and promotes the now-stale orphan — no third session start needed — while
+    // leaving session 2's live recording untouched.
+    adoptOrphanRecordings({ fs, folder: archiveDir, nowMs: Date.now(), staleAfterMs: STALE_AFTER_MS });
+
+    expect(existsSync(orphanPath)).toBe(false);
+    expect(existsSync(join(archiveDir, "2026-06-13 0101 — Roadmap review.md"))).toBe(true);
+    expect(existsSync(s2!.path)).toBe(true);
+    expect(s2!.path.endsWith(`${WORKING_TITLE}.md`)).toBe(true);
   });
 
   it("an ACTIVE recording is NOT adopted out from under a running session (#69)", () => {

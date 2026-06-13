@@ -110,6 +110,8 @@ export class HostSession {
   private intervals: ReturnType<typeof setInterval>[] = [];
   private stopping = false;
   private started = false;
+  /** Archive folder for the periodic orphan-adoption pass (#69). */
+  private archiveDir = "";
 
   constructor(private readonly emit: (event: HostOutbound) => void) {}
 
@@ -249,21 +251,14 @@ export class HostSession {
 
     // Adopt orphaned recordings (#69): a prior session that crashed before
     // finalize() left a `(recording).md` the sweep above intentionally spared
-    // (#63). Promote each to a titled archive now — AFTER the sweep (so the sweep
-    // never reaps a fresh promotion) and BEFORE this session opens its own
-    // working file (so we only ever see crashed sessions' orphans, not our own).
-    const adoption = adoptOrphanRecordings({
-      fs: nodeArchiveFs(),
-      folder: config.archiveDir,
-      nowMs: Date.now(),
-      staleAfterMs: RECORDING_STALE_AFTER_MS,
-    });
-    for (const { to } of adoption.adopted) {
-      this.emit({ type: "status", detail: `adopted a recovered recording: ${to}` });
-    }
-    for (const name of adoption.failed) {
-      this.emit({ type: "status", detail: `could not adopt a recovered recording (${name})` });
-    }
+    // (#63). Promote each STALE orphan to a titled archive now — AFTER the sweep
+    // (so the sweep never reaps a fresh promotion) and BEFORE this session opens
+    // its own working file (so the first pass never sees our own recording). A
+    // recording crashed moments ago is still "fresh" and skipped here; the
+    // periodic pass below promotes it once it ages past the staleness window,
+    // WITHIN this same session (no later session start required).
+    this.archiveDir = config.archiveDir;
+    this.runAdoptionPass();
 
     if (resolved.archiveAutoSave) {
       const writer = new SessionArchiveWriter({
@@ -320,6 +315,12 @@ export class HostSession {
     // not mistake it for a crashed orphan and adopt it (#69). Cleared on stop()
     // before finalize(), so it never races the rename.
     this.intervals.push(setInterval(() => this.writer?.heartbeat(), RECORDING_HEARTBEAT_MS));
+    // Retry adoption periodically (#69): an orphan that was still "fresh" at
+    // start (immediate crash-restart) ages past the staleness window during this
+    // session and is promoted here — no later session start needed. This
+    // session's own recording stays warm via the heartbeat above, so it is never
+    // adopted by these passes.
+    this.intervals.push(setInterval(() => this.runAdoptionPass(), RECORDING_STALE_AFTER_MS));
 
     this.emit({ type: "gauge", gauge: this.withExtrasBudget(accountant.gauge()) });
     this.emit({ type: "ready", engine: engineLabel });
@@ -483,6 +484,24 @@ export class HostSession {
     if (this.extrasBudgetNoticeSent) return;
     this.extrasBudgetNoticeSent = true;
     this.emit({ type: "status", detail: "extras budget reached — pausing auto-summary for this session" });
+  }
+
+  /** Promote any STALE orphaned `(recording).md` to a titled archive (#69).
+   *  Run once at start and then periodically; only files idle past the staleness
+   *  window are touched, so a live session's heartbeated file is never adopted. */
+  private runAdoptionPass(): void {
+    const adoption = adoptOrphanRecordings({
+      fs: nodeArchiveFs(),
+      folder: this.archiveDir,
+      nowMs: Date.now(),
+      staleAfterMs: RECORDING_STALE_AFTER_MS,
+    });
+    for (const { to } of adoption.adopted) {
+      this.emit({ type: "status", detail: `adopted a recovered recording: ${to}` });
+    }
+    for (const name of adoption.failed) {
+      this.emit({ type: "status", detail: `could not adopt a recovered recording (${name})` });
+    }
   }
 
   /** Rewrite the archive's front sections from current session state. */
