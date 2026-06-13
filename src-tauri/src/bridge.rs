@@ -25,6 +25,11 @@ pub fn channel_label(channel: Channel) -> &'static str {
 pub enum BridgeCaption {
     #[serde(rename_all = "camelCase")]
     Partial { channel: &'static str, text: String },
+    /// The channel's in-progress partial was dropped without finalizing (#62):
+    /// a mic utterance suppressed as speaker bleed (#56). The webview clears the
+    /// channel's streaming block; never enters the translation queue.
+    #[serde(rename_all = "camelCase")]
+    Cleared { channel: &'static str },
     #[serde(rename_all = "camelCase")]
     Finalized {
         id: u64,
@@ -43,6 +48,7 @@ impl BridgeCaption {
         let channel = channel_label(event.channel);
         match event.kind {
             CaptionKind::Partial(text) => BridgeCaption::Partial { channel, text },
+            CaptionKind::PartialDropped => BridgeCaption::Cleared { channel },
             CaptionKind::Finalized {
                 text,
                 lang,
@@ -63,7 +69,7 @@ impl BridgeCaption {
     /// only finalized sentences enter the translation queue).
     pub fn host_message(&self) -> Option<serde_json::Value> {
         match self {
-            BridgeCaption::Partial { .. } => None,
+            BridgeCaption::Partial { .. } | BridgeCaption::Cleared { .. } => None,
             BridgeCaption::Finalized {
                 id,
                 channel,
@@ -117,6 +123,21 @@ mod tests {
         assert_eq!(json["type"], "partial");
         assert_eq!(json["channel"], "them");
         assert_eq!(json["text"], "and I had, um");
+        assert!(mapped.host_message().is_none());
+    }
+
+    #[test]
+    fn partial_dropped_maps_to_cleared_without_consuming_an_id() {
+        let event = CaptionEvent {
+            channel: Channel::Mic,
+            kind: CaptionKind::PartialDropped,
+        };
+        let mapped =
+            BridgeCaption::from_event(event, || panic!("cleared must not take an id"), 1);
+        let json = serde_json::to_value(&mapped).unwrap();
+        assert_eq!(json["type"], "cleared");
+        assert_eq!(json["channel"], "me");
+        // A cleared event is webview-only — it never enters the translation queue.
         assert!(mapped.host_message().is_none());
     }
 

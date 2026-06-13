@@ -24,6 +24,12 @@ pub enum CaptionKind {
     /// In-progress text for an utterance that is still being spoken.
     /// Superseded by later partials and ultimately by a `Finalized` event.
     Partial(String),
+    /// The channel's in-progress partial was dropped WITHOUT finalizing: a mic
+    /// utterance suppressed as speaker bleed (#56) after it had already streamed
+    /// partials. Consumers must clear the channel's streaming block so the
+    /// orphaned bleed text neither lingers nor is reused by the next utterance
+    /// (#62). Carries no payload — it cancels whatever partial is in flight.
+    PartialDropped,
     /// A finished utterance.
     Finalized {
         text: String,

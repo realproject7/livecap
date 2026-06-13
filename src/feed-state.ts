@@ -73,11 +73,29 @@ export class FeedState {
   }
 
   /**
+   * Drop the channel's in-progress streaming partial WITHOUT finalizing it
+   * (#62): a mic utterance suppressed as speaker bleed (#56) emits no finalized
+   * event, so the streaming block it already pushed would otherwise linger and
+   * be reused by the next genuine utterance. Returns the removed block (so the
+   * caller can drop its DOM node), or null if nothing was streaming. The block
+   * carried no id (never finalized), so it is not in `byId` and resolves to
+   * nothing for translation.
+   */
+  clearPartial(channel: Channel): CaptionBlock | null {
+    const block = this.partials.get(channel);
+    if (!block) return null;
+    this.partials.delete(channel);
+    const index = this.blocks.indexOf(block);
+    if (index !== -1) this.blocks.splice(index, 1);
+    return block;
+  }
+
+  /**
    * Apply a caption event. A finalized event REUSES the channel's streaming
    * block (text settles in place — no layout jump, rule 4); returns the
    * affected block.
    */
-  applyCaption(event: CaptionBridgeEvent): CaptionBlock {
+  applyCaption(event: Exclude<CaptionBridgeEvent, { type: "cleared" }>): CaptionBlock {
     if (event.type === "partial") {
       let block = this.partials.get(event.channel);
       if (!block) {

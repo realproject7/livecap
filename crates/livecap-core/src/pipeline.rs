@@ -81,6 +81,11 @@ struct TranscribeRequest {
 enum RequestKind {
     Partial,
     Finalized { start_ms: u64, end_ms: u64 },
+    /// A mic utterance that had already streamed partials was energy-gated as
+    /// bleed (#56): no transcription, but the worker must tell consumers to drop
+    /// the orphaned streaming block (#62). Routed through the same queue so it
+    /// is ordered AFTER the partials it cancels (carries no samples).
+    DropPartial,
 }
 
 /// The two-channel live caption pipeline. See the module docs for the data
@@ -303,6 +308,10 @@ async fn channel_worker_inner(
     let mut resampler = StreamResampler::new(VAD_SAMPLE_RATE);
     let mut vad = ContinuousVadProcessor::new(VAD_SAMPLE_RATE, params.vad_redemption_ms)?;
     let mut last_partial_len = 0usize;
+    // Whether the current utterance has already emitted a partial to consumers.
+    // If it has and the utterance is then suppressed as bleed, we must cancel
+    // that orphaned partial (#62). Reset at every utterance boundary.
+    let mut streamed_partial = false;
 
     // Gated raw-WAV fixture dump (#64): OFF unless LIVECAP_BLEED_DUMP_DIR is set.
     // Captures the exact 16 kHz stream the VAD/suppressor see, for tuning bleed
@@ -332,10 +341,22 @@ async fn channel_worker_inner(
         suppressor.mic_segment_is_energy_bleed(now_ms, duration_ms, rms(samples))
     };
 
-    let send_final = |segment: crate::vad::SpeechSegment| {
+    let send_final = |segment: crate::vad::SpeechSegment, streamed_partial: bool| {
         let duration_ms = (segment.end_timestamp_ms - segment.start_timestamp_ms).max(0.0) as u64;
         if is_mic_bleed(segment.samples.as_slice(), duration_ms) {
             log::info!("[mic] energy-gated speaker bleed ({duration_ms} ms) suppressed (#56)");
+            // If this utterance already streamed partials to consumers, cancel
+            // that orphaned streaming block so it does not linger or poison the
+            // next genuine utterance (#62). Ordered after the partials it cancels
+            // because it shares their queue.
+            if streamed_partial {
+                let _ = transcribe_tx.send(TranscribeRequest {
+                    channel,
+                    samples: Vec::new(),
+                    kind: RequestKind::DropPartial,
+                    queued_at: Instant::now(),
+                });
+            }
             return;
         }
         let _ = transcribe_tx.send(TranscribeRequest {
@@ -367,8 +388,9 @@ async fn channel_worker_inner(
         }
 
         for segment in vad.process_audio(&samples_16k)? {
+            send_final(segment, streamed_partial);
             last_partial_len = 0;
-            send_final(segment);
+            streamed_partial = false;
         }
 
         if vad.in_speech() {
@@ -376,8 +398,9 @@ async fn channel_worker_inner(
             if current_len >= max_utterance {
                 // Bound utterance length: force-finalize the slice so far.
                 if let Some(segment) = vad.take_current_speech() {
+                    send_final(segment, streamed_partial);
                     last_partial_len = 0;
-                    send_final(segment);
+                    streamed_partial = false;
                 }
             } else if current_len >= min_partial && current_len >= last_partial_len + partial_step
             {
@@ -387,6 +410,7 @@ async fn channel_worker_inner(
                 // Suppress in-progress bleed partials too, so the live mic view
                 // doesn't stream the speaker's garbled echo (#56).
                 if !is_mic_bleed(partial_samples.as_slice(), duration_ms) {
+                    streamed_partial = true;
                     let _ = transcribe_tx.send(TranscribeRequest {
                         channel,
                         samples: partial_samples,
@@ -397,12 +421,14 @@ async fn channel_worker_inner(
             }
         } else {
             last_partial_len = 0;
+            streamed_partial = false;
         }
     }
 
     // Source closed: flush remaining speech.
     for segment in vad.flush()? {
-        send_final(segment);
+        send_final(segment, streamed_partial);
+        streamed_partial = false;
     }
     Ok(())
 }
@@ -418,6 +444,22 @@ async fn transcribe_worker(
     start: Instant,
 ) {
     while let Some(req) = rx.recv().await {
+        // A mic utterance was energy-gated as bleed after streaming partials:
+        // cancel its orphaned streaming block on consumers (#62). Processed in
+        // queue order, so it lands after the partials it cancels.
+        if matches!(req.kind, RequestKind::DropPartial) {
+            if events_tx
+                .send(CaptionEvent {
+                    channel: req.channel,
+                    kind: CaptionKind::PartialDropped,
+                })
+                .is_err()
+            {
+                break;
+            }
+            continue;
+        }
+
         // Backpressure: drop partials that sat in the queue too long —
         // they would describe an utterance that has already moved on.
         if matches!(req.kind, RequestKind::Partial) && req.queued_at.elapsed().as_millis() > 2500 {
@@ -450,6 +492,9 @@ async fn transcribe_worker(
         }
 
         let kind = match req.kind {
+            // Handled above (no transcription) and `continue`d past — it never
+            // reaches this transcription-result match.
+            RequestKind::DropPartial => unreachable!("DropPartial is handled before transcription"),
             RequestKind::Partial => CaptionKind::Partial(utterance.text),
             RequestKind::Finalized { start_ms, end_ms } => {
                 let text = utterance.text;
@@ -463,7 +508,21 @@ async fn transcribe_worker(
                     // gate but is still a duplicate caption (#56).
                     Channel::Mic => {
                         if suppressor.mic_text_is_duplicate(now_ms, &text) {
-                            log::info!("[mic] dropping near-duplicate of a system finalization (#56)");
+                            log::info!(
+                                "[mic] dropping near-duplicate of a system finalization; clearing its partial (#56/#62)"
+                            );
+                            // The dropped final had streamed partials (it passed
+                            // the energy gate): cancel that orphaned block so it
+                            // does not linger or poison the next utterance (#62).
+                            if events_tx
+                                .send(CaptionEvent {
+                                    channel: req.channel,
+                                    kind: CaptionKind::PartialDropped,
+                                })
+                                .is_err()
+                            {
+                                break;
+                            }
                             continue;
                         }
                     }
