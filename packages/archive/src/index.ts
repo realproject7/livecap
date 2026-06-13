@@ -4,8 +4,10 @@
 
 export { SessionArchiveWriter, WORKING_TITLE } from "./writer";
 export type { SessionArchiveWriterOptions } from "./writer";
-export { sweepOldArchives, isInProgressRecording } from "./retention";
+export { sweepOldArchives, isInProgressRecording, recordingPrefix } from "./retention";
 export type { RetentionOptions, RetentionResult } from "./retention";
+export { adoptOrphanRecordings } from "./adopt";
+export type { AdoptionOptions, AdoptionResult } from "./adopt";
 export { sanitizeTitle, archiveFileName, MAX_TITLE_BYTES, FALLBACK_TITLE } from "./sanitize";
 export { nodeArchiveFs } from "./fs";
 export type { ArchiveFs } from "./fs";
