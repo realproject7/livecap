@@ -26,6 +26,7 @@ import { detectClaudeCli } from "./detect-cli.ts";
 import { LazyLocalEngine } from "./local-tier.ts";
 import { SILENCE_THRESHOLD_MS, SilenceWatchdog } from "./silence.ts";
 import { resolveStartConfig } from "./start-config.ts";
+import { withTimeout } from "./timeout.ts";
 import { TranslationRunner } from "./translation-runner.ts";
 
 const CLI_ENGINE_LABEL = "Claude CLI";
@@ -33,6 +34,11 @@ const LOCAL_ENGINE_LABEL = "Local (Qwen3 4B)";
 const SUMMARY_TICK_MS = 5_000;
 const WATCHDOG_TICK_MS = 15_000;
 const DRAIN_TIMEOUT_MS = 20_000;
+/** Hard backstop on engine startup (#65). The per-chunk download stall detection
+ *  (ensureModel) is the primary guard; no healthy first-run download approaches
+ *  this. If it fires, the session start fails with a content-free status instead
+ *  of wedging the host's message chain (and blocking every queued caption). */
+const ENGINE_READY_TIMEOUT_MS = 15 * 60_000;
 
 type StartConfig = Extract<HostInbound, { type: "start" }>;
 
@@ -198,7 +204,19 @@ export class HostSession {
     });
 
     this.emit({ type: "status", detail: "starting translation engine…" });
-    await engine.start();
+    try {
+      // Bound engine readiness (#65): a wedged first-run model acquisition must
+      // not hang the host's serialized message chain forever (the #13 symptom —
+      // captions queued behind start were never processed). The content-free
+      // status surfaces the failure; the throw fails the start cleanly.
+      await withTimeout(engine.start(), ENGINE_READY_TIMEOUT_MS);
+    } catch (error) {
+      this.emit({
+        type: "status",
+        detail: `translation engine did not start (${errorDetail(error)})`,
+      });
+      throw error;
+    }
     if (this.router?.onFallback) {
       engineLabel = LOCAL_ENGINE_LABEL;
       this.emit({ type: "engineSwitch", engine: LOCAL_ENGINE_LABEL });

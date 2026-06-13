@@ -165,6 +165,11 @@ export class LazyLocalEngine implements TranslationEngine {
             this.options.onStatus(`downloading local model ${pct}%…`);
           }
         },
+        // Surface a stalled download recovering (#65) — content-free.
+        onRetry: (attempt) => {
+          lastPct = -1; // force the next progress tick to re-announce
+          this.options.onStatus(`download stalled — retrying (attempt ${attempt + 1})…`);
+        },
       });
       const bin = await ensureLlamaServer(llmDir, this.options.onStatus);
       const port = await freePort();

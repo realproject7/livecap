@@ -40,7 +40,13 @@ export type { ClaudeCliEngineConfig } from "./claude-cli-engine";
 export { LocalLlmEngine } from "./local-llm-engine";
 export type { LocalLlmEngineConfig } from "./local-llm-engine";
 export { stripNonTranslation } from "./translation-guard";
-export { ensureModel, ModelChecksumError, nodeDownloadFs, nodeRangeFetcher } from "./model-download";
+export {
+  ensureModel,
+  ModelChecksumError,
+  ModelDownloadStallError,
+  nodeDownloadFs,
+  nodeRangeFetcher,
+} from "./model-download";
 export type {
   DownloadFs,
   RangeFetcher,

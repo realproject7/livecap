@@ -25,6 +25,22 @@ export type CaptionBridgeEvent =
 
 export type SessionPhase = "idle" | "starting" | "live" | "paused" | "stopping";
 
+/** Overlay window display mode (#10). */
+export type Mode = "panel" | "strip" | "capsule";
+
+/** Shell window state, served by the `get_shell_state` command. */
+export interface ShellState {
+  mode: Mode;
+  clickThrough: boolean;
+  live: boolean;
+}
+
+/** Webview capabilities (window role), served by the `capabilities` command. */
+export interface Capabilities {
+  captioning: boolean;
+  settings: boolean;
+}
+
 /** Session lifecycle, emitted by Rust on `session://status`. */
 export interface SessionStatus {
   phase: SessionPhase;

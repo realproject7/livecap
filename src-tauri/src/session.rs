@@ -13,7 +13,7 @@
 use std::io::{BufRead, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, Command, Stdio};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -31,13 +31,14 @@ const HOST_EXIT_TIMEOUT: Duration = Duration::from_secs(60);
 const FORWARDABLE_REQUESTS: &[&str] = &["quickTranslate", "reply", "retranslate", "pin", "silenceSnooze"];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[repr(u8)]
 pub enum Phase {
     #[default]
-    Idle,
-    Starting,
-    Live,
-    Paused,
-    Stopping,
+    Idle = 0,
+    Starting = 1,
+    Live = 2,
+    Paused = 3,
+    Stopping = 4,
 }
 
 impl Phase {
@@ -48,6 +49,16 @@ impl Phase {
             Phase::Live => "live",
             Phase::Paused => "paused",
             Phase::Stopping => "stopping",
+        }
+    }
+
+    fn from_u8(value: u8) -> Phase {
+        match value {
+            1 => Phase::Starting,
+            2 => Phase::Live,
+            3 => Phase::Paused,
+            4 => Phase::Stopping,
+            _ => Phase::Idle,
         }
     }
 }
@@ -91,7 +102,6 @@ struct HostHandle {
 
 #[derive(Default)]
 struct Inner {
-    phase: Phase,
     channels: ChannelConfig,
     pipeline: Option<CaptionPipeline>,
     host: Option<HostHandle>,
@@ -99,10 +109,31 @@ struct Inner {
 }
 
 /// Managed session state (one session at a time).
+///
+/// `phase` lives in a lock-free [`AtomicU8`] separate from the `inner` mutex
+/// (#65): transitions are still serialized under `inner` (so check-then-set is
+/// atomic), but [`SessionState::phase`] — and thus the `session_phase` command —
+/// reads it WITHOUT taking the mutex. A wedged start that holds `inner` across a
+/// stalled model download can no longer block the webview's phase query (the
+/// blank-screen root cause).
 #[derive(Default)]
 pub struct SessionState {
     inner: tauri::async_runtime::Mutex<Inner>,
     next_caption_id: AtomicU64,
+    phase: AtomicU8,
+}
+
+impl SessionState {
+    /// Lock-free read of the published phase.
+    fn phase(&self) -> Phase {
+        Phase::from_u8(self.phase.load(Ordering::Relaxed))
+    }
+
+    /// Publish a phase transition. Callers hold `inner` while transitioning so
+    /// the check-then-set stays serialized; the store itself is lock-free.
+    fn set_phase(&self, phase: Phase) {
+        self.phase.store(phase as u8, Ordering::Relaxed);
+    }
 }
 
 /// Latest credit gauge from the host, cached for the `gauge_state` command
@@ -288,11 +319,11 @@ fn start_captures(pipeline: &mut CaptionPipeline, channels: ChannelConfig) -> Re
 pub async fn start(app: AppHandle) -> Result<(), String> {
     let state = app.state::<SessionState>();
     {
-        let mut inner = state.inner.lock().await;
-        if inner.phase != Phase::Idle {
-            return Err(format!("session is {}", inner.phase.as_str()));
+        let _guard = state.inner.lock().await;
+        if state.phase() != Phase::Idle {
+            return Err(format!("session is {}", state.phase().as_str()));
         }
-        inner.phase = Phase::Starting;
+        state.set_phase(Phase::Starting);
     }
     emit_status(
         &app,
@@ -304,8 +335,8 @@ pub async fn start(app: AppHandle) -> Result<(), String> {
         Ok(detail) => {
             let channels = {
                 let state = app.state::<SessionState>();
-                let mut inner = state.inner.lock().await;
-                inner.phase = Phase::Live;
+                let inner = state.inner.lock().await;
+                state.set_phase(Phase::Live);
                 inner.channels
             };
             tray::set_live(&app, true);
@@ -318,7 +349,7 @@ pub async fn start(app: AppHandle) -> Result<(), String> {
             let state = app.state::<SessionState>();
             let mut inner = state.inner.lock().await;
             cleanup(&mut inner).await;
-            inner.phase = Phase::Idle;
+            state.set_phase(Phase::Idle);
             drop(inner);
             tray::set_live(&app, false);
             emit_status(&app, Phase::Idle, Some(error.clone()));
@@ -432,10 +463,11 @@ pub async fn stop(app: AppHandle) -> Result<(), String> {
     let state = app.state::<SessionState>();
     let (pipeline, host, events_task) = {
         let mut inner = state.inner.lock().await;
-        if inner.phase != Phase::Live && inner.phase != Phase::Paused {
-            return Err(format!("session is {}", inner.phase.as_str()));
+        let phase = state.phase();
+        if phase != Phase::Live && phase != Phase::Paused {
+            return Err(format!("session is {}", phase.as_str()));
         }
-        inner.phase = Phase::Stopping;
+        state.set_phase(Phase::Stopping);
         (inner.pipeline.take(), inner.host.take(), inner.events_task.take())
     };
     emit_status(&app, Phase::Stopping, Some("saving the transcript…".into()));
@@ -471,7 +503,7 @@ pub async fn stop(app: AppHandle) -> Result<(), String> {
 
     {
         let mut inner = state.inner.lock().await;
-        inner.phase = Phase::Idle;
+        state.set_phase(Phase::Idle);
         inner.channels = ChannelConfig::default();
     }
     tray::set_live(&app, false);
@@ -487,13 +519,14 @@ pub async fn set_mic(app: AppHandle, enabled: bool) -> Result<(), String> {
     let state = app.state::<SessionState>();
     let channels = {
         let mut inner = state.inner.lock().await;
-        if inner.phase != Phase::Live && inner.phase != Phase::Paused {
+        let phase = state.phase();
+        if phase != Phase::Live && phase != Phase::Paused {
             return Err("no active session".into());
         }
         if !enabled && !inner.channels.system {
             return Err("the microphone is the only active channel — pause the session instead".into());
         }
-        if inner.phase == Phase::Live {
+        if phase == Phase::Live {
             let pipeline = inner
                 .pipeline
                 .as_mut()
@@ -522,7 +555,7 @@ pub async fn toggle_mic(app: AppHandle) {
     let current = {
         let state = app.state::<SessionState>();
         let inner = state.inner.lock().await;
-        match inner.phase {
+        match state.phase() {
             Phase::Live | Phase::Paused => Some(inner.channels.mic),
             _ => None,
         }
@@ -540,13 +573,13 @@ pub async fn toggle_mic(app: AppHandle) {
 pub async fn pause(app: AppHandle) -> Result<(), String> {
     let state = app.state::<SessionState>();
     let mut inner = state.inner.lock().await;
-    if inner.phase != Phase::Live {
-        return Err(format!("session is {}", inner.phase.as_str()));
+    if state.phase() != Phase::Live {
+        return Err(format!("session is {}", state.phase().as_str()));
     }
     if let Some(pipeline) = inner.pipeline.as_mut() {
         pipeline.stop_capture();
     }
-    inner.phase = Phase::Paused;
+    state.set_phase(Phase::Paused);
     drop(inner);
     tray::set_live(&app, false);
     emit_status(&app, Phase::Paused, None);
@@ -556,15 +589,15 @@ pub async fn pause(app: AppHandle) -> Result<(), String> {
 pub async fn resume(app: AppHandle) -> Result<(), String> {
     let state = app.state::<SessionState>();
     let mut inner = state.inner.lock().await;
-    if inner.phase != Phase::Paused {
-        return Err(format!("session is {}", inner.phase.as_str()));
+    if state.phase() != Phase::Paused {
+        return Err(format!("session is {}", state.phase().as_str()));
     }
     let channels = inner.channels;
     let detail = match inner.pipeline.as_mut() {
         Some(pipeline) => start_captures(pipeline, channels)?,
         None => return Err("no active pipeline".into()),
     };
-    inner.phase = Phase::Live;
+    state.set_phase(Phase::Live);
     drop(inner);
     tray::set_live(&app, true);
     emit_status(&app, Phase::Live, detail);
@@ -573,11 +606,7 @@ pub async fn resume(app: AppHandle) -> Result<(), String> {
 
 /// Tray menu entry point: toggles between start and stop.
 pub async fn toggle(app: AppHandle) {
-    let phase = {
-        let state = app.state::<SessionState>();
-        let inner = state.inner.lock().await;
-        inner.phase
-    };
+    let phase = app.state::<SessionState>().phase();
     let result = match phase {
         Phase::Idle => start(app.clone()).await,
         Phase::Live | Phase::Paused => stop(app.clone()).await,
@@ -629,7 +658,9 @@ pub async fn session_resume(app: AppHandle) -> Result<(), String> {
 
 #[tauri::command]
 pub async fn session_phase(state: State<'_, SessionState>) -> Result<&'static str, String> {
-    Ok(state.inner.lock().await.phase.as_str())
+    // Lock-free (#65): never blocks on the `inner` mutex, so a wedged start can
+    // not stall the webview's phase query and blank the window.
+    Ok(state.phase().as_str())
 }
 
 /// Mid-session mic toggle (#53) — the panel chrome button calls this.
@@ -660,7 +691,7 @@ pub async fn host_request(
         return Err(format!("request type not forwardable: {kind}"));
     }
     let inner = state.inner.lock().await;
-    match (&inner.host, inner.phase) {
+    match (&inner.host, state.phase()) {
         (Some(host), Phase::Live | Phase::Paused) => write_host_line(&host.stdin, &message),
         _ => Err("no active session".into()),
     }
@@ -715,5 +746,40 @@ pub async fn host_probe(app: AppHandle) -> Result<serde_json::Value, String> {
             .and_then(|d| d.as_str())
             .unwrap_or("probe failed");
         Err(detail.to_string())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn phase_round_trips_through_u8() {
+        for phase in [
+            Phase::Idle,
+            Phase::Starting,
+            Phase::Live,
+            Phase::Paused,
+            Phase::Stopping,
+        ] {
+            assert_eq!(Phase::from_u8(phase as u8), phase);
+        }
+        assert_eq!(Phase::from_u8(255), Phase::Idle); // unknown byte → Idle
+    }
+
+    #[test]
+    fn phase_is_readable_while_the_inner_mutex_is_held() {
+        // Regression for #65: a stalled start holds `inner` across the model
+        // download; the webview's phase query must still return. Because phase
+        // lives in a separate atomic, it is observable WITHOUT the mutex.
+        let state = SessionState::default();
+        assert_eq!(state.phase(), Phase::Idle);
+
+        // Hold `inner` exactly as a wedged start would.
+        let held = tauri::async_runtime::block_on(state.inner.lock());
+        state.set_phase(Phase::Starting); // publishes via the atomic, not `inner`
+        assert_eq!(state.phase(), Phase::Starting);
+        assert_eq!(state.phase().as_str(), "starting");
+        drop(held);
     }
 }
