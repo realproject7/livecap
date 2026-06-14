@@ -46,6 +46,7 @@ const FINAL: FinalBrief = {
   endClock: "11:32",
   durationMin: 47,
   costUsd: 0.31,
+  metrics: { talkRatioMic: 0.39, smoothScore: 83 },
 };
 
 describe("SessionArchiveWriter — golden file (PROPOSAL §8.9)", () => {

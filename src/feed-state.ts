@@ -178,6 +178,19 @@ export class FeedState {
     return this.blocks.length > 0 ? this.blocks[this.blocks.length - 1] : null;
   }
 
+  /**
+   * The session's own (mic) finalized utterances, oldest first (#82 coaching
+   * list). Client-side, no host round-trip — only finalized "me" blocks with a
+   * resolved id. Bounded by the render window (#57) like the live feed; the full
+   * transcript lives in the archive.
+   */
+  micUtterances(): (CaptionBlock & { id: number })[] {
+    return this.blocks.filter(
+      (block): block is CaptionBlock & { id: number } =>
+        block.id !== null && block.channel === "me",
+    );
+  }
+
   /** Most recent finalized source lines, oldest first (reply-chip context). */
   recentSources(count: number): string[] {
     return this.blocks

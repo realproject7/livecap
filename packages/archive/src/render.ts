@@ -3,7 +3,7 @@
 // equals re-rendering the whole document with that entry — which is what makes
 // the append-only transcript and the periodic full rewrite consistent.
 
-import type { BoardData, CaptionEntry } from "./types";
+import type { BoardData, CaptionEntry, MetricsData } from "./types";
 
 /** The complete state needed to render a document. */
 export interface ArchiveModel {
@@ -20,6 +20,9 @@ export interface ArchiveModel {
   costUsd: number;
   summary: string[];
   board: BoardData;
+  /** Post-meeting metrics (#81). Present only after the session ends; while live
+   *  it is undefined and the Metrics section is omitted. */
+  metrics?: MetricsData;
   entries: CaptionEntry[];
 }
 
@@ -56,6 +59,18 @@ export function renderEntryAppend(e: CaptionEntry, isFirst: boolean): string {
   return (isFirst ? "" : "\n") + renderEntryBody(e);
 }
 
+/** Render the post-meeting Metrics section (#81), or "" when no metrics. The
+ *  talk ratio is shown as a whole-percent mic share; the Smooth Score as the
+ *  raw 0–100 value. */
+function renderMetrics(metrics: MetricsData): string {
+  const talkPct = Math.round(metrics.talkRatioMic * 100);
+  return (
+    `\n## Metrics\n` +
+    `**Talk ratio (me)** — ${talkPct}%\n` +
+    `**Smooth Score** — ${metrics.smoothScore}\n`
+  );
+}
+
 /** Everything above the transcript entries (rewritten on each brief update). */
 export function renderFrontMatter(m: ArchiveModel): string {
   let doc = `# ${m.title}\n> ${renderMetaLine(m)}\n`;
@@ -63,6 +78,7 @@ export function renderFrontMatter(m: ArchiveModel): string {
   for (const line of m.summary) doc += `- ${line}\n`;
   doc += `\n## Board\n`;
   doc += renderBoard(m.board);
+  if (m.metrics !== undefined) doc += renderMetrics(m.metrics);
   doc += `\n## Transcript\n`;
   return doc;
 }

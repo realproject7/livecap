@@ -28,6 +28,17 @@ export interface BoardData {
 }
 
 /**
+ * Post-meeting metrics rendered into the archive (#81). A plain structural
+ * shape so this package stays engine-free — the host maps the engine's
+ * `MeetingMetrics` onto it. `talkRatioMic` is the mic share of spoken time in
+ * [0,1]; `smoothScore` is the delivery score in [0,100].
+ */
+export interface MetricsData {
+  talkRatioMic: number;
+  smoothScore: number;
+}
+
+/**
  * Session-fixed metadata, supplied by the consumer (the package never reads a
  * clock or resolves a locale itself — these arrive pre-formatted).
  */
@@ -61,6 +72,9 @@ export interface BriefUpdate {
   durationMin?: number;
   /** Cumulative engine cost in USD. */
   costUsd?: number;
+  /** Post-meeting metrics (#81) — rendered as a "Metrics" section. Present only
+   *  at finalize (computed once the session ends); omitted means no section. */
+  metrics?: MetricsData;
 }
 
 /** A BriefUpdate with the title required — for finalize(). */
