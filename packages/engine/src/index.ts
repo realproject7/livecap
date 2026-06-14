@@ -100,3 +100,13 @@ export type { SummaryCadenceOptions } from "./summary-cadence";
 // Issue #55 — per-session extras budget cap (flows into the gauge).
 export { ExtrasBudget, ExtrasBudgetExceededError, DEFAULT_EXTRAS_BUDGET_USD } from "./extras-budget";
 export type { ExtrasBudgetOptions, ExtrasBudgetState } from "./extras-budget";
+
+// Issue #78 — meeting metrics (talk-time ratio + Smooth Score; deterministic, no LLM).
+export { computeMeetingMetrics } from "./meeting-metrics";
+export type {
+  MetricsChannel,
+  FinalizedRecord,
+  TalkTime,
+  SmoothSignals,
+  MeetingMetrics,
+} from "./meeting-metrics";
