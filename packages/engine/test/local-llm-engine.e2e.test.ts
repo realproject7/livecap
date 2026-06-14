@@ -2,7 +2,7 @@ import { createServer } from "node:net";
 import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, afterEach } from "vitest";
 
 import { LocalLlmEngine } from "../src/local-llm-engine";
 import type { LocalLlmEngineConfig } from "../src/local-llm-engine";
@@ -21,9 +21,21 @@ function freePort(): Promise<number> {
   });
 }
 
+// Every engine handed out by makeEngine is disposed after each test so a child
+// left alive by a throwing test (or one that only asserts start() rejects) is
+// SIGKILLed instead of reparenting to PID 1 and surviving `pnpm test`.
+// dispose() (PR #74) is synchronous and idempotent. A global-teardown backstop
+// (vitest.config.ts) sweeps any straggler a rare missed-kill path leaves behind.
+const liveEngines = new Set<LocalLlmEngine>();
+
+afterEach(() => {
+  for (const engine of liveEngines) engine.dispose();
+  liveEngines.clear();
+});
+
 async function makeEngine(overrides: Partial<LocalLlmEngineConfig> = {}): Promise<LocalLlmEngine> {
-  const port = await freePort();
-  return new LocalLlmEngine({
+  const port = overrides.port ?? (await freePort());
+  const engine = new LocalLlmEngine({
     bin: FAKE_SERVER,
     modelPath: `${tmpdir()}/unused.gguf`,
     port,
@@ -31,6 +43,8 @@ async function makeEngine(overrides: Partial<LocalLlmEngineConfig> = {}): Promis
     env: { ...process.env, ...(overrides.env as Record<string, string> | undefined) },
     ...overrides,
   });
+  liveEngines.add(engine);
+  return engine;
 }
 
 const batch: Sentence[] = [{ id: "s1", text: "We are committed to the dual mandate.", seq: 1 }];
