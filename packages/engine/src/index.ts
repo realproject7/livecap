@@ -77,15 +77,23 @@ export type {
   SummaryBoardResult,
   SummaryBoardPrevious,
   TextResult,
+  AnalyzeRespondPipelineResult,
 } from "./extras-pipeline";
 export {
   buildSummaryBoardPrompt,
   buildIncrementalSummaryBoardPrompt,
   buildReplyPrompt,
+  buildAnalyzeRespondPrompt,
   buildQuickTranslatePrompt,
   parseSummaryBoard,
+  parseAnalyzeRespond,
 } from "./extras-prompts";
-export type { MeetingBoard, ReplyIntent, SummaryBoardParse } from "./extras-prompts";
+export type {
+  MeetingBoard,
+  ReplyIntent,
+  SummaryBoardParse,
+  AnalyzeRespondResult,
+} from "./extras-prompts";
 export { SummaryCadence } from "./summary-cadence";
 export type { SummaryCadenceOptions } from "./summary-cadence";
 

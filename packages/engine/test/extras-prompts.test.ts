@@ -1,10 +1,12 @@
 import { describe, it, expect } from "vitest";
 
 import {
+  buildAnalyzeRespondPrompt,
   buildIncrementalSummaryBoardPrompt,
   buildQuickTranslatePrompt,
   buildReplyPrompt,
   buildSummaryBoardPrompt,
+  parseAnalyzeRespond,
   parseSummaryBoard,
 } from "../src/extras-prompts";
 
@@ -95,6 +97,91 @@ describe("buildReplyPrompt", () => {
   it("uses the full list when fewer than the window", () => {
     const { user } = buildReplyPrompt("ask", ["only one"], "한국어", 10);
     expect(user).toContain("only one");
+  });
+});
+
+describe("buildAnalyzeRespondPrompt (#77)", () => {
+  it("focuses on the target line, includes the bounded caption context, and names both languages", () => {
+    const captions = Array.from({ length: 20 }, (_, i) => `caption ${i}`);
+    const { user } = buildAnalyzeRespondPrompt(
+      "How will you handle churn?",
+      captions,
+      "English", // meeting (reply) language
+      "한국어", // analysis (target) language
+      10,
+    );
+    // The clicked line is the focus.
+    expect(user).toContain("How will you handle churn?");
+    expect(user).toContain("The specific line to analyze and reply to:");
+    // Two explicit, English-keyed sections.
+    expect(user).toContain("ANALYSIS");
+    expect(user).toContain("REPLY");
+    // Languages assigned to the right sections: reply = meeting, analysis = target.
+    expect(user).toContain("REPLY body in English");
+    expect(user).toContain("ANALYSIS body in 한국어");
+    // Headers stay English even with a non-English body.
+    expect(user).toContain("keep the two section headers in English");
+    // Only the last N captions ride along as context.
+    expect(user).toContain("caption 19");
+    expect(user).toContain("caption 10");
+    expect(user).not.toContain("caption 9");
+  });
+
+  it("varying the languages swaps which language each section is written in (#12)", () => {
+    const { user } = buildAnalyzeRespondPrompt("질문", [], "한국어", "English");
+    expect(user).toContain("REPLY body in 한국어");
+    expect(user).toContain("ANALYSIS body in English");
+  });
+
+  it("omits the context block entirely when there are no recent captions", () => {
+    const { user } = buildAnalyzeRespondPrompt("standalone question", [], "English", "English");
+    expect(user).not.toContain("Recent conversation for context");
+    expect(user).toContain("standalone question");
+  });
+});
+
+describe("parseAnalyzeRespond (#77)", () => {
+  it("splits the two sections, preserving multi-line bodies", () => {
+    const text = [
+      "ANALYSIS",
+      "They want concrete churn numbers.",
+      "Acknowledge, then give your retention plan.",
+      "REPLY",
+      "Our 90-day churn is 4%, and here is how we drive it down.",
+    ].join("\n");
+    const { analysis, reply } = parseAnalyzeRespond(text);
+    expect(analysis).toBe(
+      "They want concrete churn numbers.\nAcknowledge, then give your retention plan.",
+    );
+    expect(reply).toBe("Our 90-day churn is 4%, and here is how we drive it down.");
+  });
+
+  it("tolerates header case / markdown markers and Korean header aliases (전략 / 답변)", () => {
+    const text = ["## 전략", "핵심을 먼저 인정하세요.", "**답변:**", "좋은 질문입니다."].join("\n");
+    const { analysis, reply } = parseAnalyzeRespond(text);
+    expect(analysis).toBe("핵심을 먼저 인정하세요.");
+    expect(reply).toBe("좋은 질문입니다.");
+  });
+
+  it("graceful fallback: only one section present leaves the other empty", () => {
+    const onlyReply = parseAnalyzeRespond("REPLY\nSure, let's do that.");
+    expect(onlyReply.analysis).toBe("");
+    expect(onlyReply.reply).toBe("Sure, let's do that.");
+
+    const onlyAnalysis = parseAnalyzeRespond("ANALYSIS\nThis is a pricing objection.");
+    expect(onlyAnalysis.analysis).toBe("This is a pricing objection.");
+    expect(onlyAnalysis.reply).toBe("");
+  });
+
+  it("graceful fallback: no recognized header → whole output becomes the reply", () => {
+    const { analysis, reply } = parseAnalyzeRespond("Sure, happy to walk you through it.");
+    expect(analysis).toBe("");
+    expect(reply).toBe("Sure, happy to walk you through it.");
+  });
+
+  it("never throws on degenerate shapes", () => {
+    expect(() => parseAnalyzeRespond("")).not.toThrow();
+    expect(parseAnalyzeRespond("")).toEqual({ analysis: "", reply: "" });
   });
 });
 

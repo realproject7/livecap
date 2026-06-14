@@ -129,6 +129,96 @@ export function buildReplyPrompt(
   return { system, user };
 }
 
+/** Result of `analyzeAndRespond` (#77): a short read of a targeted caption block
+ *  plus a suggested reply. `analysis` is in the user's target language, `reply`
+ *  is in the meeting language. */
+export interface AnalyzeRespondResult {
+  analysis: string;
+  reply: string;
+}
+
+/**
+ * Build the targeted analyze-and-respond request (#77). Unlike `buildReplyPrompt`
+ * (chip intent over the last N captions), this focuses the model on ONE specific
+ * caption block the user clicked — usually a question aimed at them — and asks for
+ * two sections: a short strategy read (전략, in `analysisLanguage`) and a suggested
+ * reply (답변, in `meetingLanguage`). The recent captions ride along only as
+ * surrounding context. Section headers stay in English so {@link parseAnalyzeRespond}
+ * keys off them regardless of the body languages.
+ */
+export function buildAnalyzeRespondPrompt(
+  targetText: string,
+  recentCaptions: string[],
+  meetingLanguage: string,
+  analysisLanguage: string,
+  contextCaptions = DEFAULT_CONTEXT_CAPTIONS,
+): { system: string; user: string } {
+  const window = recentCaptions.slice(-contextCaptions);
+  const system =
+    `You help the user handle a specific moment in a live meeting. The user clicked ` +
+    `one line — usually a question aimed at them — and wants to know how to handle it ` +
+    `and what to say. Output ONLY the two sections below, no preamble, no commentary.`;
+  const user = [
+    "Use EXACTLY these section headers, each on its own line:",
+    "ANALYSIS",
+    `<a brief read of what the line is asking and how to handle it, in ${analysisLanguage}>`,
+    "REPLY",
+    `<one natural reply the user could say, in ${meetingLanguage}>`,
+    `Write the ANALYSIS body in ${analysisLanguage} and the REPLY body in ${meetingLanguage}, ` +
+      "but keep the two section headers in English exactly as above (ANALYSIS / REPLY).",
+    "",
+    ...(window.length > 0
+      ? ["Recent conversation for context (most recent last):", ...window.map((c) => `- ${c}`), ""]
+      : []),
+    "The specific line to analyze and reply to:",
+    targetText,
+  ].join("\n");
+  return { system, user };
+}
+
+const ANALYZE_SECTION_BY_HEADER: Record<string, "analysis" | "reply"> = {
+  ANALYSIS: "analysis",
+  STRATEGY: "analysis",
+  전략: "analysis",
+  분석: "analysis",
+  REPLY: "reply",
+  RESPONSE: "reply",
+  답변: "reply",
+  답장: "reply",
+};
+
+/**
+ * Parse an analyze-and-respond response into `{ analysis, reply }`. Robust to the
+ * model omitting a section (graceful fallback, never throws on shape):
+ * - both headers present → each section's body is the lines beneath it;
+ * - only one header present → the other side is empty;
+ * - NO recognized header → the whole output is treated as the `reply` (the
+ *   user-facing, actionable half), leaving `analysis` empty.
+ */
+export function parseAnalyzeRespond(text: string): AnalyzeRespondResult {
+  const buckets: { analysis: string[]; reply: string[] } = { analysis: [], reply: [] };
+  let current: "analysis" | "reply" | null = null;
+  let sawHeader = false;
+
+  for (const raw of text.split("\n")) {
+    const line = raw.trim();
+    if (line === "") continue;
+    const key = ANALYZE_SECTION_BY_HEADER[headerNormalize(line)] ?? null;
+    if (key) {
+      current = key;
+      sawHeader = true;
+      continue;
+    }
+    if (current === null) continue; // preamble before any header
+    buckets[current].push(line);
+  }
+
+  if (!sawHeader) {
+    return { analysis: "", reply: text.trim() };
+  }
+  return { analysis: buckets.analysis.join("\n").trim(), reply: buckets.reply.join("\n").trim() };
+}
+
 /** Build the quick-translate request (free text → meeting language — §8.5). */
 export function buildQuickTranslatePrompt(
   text: string,
@@ -176,14 +266,18 @@ interface SectionBuckets {
   openQuestions: string[];
 }
 
-function headerKey(line: string): keyof SectionBuckets | null {
-  // Markdown header markers (#, *) and trailing punctuation are tolerated; a
-  // leading bullet ("- Decisions …") is NOT a header.
-  const normalized = line
+/** Normalize a candidate header line for lookup: strip leading markdown markers
+ *  (#, *) and trailing punctuation, then upper-case. A leading bullet
+ *  ("- Decisions …") is NOT stripped here, so it never reads as a header. */
+function headerNormalize(line: string): string {
+  return line
     .replace(/^[#*\s]+/, "")
     .replace(/[:：#*\s]+$/, "")
     .toUpperCase();
-  return SECTION_BY_HEADER[normalized] ?? null;
+}
+
+function headerKey(line: string): keyof SectionBuckets | null {
+  return SECTION_BY_HEADER[headerNormalize(line)] ?? null;
 }
 
 function stripBulletMarker(line: string): string {

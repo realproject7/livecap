@@ -5,11 +5,14 @@
 
 import { ExtrasBudget, ExtrasBudgetExceededError } from "./extras-budget";
 import {
+  buildAnalyzeRespondPrompt,
   buildIncrementalSummaryBoardPrompt,
   buildQuickTranslatePrompt,
   buildReplyPrompt,
   buildSummaryBoardPrompt,
+  parseAnalyzeRespond,
   parseSummaryBoard,
+  type AnalyzeRespondResult,
   type MeetingBoard,
   type ReplyIntent,
 } from "./extras-prompts";
@@ -48,6 +51,11 @@ export interface SummaryBoardResult {
 
 export interface TextResult {
   text: string;
+  usage: Usage;
+}
+
+/** Result of {@link ExtrasPipeline.analyzeAndRespond} (#77). */
+export interface AnalyzeRespondPipelineResult extends AnalyzeRespondResult {
   usage: Usage;
 }
 
@@ -108,6 +116,37 @@ export class ExtrasPipeline {
     // User-driven and bounded — metered against the budget but never blocked by it.
     this.budget?.record(usage.turnCostUsd);
     return { text: text.trim(), usage };
+  }
+
+  /**
+   * Analyze ONE targeted caption block (usually a question aimed at the user) and
+   * suggest a reply (#77). Returns `{ analysis, reply }` where `analysis` is a short
+   * strategy read in the user's target language (`summaryLanguage`) and `reply` is a
+   * natural response in the meeting language (`meetingLanguage`). `options.language`
+   * overrides the meeting (reply) language per call, mirroring the other methods.
+   *
+   * On-demand only (never auto-invoked); user-driven and bounded, so its cost is
+   * metered against the budget but never blocked by it. Parsing is graceful — a
+   * model that omits a section never throws (see {@link parseAnalyzeRespond}).
+   */
+  async analyzeAndRespond(
+    targetText: string,
+    recentCaptions: string[],
+    options: { language?: string } = {},
+  ): Promise<AnalyzeRespondPipelineResult> {
+    const replyLanguage = options.language ?? this.meetingLanguage;
+    const { text, usage } = await this.engine.complete(
+      buildAnalyzeRespondPrompt(
+        targetText,
+        recentCaptions,
+        replyLanguage,
+        this.summaryLanguage,
+        this.contextCaptions,
+      ),
+    );
+    this.budget?.record(usage.turnCostUsd);
+    const parsed = parseAnalyzeRespond(text);
+    return { analysis: parsed.analysis, reply: parsed.reply, usage };
   }
 
   /** Quick translate free text into the meeting language (§8.5). */
