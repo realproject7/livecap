@@ -6,13 +6,16 @@
 import { ExtrasBudget, ExtrasBudgetExceededError } from "./extras-budget";
 import {
   buildAnalyzeRespondPrompt,
+  buildCoachPrompt,
   buildIncrementalSummaryBoardPrompt,
   buildQuickTranslatePrompt,
   buildReplyPrompt,
   buildSummaryBoardPrompt,
   parseAnalyzeRespond,
+  parseCoachResult,
   parseSummaryBoard,
   type AnalyzeRespondResult,
+  type CoachResult,
   type MeetingBoard,
   type ReplyIntent,
 } from "./extras-prompts";
@@ -57,6 +60,27 @@ export interface TextResult {
 /** Result of {@link ExtrasPipeline.analyzeAndRespond} (#77). */
 export interface AnalyzeRespondPipelineResult extends AnalyzeRespondResult {
   usage: Usage;
+}
+
+/** Result of {@link ExtrasPipeline.coachUtterance} (#79). */
+export interface CoachPipelineResult extends CoachResult {
+  usage: Usage;
+}
+
+/** Usage for a result produced WITHOUT calling the model (a no-op coaching
+ *  result on degenerate input) — no tokens spent, nothing to meter. */
+const ZERO_USAGE: Usage = {
+  cumulativeCostUsd: 0,
+  turnCostUsd: 0,
+  inputTokens: 0,
+  outputTokens: 0,
+  cacheReadInputTokens: 0,
+};
+
+/** A trivial/degenerate utterance (empty or a single word, e.g. "Yeah") has
+ *  nothing to coach — counting whitespace-separated words. */
+function isDegenerateUtterance(text: string): boolean {
+  return text.trim().split(/\s+/).filter((w) => w !== "").length <= 1;
 }
 
 export class ExtrasPipeline {
@@ -155,5 +179,51 @@ export class ExtrasPipeline {
     const result = await this.engine.complete(buildQuickTranslatePrompt(text, language));
     this.budget?.record(result.usage.turnCostUsd);
     return { text: result.text.trim(), usage: result.usage };
+  }
+
+  /**
+   * Coach ONE of the user's own (disfluent) utterances (#79): a native rewrite
+   * (`better`, in the meeting language), the key edits (`changes`, for diff
+   * highlighting), and why (`explanation`, in the user's target language).
+   * `options.language` overrides the meeting (rewrite) language per call.
+   *
+   * Degenerate input (empty or a single word, e.g. "Yeah") returns a no-op
+   * `{ better: <trimmed input>, changes: [], explanation: "" }` WITHOUT calling
+   * the model — never a fabricated rewrite, and no token spend. On-demand only;
+   * cost metered against the budget but never blocked by it. Parsing is graceful
+   * (see {@link parseCoachResult}).
+   */
+  async coachUtterance(
+    text: string,
+    options: { language?: string } = {},
+  ): Promise<CoachPipelineResult> {
+    if (isDegenerateUtterance(text)) {
+      return { better: text.trim(), changes: [], explanation: "", usage: ZERO_USAGE };
+    }
+    const better = options.language ?? this.meetingLanguage;
+    const { text: out, usage } = await this.engine.complete(
+      buildCoachPrompt(text, better, this.summaryLanguage),
+    );
+    this.budget?.record(usage.turnCostUsd);
+    const parsed = parseCoachResult(out);
+    return { ...parsed, usage };
+  }
+
+  /**
+   * Batch coaching for "review all my utterances" (#79): results are aligned by
+   * index with `texts`. Degenerate items short-circuit to a no-op with no
+   * round-trip (so a transcript full of "Yeah"/"Right" is free); each remaining
+   * item is coached with its own `complete()` call — robust per-item parsing
+   * rather than one fragile multi-item prompt.
+   */
+  async coachUtterances(
+    texts: string[],
+    options: { language?: string } = {},
+  ): Promise<CoachPipelineResult[]> {
+    const results: CoachPipelineResult[] = [];
+    for (const text of texts) {
+      results.push(await this.coachUtterance(text, options));
+    }
+    return results;
   }
 }
