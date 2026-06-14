@@ -34,7 +34,15 @@ const HOST_EXIT_TIMEOUT: Duration = Duration::from_secs(60);
 const SHUTDOWN_HOST_TIMEOUT: Duration = Duration::from_secs(8);
 
 /// Host-stdin request types the webview may forward through `host_request`.
-const FORWARDABLE_REQUESTS: &[&str] = &["quickTranslate", "reply", "retranslate", "pin", "silenceSnooze"];
+const FORWARDABLE_REQUESTS: &[&str] = &[
+    "quickTranslate",
+    "reply",
+    "analyze",
+    "coach",
+    "retranslate",
+    "pin",
+    "silenceSnooze",
+];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 #[repr(u8)]
