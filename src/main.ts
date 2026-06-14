@@ -11,8 +11,15 @@ import { ask } from "@tauri-apps/plugin-dialog";
 import { applyCaptionSize, type AppSettings } from "./app-settings";
 import { bootstrap } from "./bootstrap";
 import { FeedState, type CaptionBlock } from "./feed-state";
+import {
+  buildReview,
+  type CoachingCard,
+  type ReviewCallbacks,
+  type ReviewSurface,
+} from "./review";
 import { startOnboarding } from "./onboarding";
 import type {
+  BoardWire,
   Capabilities,
   CaptionBridgeEvent,
   HostInbound,
@@ -32,6 +39,10 @@ interface ChromePayload {
 
 const CHROME_HIDE_MS = 3000;
 const TOAST_MS = 4000;
+/** TTS voice language for the coaching playback (#82). The meeting language is
+ *  English (src/host/start-config.ts MEETING_LANGUAGE); the rewrite is in that
+ *  language, so the voice is English. */
+const MEETING_VOICE_LANG = "en-US";
 
 const ICONS = {
   play: '<svg viewBox="0 0 12 12" fill="currentColor" aria-hidden="true"><path d="M3.2 2.1a.8.8 0 0 1 1.2-.7l6 3.9a.8.8 0 0 1 0 1.4l-6 3.9a.8.8 0 0 1-1.2-.7z"/></svg>',
@@ -56,6 +67,12 @@ let channels: SessionChannels = { system: true, mic: true };
 let statusDetail = "";
 let summaryLine = "";
 let requestCounter = 0;
+// Latest full summary/board (#81) — retained so the post-meeting review screen
+// can render them; the live strip only shows the first summary line.
+let latestSummary: string[] = [];
+let latestBoard: BoardWire = { decisions: [], actionItems: [], openQuestions: [] };
+// Latest archive path for the review screen's "open saved file" action.
+let latestArchivePath: string | null = null;
 
 const feed = new FeedState();
 
@@ -82,6 +99,7 @@ document.body.innerHTML = `
       <button id="live-chip" type="button">↓ live</button>
       <div id="pinned"></div>
       <div id="cards"></div>
+      <div id="review-mount"></div>
       <div id="chips">
         <button class="chip" data-intent="suggest">✦ Suggest</button>
         <button class="chip" data-intent="agree">👍 Agree</button>
@@ -274,6 +292,7 @@ function blockEl(block: CaptionBlock): HTMLElement {
       <span class="src"></span>
       <span class="time t-meta"></span>
       <span class="ghost">
+        <button class="g g-analyze" title="Analyze + suggest a reply">✦</button>
         <button class="g g-pin" title="Pin">📌</button>
         <button class="g g-copy" title="Copy">⧉</button>
         <button class="g g-re" title="Retranslate">⟳</button>
@@ -281,6 +300,7 @@ function blockEl(block: CaptionBlock): HTMLElement {
     </div>
     <div class="tr"></div>
   `;
+  el.querySelector<HTMLButtonElement>(".g-analyze")?.addEventListener("click", () => analyzeBlock(block.key));
   el.querySelector<HTMLButtonElement>(".g-pin")?.addEventListener("click", () => togglePin(block.key));
   el.querySelector<HTMLButtonElement>(".g-copy")?.addEventListener("click", () => copyBlock(block.key));
   el.querySelector<HTMLButtonElement>(".g-re")?.addEventListener("click", () => retranslate(block.key));
@@ -407,6 +427,20 @@ function retranslate(key: string): void {
   void hostRequest({ type: "retranslate", id: block.id });
 }
 
+/* ---- #80 targeted analysis: click a caption → strategy + suggested reply ---- */
+
+function analyzeBlock(key: string): void {
+  const block = feed.blocks.find((b) => b.key === key);
+  if (!block || block.id === null || !sessionRunning()) return;
+  const captionId = block.id;
+  const card = newAnalysisCard(block.source, () => requestAnalysis(captionId, card.id));
+  requestAnalysis(captionId, card.id);
+}
+
+function requestAnalysis(captionId: number, cardId: number): void {
+  void hostRequest({ type: "analyze", cardId, captionId });
+}
+
 /* ---- strip / capsule: latest line(s) from the same stream (§8.1) ---- */
 
 function syncMiniViews(): void {
@@ -474,6 +508,153 @@ function newCard(label: string, intent?: ReplyIntentWire): number {
   cardsEl.appendChild(el);
   requestAnimationFrame(() => el.classList.remove("fading-in"));
   return registerCard(el, body);
+}
+
+/* ---- #80 analysis card: two sections (strategy + reply), copy/regenerate/dismiss ---- */
+
+interface AnalysisCard {
+  id: number;
+  setPending: () => void;
+  fill: (analysis: string, reply: string) => void;
+  fail: (detail: string) => void;
+}
+
+const analysisCards = new Map<number, AnalysisCard>();
+
+/** Build an inline analysis card (#80) under the feed: a strategy read +
+ *  suggested reply, with copy (the reply), regenerate, and dismiss. Mirrors the
+ *  reply-card chrome but renders two labelled sections. `onRegenerate` re-fires
+ *  the analyze request for the same caption. */
+function newAnalysisCard(targetSource: string, onRegenerate: () => void): AnalysisCard {
+  requestCounter += 1;
+  const id = requestCounter;
+  const el = document.createElement("div");
+  el.className = "card analysis-card fading-in";
+  el.innerHTML = `
+    <div class="card-label t-meta">✦ Analysis</div>
+    <div class="card-target t-meta"></div>
+    <div class="analysis-section">
+      <div class="analysis-head t-meta">Strategy</div>
+      <div class="analysis-strategy card-body"></div>
+    </div>
+    <div class="analysis-section">
+      <div class="analysis-head t-meta">Suggested reply</div>
+      <div class="analysis-reply card-body"></div>
+    </div>
+    <div class="card-actions">
+      <button class="c-copy">⧉ Copy reply</button>
+      <button class="c-again">⟳ Regenerate</button>
+      <button class="c-close">✕</button>
+    </div>
+  `;
+  const targetEl = el.querySelector<HTMLDivElement>(".card-target");
+  if (targetEl) targetEl.textContent = targetSource;
+  const strategyEl = el.querySelector<HTMLDivElement>(".analysis-strategy") as HTMLDivElement;
+  const replyEl = el.querySelector<HTMLDivElement>(".analysis-reply") as HTMLDivElement;
+
+  const card: AnalysisCard = {
+    id,
+    setPending: () => {
+      strategyEl.textContent = "…";
+      replyEl.textContent = "…";
+    },
+    fill: (analysis, reply) => {
+      strategyEl.textContent = analysis !== "" ? analysis : "—";
+      replyEl.textContent = reply !== "" ? reply : "—";
+    },
+    fail: (detail) => {
+      strategyEl.textContent = `unavailable (${detail})`;
+      replyEl.textContent = "";
+    },
+  };
+  card.setPending();
+
+  el.querySelector<HTMLButtonElement>(".c-copy")?.addEventListener("click", () => {
+    void writeText(replyEl.textContent ?? "").then(
+      () => showToast("Copied"),
+      () => showToast("Copy failed"),
+    );
+  });
+  el.querySelector<HTMLButtonElement>(".c-again")?.addEventListener("click", () => {
+    card.setPending();
+    onRegenerate();
+  });
+  el.querySelector<HTMLButtonElement>(".c-close")?.addEventListener("click", () => {
+    analysisCards.delete(id);
+    el.remove();
+  });
+
+  cardsEl.appendChild(el);
+  requestAnimationFrame(() => el.classList.remove("fading-in"));
+  analysisCards.set(id, card);
+  return card;
+}
+
+/* ---- #81 review screen + #82 coaching tab (src/review.ts) ---- */
+
+const reviewCallbacks: ReviewCallbacks = {
+  requestCoaching: (ids) => {
+    requestCounter += 1;
+    const cardId = requestCounter;
+    void hostRequest({ type: "coach", cardId, captionIds: ids });
+    return cardId;
+  },
+  copy: (text) =>
+    void writeText(text).then(
+      () => showToast("Copied"),
+      () => showToast("Copy failed"),
+    ),
+  speak: speakBetter,
+  close: () => review.hide(),
+};
+
+const review: ReviewSurface = buildReview(reviewCallbacks);
+$<HTMLDivElement>("review-mount").appendChild(review.el);
+
+/** Route a coaching result/failure to its card (owned by the review surface). */
+const coachingCards = {
+  get: (id: number): CoachingCard | undefined => review.coachingCard(id),
+};
+
+/** Speak the rewrite aloud via the webview Web Speech API (#82). The meeting
+ *  language is English (src/host/start-config.ts), so the voice is en-* — no
+ *  macOS `say`, no Rust command. Silently no-ops where speech synthesis is
+ *  unavailable. */
+function speakBetter(text: string): void {
+  if (text === "" || typeof window.speechSynthesis === "undefined") return;
+  const utterance = new SpeechSynthesisUtterance(text);
+  utterance.lang = MEETING_VOICE_LANG;
+  const voice = window.speechSynthesis
+    .getVoices()
+    .find((v) => v.lang.toLowerCase().startsWith("en"));
+  if (voice) utterance.voice = voice;
+  window.speechSynthesis.cancel();
+  window.speechSynthesis.speak(utterance);
+}
+
+// Metrics arrive (HostOutbound "metrics") just before the archive path
+// ("archived"); retain them so the review opens once the session has stopped.
+let pendingMetrics: { talkRatioMic: number; smoothScore: number; micMs: number; systemMs: number } | null =
+  null;
+
+/** Open the post-meeting review screen (#81) with the retained summary/board +
+ *  metrics + the session's own (mic) utterances. Called on session end. */
+function openReview(talkRatioMic: number, smoothScore: number, micMs: number, systemMs: number): void {
+  const utterances = feed.micUtterances().map((block) => ({
+    id: block.id,
+    source: block.source,
+    time: block.epochMs !== null ? clockLabel(block.epochMs) : "",
+  }));
+  review.show({
+    summary: latestSummary,
+    board: latestBoard,
+    talkRatioMic,
+    smoothScore,
+    micMs,
+    systemMs,
+    utterances,
+    archivePath: latestArchivePath,
+  });
 }
 
 const CHIP_LABELS: Record<ReplyIntentWire, string> = {
@@ -579,6 +760,8 @@ void listen<HostOutbound>("host://event", (event) => {
     }
     case "summary":
       summaryLine = message.summary[0] ?? "";
+      latestSummary = message.summary;
+      latestBoard = message.board;
       renderSummaryStrip();
       break;
     case "engineSwitch":
@@ -590,15 +773,36 @@ void listen<HostOutbound>("host://event", (event) => {
       if (card) card.body.textContent = message.text;
       break;
     }
+    case "analysis": {
+      analysisCards.get(message.cardId)?.fill(message.analysis, message.reply);
+      break;
+    }
+    case "metrics":
+      pendingMetrics = {
+        talkRatioMic: message.talkRatioMic,
+        smoothScore: message.smoothScore,
+        micMs: message.micMs,
+        systemMs: message.systemMs,
+      };
+      break;
+    case "coaching": {
+      coachingCards.get(message.cardId)?.fill(message.items);
+      break;
+    }
     case "extrasFailed": {
+      // The id namespace is shared (requestCounter) across all on-demand cards,
+      // so route the failure to whichever card kind owns it.
       const card = pendingCards.get(message.id);
       if (card) card.body.textContent = `unavailable (${message.detail})`;
+      analysisCards.get(message.id)?.fail(message.detail);
+      coachingCards.get(message.id)?.fail(message.detail);
       break;
     }
     case "silence":
       void promptSilenceStop(message.sinceMs);
       break;
     case "archived":
+      latestArchivePath = message.path;
       showToast(`Saved — ${message.path.split("/").pop() ?? message.path}`);
       break;
     case "status":
@@ -612,8 +816,20 @@ void listen<HostOutbound>("host://event", (event) => {
     case "gauge":
       settingsSheet.updateGauge(message.gauge);
       break;
-    case "ready":
     case "stopped":
+      // Session end (#81): show the review screen with the retained summary/board,
+      // the metrics that just arrived, and the session's own (mic) utterances.
+      if (pendingMetrics) {
+        openReview(
+          pendingMetrics.talkRatioMic,
+          pendingMetrics.smoothScore,
+          pendingMetrics.micMs,
+          pendingMetrics.systemMs,
+        );
+        pendingMetrics = null;
+      }
+      break;
+    case "ready":
       break;
   }
 });
@@ -635,6 +851,9 @@ async function promptSilenceStop(sinceMs: number): Promise<void> {
 void listen<SessionStatus>("session://status", (event) => {
   phase = event.payload.phase;
   statusDetail = event.payload.detail ?? "";
+  // A new session is starting — dismiss the previous review screen so it never
+  // overlaps the live feed.
+  if ((phase === "starting" || phase === "live") && review.isOpen()) review.hide();
   render();
   syncMiniViews();
 });
