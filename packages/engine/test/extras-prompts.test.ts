@@ -2,11 +2,13 @@ import { describe, it, expect } from "vitest";
 
 import {
   buildAnalyzeRespondPrompt,
+  buildCoachPrompt,
   buildIncrementalSummaryBoardPrompt,
   buildQuickTranslatePrompt,
   buildReplyPrompt,
   buildSummaryBoardPrompt,
   parseAnalyzeRespond,
+  parseCoachResult,
   parseSummaryBoard,
 } from "../src/extras-prompts";
 
@@ -245,6 +247,85 @@ describe("buildIncrementalSummaryBoardPrompt (#55)", () => {
       "English",
     );
     expect(user).toContain("(none)");
+  });
+});
+
+describe("buildCoachPrompt (#79)", () => {
+  it("routes the rewrite to the meeting language and the explanation to the target language", () => {
+    const { system, user } = buildCoachPrompt("So I'm—I would aim to, uh, take out", "English", "한국어");
+    expect(user).toContain("So I'm—I would aim to, uh, take out");
+    expect(user).toContain("BETTER");
+    expect(user).toContain("CHANGES");
+    expect(user).toContain("EXPLANATION");
+    expect(user).toContain("BETTER rewrite in English");
+    expect(user).toContain("EXPLANATION in 한국어");
+    expect(user).toContain("keep the three section headers in English");
+    // Must not fabricate claims — only improve phrasing.
+    expect(system).toMatch(/do not invent/i);
+  });
+
+  it("swaps both languages when they are reversed (#12)", () => {
+    const { user } = buildCoachPrompt("음 그러니까 그게", "한국어", "English");
+    expect(user).toContain("BETTER rewrite in 한국어");
+    expect(user).toContain("EXPLANATION in English");
+  });
+});
+
+describe("parseCoachResult (#79)", () => {
+  it("parses better / changes (from => to) / explanation", () => {
+    const text = [
+      "BETTER",
+      "I'd like to shift our personalization to real-time contextual curation.",
+      "CHANGES",
+      "take out—take our personalization => shift our personalization",
+      "uh, from, uh => to",
+      "EXPLANATION",
+      "It removes the false starts and states the idea directly.",
+    ].join("\n");
+    const { better, changes, explanation } = parseCoachResult(text);
+    expect(better).toBe(
+      "I'd like to shift our personalization to real-time contextual curation.",
+    );
+    expect(changes).toEqual([
+      { from: "take out—take our personalization", to: "shift our personalization" },
+      { from: "uh, from, uh", to: "to" },
+    ]);
+    expect(explanation).toBe("It removes the false starts and states the idea directly.");
+  });
+
+  it("tolerates header aliases / markdown and Korean 해설, and arrow separators", () => {
+    const text = ["## 개선", "더 명확한 문장입니다.", "수정", "- 음 => (삭제)", "**해설:**", "군더더기를 없앴습니다."].join("\n");
+    const { better, changes, explanation } = parseCoachResult(text);
+    expect(better).toBe("더 명확한 문장입니다.");
+    expect(changes).toEqual([{ from: "음", to: "(삭제)" }]);
+    expect(explanation).toBe("군더더기를 없앴습니다.");
+  });
+
+  it("skips malformed CHANGES lines (no separator / empty side) rather than half-capturing", () => {
+    const text = ["BETTER", "Cleaner sentence.", "CHANGES", "this line has no arrow", "=> only a target", "from only =>"].join(
+      "\n",
+    );
+    const { changes } = parseCoachResult(text);
+    expect(changes).toEqual([]);
+  });
+
+  it("graceful fallback: a missing section is empty, not an error", () => {
+    const onlyBetter = parseCoachResult("BETTER\nA tighter version.");
+    expect(onlyBetter.better).toBe("A tighter version.");
+    expect(onlyBetter.changes).toEqual([]);
+    expect(onlyBetter.explanation).toBe("");
+  });
+
+  it("graceful fallback: no recognized header → the whole output is the rewrite", () => {
+    const { better, changes, explanation } = parseCoachResult("Here is a cleaner version of that.");
+    expect(better).toBe("Here is a cleaner version of that.");
+    expect(changes).toEqual([]);
+    expect(explanation).toBe("");
+  });
+
+  it("never throws on degenerate shapes", () => {
+    expect(() => parseCoachResult("")).not.toThrow();
+    expect(parseCoachResult("")).toEqual({ better: "", changes: [], explanation: "" });
   });
 });
 

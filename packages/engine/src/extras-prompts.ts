@@ -318,3 +318,127 @@ export function parseSummaryBoard(text: string): SummaryBoardParse {
     },
   };
 }
+
+// --- Speech coaching (#79) --------------------------------------------------
+
+/** One key edit the rewrite made, so the UI can highlight what changed. */
+export interface CoachChange {
+  from: string;
+  to: string;
+}
+
+/** Result of coaching one utterance (#79): a native rewrite + the key edits +
+ *  why. `better` is in the meeting language; `explanation` is in the user's
+ *  target language. `changes` may be empty even for a real rewrite. */
+export interface CoachResult {
+  better: string;
+  changes: CoachChange[];
+  explanation: string;
+}
+
+/**
+ * Build the speech-coaching request (#79). Given one of the user's OWN
+ * (disfluent) utterances, ask for three sections: a natural native rewrite
+ * (`better`, in `meetingLanguage`), the key edits as `original => replacement`
+ * lines (`changes`, so the UI can highlight diffs), and why (`explanation`, in
+ * `explanationLanguage`). Headers stay in English so {@link parseCoachResult}
+ * keys off them regardless of the body languages.
+ */
+export function buildCoachPrompt(
+  text: string,
+  meetingLanguage: string,
+  explanationLanguage: string,
+): { system: string; user: string } {
+  const system =
+    `You are a speech coach. The user gives ONE thing they said in a meeting; ` +
+    `produce a cleaner, natural-sounding native version of it. Do not invent new ` +
+    `claims — only improve phrasing and remove disfluencies. Output ONLY the three ` +
+    `sections below, no preamble, no commentary.`;
+  const user = [
+    "Use EXACTLY these section headers, each on its own line:",
+    "BETTER",
+    `<the improved native rewrite, in ${meetingLanguage}>`,
+    "CHANGES",
+    "<original phrase> => <replacement> (one key edit per line; omit if none)",
+    "EXPLANATION",
+    `<a short note on why it is better, in ${explanationLanguage}>`,
+    `Write the BETTER rewrite in ${meetingLanguage} and the EXPLANATION in ` +
+      `${explanationLanguage}, but keep the three section headers in English exactly ` +
+      "as above (BETTER / CHANGES / EXPLANATION).",
+    "",
+    "The user said:",
+    text,
+  ].join("\n");
+  return { system, user };
+}
+
+const COACH_SECTION_BY_HEADER: Record<string, "better" | "changes" | "explanation"> = {
+  BETTER: "better",
+  REWRITE: "better",
+  CHANGES: "changes",
+  EDITS: "changes",
+  EXPLANATION: "explanation",
+  WHY: "explanation",
+  // Korean aliases — the benchmarked card labels the explanation 해설.
+  해설: "explanation",
+  설명: "explanation",
+  수정: "changes",
+  개선: "better",
+};
+
+const CHANGE_SEPARATOR = /\s*(?:=>|->|→|⇒)\s*/;
+
+/**
+ * Parse a coaching response into `{ better, changes, explanation }`. Robust to
+ * the model omitting a section (never throws on shape):
+ * - sections are keyed off the English headers (with a few aliases);
+ * - CHANGES lines are split on `=>` / `->` / `→`; a line without a separator or
+ *   with an empty side is skipped rather than half-captured;
+ * - NO recognized header → the whole output is treated as `better` (the rewrite
+ *   is the load-bearing field), leaving `changes`/`explanation` empty.
+ */
+export function parseCoachResult(text: string): CoachResult {
+  const better: string[] = [];
+  const explanation: string[] = [];
+  const changes: CoachChange[] = [];
+  let current: "better" | "changes" | "explanation" | null = null;
+  let sawHeader = false;
+
+  for (const raw of text.split("\n")) {
+    const line = raw.trim();
+    if (line === "") continue;
+    const normalized = line
+      .replace(/^[#*\s]+/, "")
+      .replace(/[:：#*\s]+$/, "")
+      .toUpperCase();
+    const key = COACH_SECTION_BY_HEADER[normalized] ?? null;
+    if (key) {
+      current = key;
+      sawHeader = true;
+      continue;
+    }
+    if (current === null) continue; // preamble before any header
+    if (current === "changes") {
+      const stripped = line.replace(/^(?:[-•□▪*·]|\d+[.)])\s*/u, "").trim();
+      const parts = stripped.split(CHANGE_SEPARATOR);
+      if (parts.length >= 2) {
+        const from = parts[0].trim();
+        const to = parts.slice(1).join(" ").trim();
+        if (from !== "" && to !== "") changes.push({ from, to });
+      }
+    } else if (current === "better") {
+      better.push(line);
+    } else {
+      explanation.push(line);
+    }
+  }
+
+  if (!sawHeader) {
+    return { better: text.trim(), changes: [], explanation: "" };
+  }
+  return {
+    better: better.join("\n").trim(),
+    changes,
+    explanation: explanation.join("\n").trim(),
+  };
+}

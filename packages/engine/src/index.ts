@@ -78,6 +78,7 @@ export type {
   SummaryBoardPrevious,
   TextResult,
   AnalyzeRespondPipelineResult,
+  CoachPipelineResult,
 } from "./extras-pipeline";
 export {
   buildSummaryBoardPrompt,
@@ -85,14 +86,18 @@ export {
   buildReplyPrompt,
   buildAnalyzeRespondPrompt,
   buildQuickTranslatePrompt,
+  buildCoachPrompt,
   parseSummaryBoard,
   parseAnalyzeRespond,
+  parseCoachResult,
 } from "./extras-prompts";
 export type {
   MeetingBoard,
   ReplyIntent,
   SummaryBoardParse,
   AnalyzeRespondResult,
+  CoachChange,
+  CoachResult,
 } from "./extras-prompts";
 export { SummaryCadence } from "./summary-cadence";
 export type { SummaryCadenceOptions } from "./summary-cadence";
