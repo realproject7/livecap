@@ -398,3 +398,96 @@ synthetic captions (`pnpm test:app` — feed-state.test.ts, FEED_WINDOW=200).
 - `cargo run -p livecap-app` (debug) loads **devUrl (http://localhost:1420)** — it requires `pnpm dev` running from THE SAME checkout. A dead or different-checkout vite on 1420 = blank webview. This was #54's entire mystery.
 - Headless verification: prefer the bundled app (`pnpm tauri build --debug --bundles app`, run the binary inside) — it embeds `dist/` and needs no server.
 - UI render state is externally observable: `~/Library/Application Support/app.livecap.desktop/ui-heartbeat.json` (1 Hz from the webview; `bootError` carries any module-evaluation failure). `LIVECAP_UI_PROBE=1` adds a Rust-side eval probe that reports page state even if the app module never ran. `LIVECAP_CAPTURE_VISIBLE=1` disables capture exclusion (dev only) for screenshot-based checks.
+
+---
+
+# v1.1 Meeting intelligence UI (#80 targeted analysis · #81 review screen · #82 coaching)
+
+Automated coverage (already green, run from this checkout):
+- Rust bridge duration plumbing — `cargo test -p livecap-app bridge`
+  (durationMs = end_ms − start_ms, saturating on an inverted span; carried on
+  both the `caption://event` finalized variant and the host `caption` message).
+- Host → metrics record mapping — `pnpm exec vitest run test/metrics-records`
+  ("me"→"mic"/"them"→"system", durationMs/text/lowConfidence carried; fed
+  through `computeMeetingMetrics` so the talk ratio reflects the mic/system
+  split).
+- Mic-utterance list — `pnpm exec vitest run test/feed-state` (the
+  `micUtterances (#82)` block: only finalized "me" blocks, oldest first; never
+  "them" lines; live partials excluded).
+- Archive metrics rendering — `pnpm --filter @livecap/archive test`
+  (golden file now carries the `## Metrics` section: Talk ratio + Smooth Score).
+
+Headless smoke (no audio): build + run the bundled app and confirm the webview
+module evaluated with all the new top-level wiring (review surface, analysis
+cards, host-event routing):
+```sh
+pnpm build && pnpm tauri build --debug --bundles app
+rm -f ~/Library/Application\ Support/app.livecap.desktop/ui-heartbeat.json
+LIVECAP_UI_PROBE=1 ./target/debug/bundle/macos/LiveCap.app/Contents/MacOS/livecap-app &
+sleep 3; cat ~/Library/Application\ Support/app.livecap.desktop/ui-heartbeat.json
+```
+Expect a ticking heartbeat with `"bootError": null` (a parse/eval error in any of
+src/main.ts, src/review.ts would surface here). Then `pkill -f livecap-app`.
+
+The live E2E below needs a real video with audio and the operator's mic.
+
+## #80 — targeted analysis (click a caption → strategy + reply)
+
+1. Start a session; play a video where someone asks a question. Wait for that
+   caption to finalize in the feed.
+2. Hover the caption block → a **✦** ghost button appears beside the existing
+   📌 / ⧉ / ⟳ actions (mic-side `Me` blocks too). Click it.
+3. An inline card appears under the feed: the clicked line (italic), a
+   **Strategy** section (in your target language, e.g. Korean) and a
+   **Suggested reply** section (in the meeting language, English), each "…"
+   until the model responds (~1–3 s).
+4. **⧉ Copy reply** copies only the reply text; **⟳ Regenerate** re-fires for
+   the same caption; **✕** dismisses the card.
+5. No auto-fire: watch the credit gauge (`invoke("gauge_state")`) — it stays
+   flat until you click ✦, then moves once per analysis. The reply is never
+   auto-sent anywhere (copy-to-clipboard only).
+
+## #81 — post-meeting review screen (+ metrics)
+
+1. Run a session where BOTH sides speak (you on the mic, the video as system),
+   long enough for at least one summary to generate (~60 s). Stop (⏹) — or let
+   the 10-min silence dialog finalize it (same trigger).
+2. On stop the Panel shows the **review surface** (over the live feed): a
+   **Review** tab with two big numbers — **Talk ratio (me)** (a %) and
+   **Smooth Score** (0–100) — plus a talk-ratio bar, the **Summary** list and
+   the **Board** (Decisions / Action items / Open questions) already generated
+   live. The talk ratio should match the actual mic-vs-system speaking split.
+3. **⧉ Copy summary** copies the summary lines; **Open saved file** copies the
+   archive path (open it in Finder/editor).
+4. Confirm the saved `.md` carries the same metrics: it now has a `## Metrics`
+   section with `**Talk ratio (me)** — N%` and `**Smooth Score** — N` between
+   the Board and the Transcript:
+   `cat ~/Documents/LiveCap/"<YYYY-MM-DD HHMM> — <title>.md"`.
+5. Starting a new session dismisses the review surface (back to the live feed).
+
+## #82 — speech-coaching tab (+ TTS)
+
+1. After the session above (where YOU spoke), the review surface's **Coaching**
+   tab lists your OWN utterances only — each row a clock time + the line. The
+   count reads "N of your utterances" (or "You didn't speak in this session").
+   Verify NO system ("them") lines ever appear here (privacy + correctness).
+2. Click one disfluent row (e.g. one with "um"/restarts) → a coaching card
+   appears: the original (struck through), a **Better** native rewrite with the
+   changed spans highlighted green, and an explanation in your target language.
+3. **▶** on the card speaks the `better` sentence aloud via the webview Web
+   Speech API (English voice, by meeting language) — no macOS `say`, no audio
+   files. (If no English voice is installed the call no-ops silently.)
+4. **Review all** coaches every listed utterance in one batch (progress line
+   "Coaching N utterances…", then all items); the gauge moves once for the
+   batch. Degenerate one-word lines (e.g. "Yeah") return unchanged with no
+   model spend (engine #79 short-circuit).
+5. On-demand only: the gauge stays flat until you click a row or Review all.
+
+## Known limits for the reviewer (#80/#81/#82)
+- The coaching list and the analysis target are sourced from the live windowed
+  feed (#57, newest ~200 blocks). Utterances evicted from the window during a
+  very long meeting are not individually clickable for analysis/coaching,
+  though they remain in the archive. The metrics (#81) are computed by the host
+  over the FULL session (all finalized captions), not the windowed feed.
+- TTS uses whatever WKWebView/system voices are installed for the meeting
+  language; an unavailable voice degrades to the default voice or no-ops.
