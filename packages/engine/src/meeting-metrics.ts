@@ -173,7 +173,10 @@ export function computeMeetingMetrics(records: readonly FinalizedRecord[]): Meet
       // glued by an em-dash. Alphabetic tokens only, so a repeated filler is
       // already counted above, not double-counted as a content repair.
       for (let i = 1; i < tokens.length; i++) {
-        if (tokens[i] === tokens[i - 1] && !FILLER_WORDS.has(tokens[i])) repairCount += 1;
+        const token = tokens[i];
+        if (token !== undefined && token === tokens[i - 1] && !FILLER_WORDS.has(token)) {
+          repairCount += 1;
+        }
       }
     } else {
       systemMs += duration;
