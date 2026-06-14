@@ -95,7 +95,7 @@ describe("ExtrasPipeline.coachUtterances — batch (#79)", () => {
     expect(results[1]).toMatchObject({ better: "Yeah", changes: [], explanation: "" });
     expect(results[3]).toMatchObject({ better: "", changes: [], explanation: "" });
     // Real items carry the parsed rewrite.
-    expect(results[0].better).toContain("real-time contextual curation");
-    expect(results[2].better).toContain("real-time contextual curation");
+    expect(results[0]?.better).toContain("real-time contextual curation");
+    expect(results[2]?.better).toContain("real-time contextual curation");
   });
 });

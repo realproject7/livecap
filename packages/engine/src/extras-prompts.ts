@@ -422,7 +422,7 @@ export function parseCoachResult(text: string): CoachResult {
       const stripped = line.replace(/^(?:[-•□▪*·]|\d+[.)])\s*/u, "").trim();
       const parts = stripped.split(CHANGE_SEPARATOR);
       if (parts.length >= 2) {
-        const from = parts[0].trim();
+        const from = (parts[0] ?? "").trim();
         const to = parts.slice(1).join(" ").trim();
         if (from !== "" && to !== "") changes.push({ from, to });
       }
