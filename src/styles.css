@@ -176,7 +176,6 @@ body[data-mode="capsule"] #panel-body {
 }
 
 /* ---- #1 idle Start screen (explicit session start, no auto-run) ---- */
-#welcome-panel,
 #start-panel {
   display: none;
   flex-direction: column;
@@ -188,37 +187,8 @@ body[data-mode="capsule"] #panel-body {
   padding: 24px 28px;
   text-align: center;
 }
-#welcome-panel.visible,
 #start-panel.visible {
   display: flex;
-}
-#welcome-panel {
-  gap: 14px;
-}
-.wp-mark {
-  color: var(--accent-live);
-  font-size: 22px;
-  font-weight: 700;
-  letter-spacing: 0.08em;
-  text-transform: uppercase;
-}
-.wp-tagline {
-  color: var(--text-translation);
-  font-size: 13px;
-  line-height: 1.55;
-  max-width: 280px;
-}
-/* While the Welcome screen owns the Panel, every other surface stays hidden. */
-#welcome-panel.visible ~ #start-panel,
-#welcome-panel.visible ~ #summary,
-#welcome-panel.visible ~ .hairline,
-#welcome-panel.visible ~ #feed-wrap,
-#welcome-panel.visible ~ #live-chip,
-#welcome-panel.visible ~ #pinned,
-#welcome-panel.visible ~ #cards,
-#welcome-panel.visible ~ #chips,
-#welcome-panel.visible ~ #composer {
-  display: none;
 }
 /* When the Start screen owns the Panel, the live surfaces stay hidden. */
 #start-panel.visible ~ #summary,
@@ -242,7 +212,34 @@ body[data-mode="capsule"] #panel-body {
   color: var(--text-translation);
   font-size: 13px;
   line-height: 1.4;
-  margin-bottom: 6px;
+  max-width: 300px;
+  margin-bottom: 2px;
+}
+.sp-guide {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin: 6px 0 4px;
+  max-width: 320px;
+  text-align: left;
+}
+.sp-guide-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 9px;
+  color: var(--text-translation);
+  font-size: 12.5px;
+  line-height: 1.45;
+}
+.sp-guide-row b {
+  color: var(--text-original);
+  font-weight: 600;
+}
+.sp-guide-ico {
+  flex: none;
+  font-size: 13px;
+  line-height: 1.4;
+  opacity: 0.9;
 }
 .sp-lang-label {
   color: var(--text-meta);

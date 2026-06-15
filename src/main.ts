@@ -95,14 +95,14 @@ document.body.innerHTML = `
       <button id="btn-close" class="btn" aria-label="Hide LiveCap">${ICONS.close}</button>
     </div>
     <div id="panel-body">
-      <div id="welcome-panel">
-        <div class="wp-mark">LiveCap</div>
-        <div class="wp-tagline">Live captions and translation for everything you hear — private, on this Mac.</div>
-        <button id="wp-begin" type="button" class="sp-start">Begin</button>
-      </div>
       <div id="start-panel">
         <div class="sp-mark">LiveCap</div>
-        <div class="sp-sub">Live captions and translation, on this Mac.</div>
+        <div class="sp-sub">Live captions and translation for everything you hear — private, on this Mac.</div>
+        <div class="sp-guide">
+          <div class="sp-guide-row"><span class="sp-guide-ico">🔊</span><span>Captions what you hear <b>and</b> what you say, in real time.</span></div>
+          <div class="sp-guide-row"><span class="sp-guide-ico">🌐</span><span>Translates each line into your language, right underneath.</span></div>
+          <div class="sp-guide-row"><span class="sp-guide-ico">🔒</span><span>On-device &amp; private — hidden from screen sharing.</span></div>
+        </div>
         <label class="sp-lang-label" for="sp-lang">Translate into</label>
         <select id="sp-lang" class="sp-lang" aria-label="Target language for this session"></select>
         <button id="sp-start" type="button" class="sp-start">Start captioning</button>
@@ -176,8 +176,6 @@ const stripSrc = document.querySelector<HTMLDivElement>("#strip-view .src") as H
 const stripTr = document.querySelector<HTMLDivElement>("#strip-view .tr") as HTMLDivElement;
 const capsuleTxt = document.querySelector<HTMLSpanElement>("#capsule-view .txt") as HTMLSpanElement;
 const onboardingEl = $<HTMLDivElement>("onboarding");
-const welcomePanel = $<HTMLDivElement>("welcome-panel");
-const beginBtn = $<HTMLButtonElement>("wp-begin");
 const startPanel = $<HTMLDivElement>("start-panel");
 const startLangSelect = $<HTMLSelectElement>("sp-lang");
 const startBtn = $<HTMLButtonElement>("sp-start");
@@ -269,14 +267,6 @@ async function startSession(): Promise<void> {
   await sessionCommand("session_start");
 }
 
-// Per-launch: the Welcome screen is shown once on open, then "Begin" reveals
-// the Start screen. Not persisted — every launch opens on Welcome.
-let welcomeSeen = false;
-beginBtn.addEventListener("click", () => {
-  welcomeSeen = true;
-  render();
-});
-
 startBtn.addEventListener("click", () => void startSession());
 
 btnPause.addEventListener("click", () => {
@@ -302,20 +292,15 @@ function render(): void {
   document.body.dataset.mode = state.mode;
   document.body.dataset.phase = phase;
 
-  // #1: while idle, the Panel shows a launch Welcome screen first, then the
-  // Start screen (explicit start — no auto-run). Both hide while onboarding or
-  // the post-meeting review owns the Panel. `welcomeSeen` is per-launch (not
-  // persisted): the user passes the welcome once, after which idle returns to
-  // the Start screen directly. First-run onboarding sets it (onboarding IS the
-  // intro), so setup flows straight to Start, not back through Welcome.
-  const baseIdle =
+  // #1: while idle, the Panel shows the Start/home screen — brand, a short
+  // guide, the per-session language pick and the "Start captioning" CTA. It
+  // never auto-runs; the session begins only when the user presses Start. The
+  // screen hides while onboarding or the post-meeting review owns the Panel.
+  const showStart =
     phase === "idle" &&
     capabilities.captioning &&
     !onboardingEl.classList.contains("active") &&
     !review.isOpen();
-  const showWelcome = baseIdle && !welcomeSeen;
-  const showStart = baseIdle && welcomeSeen;
-  welcomePanel.classList.toggle("visible", showWelcome);
   startPanel.classList.toggle("visible", showStart);
   if (showStart) renderStartPanel();
   startBtn.disabled = !capabilities.captioning;
@@ -1121,10 +1106,9 @@ function maybeStartOnboarding(): void {
       host: onboardingEl,
       settings: appSettings,
       onDone: ({ targetLanguage, engine }) => {
-        // #1: onboarding IS the first-run intro, so skip the Welcome screen and
-        // land straight on the idle Start screen — still no auto-start; the
-        // user presses Start (here or the tray) when ready.
-        welcomeSeen = true;
+        // #1: onboarding seeds the first language default (#2) and lands on the
+        // idle Start screen — it no longer auto-starts a session. The user
+        // presses Start (here or the tray) when ready.
         void persistSettings({
           ...appSettings,
           targetLanguage,
