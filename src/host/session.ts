@@ -675,11 +675,15 @@ export class HostSession {
 
     this.accountant?.recordMeetingTime(now - this.startedAtMs);
 
-    try {
-      await this.engine?.stop();
-    } catch (error) {
-      this.emit({ type: "status", detail: `engine stop failed (${errorDetail(error)})` });
-    }
+    // NOTE (#82): the engine is intentionally NOT stopped here. The post-meeting
+    // review screen (which opens AFTER this `stopped` event) has a Coaching tab
+    // that round-trips through the live engine; tearing it down on stop is what
+    // made coaching hang forever (the host process used to exit, too). The engine
+    // is reaped instead on process teardown — `dispose()` (signal/exit) or when
+    // the Rust shell closes stdin and a fresh session starts. Captures and the
+    // pipeline are already gone (Rust side); only the cheap engine handle lingers.
+    // `stopping` stays latched (a second stop is a no-op); post-meeting `onCoach`
+    // doesn't gate on it, so coaching still runs after the session ends.
     this.emit({ type: "stopped" });
   }
 
@@ -693,6 +697,12 @@ export class HostSession {
   dispose(): void {
     this.stopping = true;
     for (const handle of this.intervals.splice(0)) clearInterval(handle);
+    // Reap the engine here (#82): since `stop()` now keeps the engine warm for
+    // post-meeting coaching, teardown is the one place the engine is torn down.
+    // `dispose()` is the synchronous force-kill (local llama-server child);
+    // `stop()` SIGTERMs and awaits it (best-effort, fire-and-forget — the CLI
+    // engine has no `dispose`, only `stop`, so this also kills its child).
     this.engine?.dispose?.();
+    void this.engine?.stop().catch(() => undefined);
   }
 }
