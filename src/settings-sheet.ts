@@ -13,6 +13,7 @@ import {
   POOL_PRESETS,
   type AppSettings,
   type CaptionSize,
+  type CapsuleContent,
   type EnginePref,
 } from "./app-settings";
 import { LANGUAGES, languageByCode } from "./languages";
@@ -97,6 +98,14 @@ export function createSettingsSheet(options: SettingsSheetOptions): SettingsShee
         </span>
         <label class="sh-check sh-right"><input type="checkbox" id="sh-clickthrough" /> Click-through (Strip/Capsule)</label>
       </div>
+      <div class="sh-row">
+        <span class="sh-row-label">Capsule shows</span>
+        <span class="sh-sizes">
+          <button class="sh-capsule" data-capsule="caption">Caption</button>
+          <button class="sh-capsule" data-capsule="translation">Translation</button>
+          <button class="sh-capsule" data-capsule="both">Both</button>
+        </span>
+      </div>
 
       <div class="sh-section">Channels</div>
       <label class="sh-check"><input type="checkbox" id="sh-cap-system" /> Capture system audio (them)</label>
@@ -129,6 +138,7 @@ export function createSettingsSheet(options: SettingsSheetOptions): SettingsShee
 
   const segButtons = Array.from(host.querySelectorAll<HTMLButtonElement>(".sh-seg-btn"));
   const sizeButtons = Array.from(host.querySelectorAll<HTMLButtonElement>(".sh-size"));
+  const capsuleButtons = Array.from(host.querySelectorAll<HTMLButtonElement>(".sh-capsule"));
   const gaugeFill = el<HTMLDivElement>(host, "#sh-gauge-fill");
   const gaugeAmount = el<HTMLSpanElement>(host, "#sh-gauge-amount");
   const gaugeMeta = el<HTMLDivElement>(host, "#sh-gauge-meta");
@@ -166,6 +176,9 @@ export function createSettingsSheet(options: SettingsSheetOptions): SettingsShee
     if (LANGUAGES.some((l) => l.code === lang.code)) langSelect.value = lang.code;
     for (const btn of sizeButtons) {
       btn.setAttribute("aria-pressed", String(btn.dataset.size === s.captionSize));
+    }
+    for (const btn of capsuleButtons) {
+      btn.setAttribute("aria-pressed", String(btn.dataset.capsule === s.capsuleContent));
     }
     clickThrough.checked = options.getClickThrough();
     // #53: the last enabled channel locks so a session always has one.
@@ -230,6 +243,11 @@ export function createSettingsSheet(options: SettingsSheetOptions): SettingsShee
       const size = btn.dataset.size as CaptionSize;
       applyCaptionSize(size); // applies to the live feed immediately
       save({ captionSize: size });
+    });
+  }
+  for (const btn of capsuleButtons) {
+    btn.addEventListener("click", () => {
+      save({ capsuleContent: btn.dataset.capsule as CapsuleContent });
     });
   }
   clickThrough.addEventListener("change", () => options.setClickThrough(clickThrough.checked));

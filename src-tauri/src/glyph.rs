@@ -15,7 +15,6 @@ pub const SIZE: u32 = 36;
 const AMBER: [u8; 3] = [0xE8, 0xB8, 0x4B];
 /// Mid-gray reads on both light and dark menu bars in the non-template icon.
 const GRAY: [u8; 3] = [0x80, 0x80, 0x80];
-const BLACK: [u8; 3] = [0x00, 0x00, 0x00];
 
 fn sdf_circle(px: f64, py: f64, cx: f64, cy: f64, r: f64) -> f64 {
     ((px - cx).powi(2) + (py - cy).powi(2)).sqrt() - r
@@ -38,7 +37,10 @@ fn coverage(d: f64) -> f64 {
 
 /// Render the glyph as SIZE×SIZE RGBA (row-major, premultiplication-free).
 pub fn menubar_icon(live: bool) -> Vec<u8> {
-    let (dot_color, bar_color) = if live { (AMBER, GRAY) } else { (BLACK, BLACK) };
+    // Idle uses mid-gray as a NON-template image (see tray.rs): a black template
+    // glyph was rendering invisibly in the menu bar (#95). Gray reads on both
+    // light and dark bars. Live keeps the amber dot.
+    let (dot_color, bar_color) = if live { (AMBER, GRAY) } else { (GRAY, GRAY) };
     let mut rgba = vec![0u8; (SIZE * SIZE * 4) as usize];
     for y in 0..SIZE {
         for x in 0..SIZE {
@@ -82,10 +84,12 @@ mod tests {
     }
 
     #[test]
-    fn template_icon_is_black_with_opaque_shapes() {
+    fn idle_icon_is_gray_with_opaque_shapes() {
+        // #95: idle is a NON-template gray glyph (black template rendered
+        // invisibly in the menu bar).
         let rgba = menubar_icon(false);
         let dot = pixel(&rgba, 6, 12);
-        assert_eq!(&dot[..3], &[0, 0, 0]);
+        assert_eq!(&dot[..3], &GRAY);
         assert_eq!(dot[3], 255);
         // Top bar center is solid (#8: both bars are filled now).
         assert_eq!(pixel(&rgba, 20, 11)[3], 255);

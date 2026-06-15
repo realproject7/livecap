@@ -94,7 +94,9 @@ pub fn create(app: &AppHandle, initial_mode: Mode, initial_pinned: bool) -> taur
 
     let tray = TrayIconBuilder::with_id(TRAY_ID)
         .icon(icon(false))
-        .icon_as_template(true)
+        // #95: NON-template gray glyph — the black template icon rendered
+        // invisibly in the menu bar. Gray reads on light and dark bars.
+        .icon_as_template(false)
         .tooltip("LiveCap")
         .menu(&menu)
         .show_menu_on_left_click(true)
@@ -178,15 +180,15 @@ pub fn sync_mode(app: &AppHandle, mode: Mode) {
     }
 }
 
-/// Live state: amber glyph while captioning (template glyph otherwise).
+/// Live state: amber glyph while captioning, gray otherwise.
 /// Driven by the session lifecycle (#11, session.rs).
 pub fn set_live(app: &AppHandle, live: bool) {
     let shell = app.state::<Shell>();
     shell.live.store(live, Ordering::Relaxed);
     if let Some(handles) = app.try_state::<TrayHandles>() {
-        // The live icon keeps its amber accent, so it must not be a
-        // template image (macOS would flatten it to monochrome).
-        let _ = handles.tray.set_icon_as_template(!live);
+        // #95: both states are non-template (idle gray, live amber) so the
+        // glyph stays visible — the black template idle icon was invisible.
+        let _ = handles.tray.set_icon_as_template(false);
         let _ = handles.tray.set_icon(Some(icon(live)));
         let _ = handles
             .captioning

@@ -37,6 +37,10 @@ fn default_caption_size() -> String {
     "m".into()
 }
 
+fn default_capsule_content() -> String {
+    "translation".into()
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
 pub struct AppSettings {
@@ -55,6 +59,8 @@ pub struct AppSettings {
     pub auto_switch: bool,
     /// Caption size step: "s" | "m" | "l" (§8.7 "Aa Aa Aa").
     pub caption_size: String,
+    /// Capsule (one-line pill) content: "caption" | "translation" | "both" (#97).
+    pub capsule_content: String,
     /// Archive group (§8.9 / design 07).
     pub archive_auto_save: bool,
     /// None ⇒ ~/Documents/LiveCap (the session default).
@@ -77,6 +83,7 @@ impl Default for AppSettings {
             reset_day: default_reset_day(),
             auto_switch: default_true(),
             caption_size: default_caption_size(),
+            capsule_content: default_capsule_content(),
             archive_auto_save: default_true(),
             archive_folder: None,
             archive_retention_days: 0,
@@ -101,6 +108,9 @@ impl AppSettings {
         self.reset_day = self.reset_day.clamp(1, 28);
         if !matches!(self.caption_size.as_str(), "s" | "m" | "l") {
             self.caption_size = default_caption_size();
+        }
+        if !matches!(self.capsule_content.as_str(), "caption" | "translation" | "both") {
+            self.capsule_content = default_capsule_content();
         }
         if self
             .archive_folder
@@ -215,6 +225,7 @@ mod tests {
             reset_day: 15,
             auto_switch: false,
             caption_size: "l".into(),
+            capsule_content: "both".into(),
             archive_auto_save: false,
             archive_folder: Some("/tmp/livecap-archives".into()),
             archive_retention_days: 90,
@@ -247,6 +258,7 @@ mod tests {
         assert_eq!(d.reset_day, 1);
         assert!(d.auto_switch);
         assert_eq!(d.caption_size, "m");
+        assert_eq!(d.capsule_content, "translation"); // #97 default
         assert!(d.archive_auto_save);
         assert_eq!(d.archive_retention_days, 0); // keep forever
         assert!(d.capture_system); // #53: both channels on by default
