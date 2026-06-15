@@ -527,13 +527,14 @@ async fn transcribe_worker(
                         }
                     }
                 }
+                // Never log caption content (SECURITY.md / EPIC #1) — metadata only.
                 log::info!(
-                    "[{}] finalized {}..{}ms ({} ms after segment close): '{}'",
+                    "[{}] finalized {}..{}ms ({} ms after segment close, {} chars)",
                     req.channel,
                     start_ms,
                     end_ms,
                     req.queued_at.elapsed().as_millis(),
-                    text
+                    text.chars().count()
                 );
                 CaptionKind::Finalized {
                     text,
