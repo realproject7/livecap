@@ -22,3 +22,9 @@ export type {
   BriefUpdate,
   FinalBrief,
 } from "./types";
+
+// Issue #98 — Dashboard data layer: parse saved sessions + aggregate stats (headless).
+export { parseSession } from "./parse";
+export type { ParsedSession, ParsedSessionMeta } from "./parse";
+export { aggregateSessions } from "./dashboard";
+export type { DashboardStats, SessionIndexEntry, TrendPoint } from "./dashboard";
