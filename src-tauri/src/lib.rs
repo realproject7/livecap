@@ -306,7 +306,12 @@ pub fn run() {
 
             // Screen-capture exclusion (EPIC launch gate) + Spaces/fullscreen
             // behavior + window level. Setup runs on the main thread.
-            window.set_content_protected(true)?;
+            // LIVECAP_CAPTURE_VISIBLE=1 disables BOTH exclusion mechanisms
+            // (Tauri content-protection here + NSWindow sharingType in
+            // platform::configure_overlay) — DEV/VERIFICATION ONLY (#54).
+            if std::env::var("LIVECAP_CAPTURE_VISIBLE").as_deref() != Ok("1") {
+                window.set_content_protected(true)?;
+            }
             platform::configure_overlay(&window);
 
             tray::create(app.handle(), initial_mode)?;
