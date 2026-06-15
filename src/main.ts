@@ -1109,6 +1109,10 @@ function maybeStartOnboarding(): void {
         // #1: onboarding seeds the first language default (#2) and lands on the
         // idle Start screen — it no longer auto-starts a session. The user
         // presses Start (here or the tray) when ready.
+        // The app boots unpinned during onboarding so the overlay can't cover
+        // the macOS permission sheets; now that setup is done, restore the saved
+        // pin preference.
+        void invoke("reapply_pin").catch(() => undefined);
         void persistSettings({
           ...appSettings,
           targetLanguage,

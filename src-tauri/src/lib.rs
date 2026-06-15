@@ -123,6 +123,22 @@ fn set_pinned(app: AppHandle, pinned: bool) {
     overlay::set_pinned(&app, pinned);
 }
 
+/// Re-apply the persisted pin preference to the window. main.ts calls this once
+/// first-run onboarding completes: the app boots unpinned during onboarding (so
+/// the overlay can't cover the macOS permission sheets), then restores the saved
+/// pin here.
+#[tauri::command]
+fn reapply_pin(app: AppHandle) {
+    let pinned = app
+        .state::<Shell>()
+        .inner()
+        .config
+        .lock()
+        .expect("config lock")
+        .pinned;
+    overlay::set_pinned(&app, pinned);
+}
+
 #[tauri::command]
 fn begin_drag(app: AppHandle) {
     overlay::begin_drag(&app);
@@ -271,6 +287,7 @@ pub fn run() {
             cycle_mode,
             set_click_through,
             set_pinned,
+            reapply_pin,
             begin_drag,
             end_drag,
             hide_overlay,
@@ -318,7 +335,18 @@ pub fn run() {
             // window's tauri.conf.json declares alwaysOnTop/visibleOnAllWorkspaces
             // = true; if the operator left it unpinned last run we flip both
             // off below so the restored state matches.
-            let initial_pinned = cfg.pinned;
+            //
+            // BUT never boot pinned into first-run onboarding: a pinned overlay
+            // (always-on-top) sits above the macOS audio-permission sheets and
+            // hides them, so "Grant audio access" appears to do nothing. While
+            // onboarding is pending the window stays a normal, non-floating
+            // window; main.ts re-applies the saved pin via `reapply_pin` once
+            // setup finishes. The persisted preference (cfg.pinned) is untouched.
+            let onboarding_done = app
+                .state::<settings::SettingsState>()
+                .snapshot()
+                .onboarding_complete;
+            let initial_pinned = cfg.pinned && onboarding_done;
             app.manage(Shell::new(config_path, cfg, initial_mode));
 
             // Screen-capture exclusion (EPIC launch gate) + Spaces/fullscreen
