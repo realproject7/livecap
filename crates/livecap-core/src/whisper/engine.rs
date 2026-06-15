@@ -26,14 +26,13 @@ const MIN_SAMPLES: usize = 16000 + 1600; // 1.1 s at 16 kHz
 /// feed, summary, and coaching list.
 ///
 /// EMPIRICALLY TUNED — adjust live against real captures (the operator owns the
-/// Metal/whisper-run + real-audio loop). Note the scale: `avg_confidence` (see
-/// `transcribe`) is a TEXT-LENGTH heuristic, not whisper's logprob — it is
-/// `segment_len/100` capped at 0.9, plus 0.1. So a ~25-char phantom scores ~0.35
-/// while a ~45-char real sentence scores ~0.55. The cited #92 phantoms ("I love
-/// musicals", "You ate gin, Robin") are short and land at/under this floor; real
-/// single sentences clear it. 0.35 is the CI-verified seed against the `tiny`
-/// model; the operator can raise it once a larger model's confidences are known.
-const CONFIDENCE_FLOOR: f32 = 0.35;
+/// Metal/whisper-run + real-audio loop). Scale: `avg_confidence` (see
+/// `transcribe`) is now the mean of whisper's REAL per-token probabilities
+/// (`full_get_token_prob`), in `0.0..=1.0` — NOT the old text-length proxy.
+/// Real speech averages ~0.85+; silence/noise hallucinations score lower.
+/// 0.5 keeps confident speech (including short real phrases) and drops weak
+/// phantoms; raise toward 0.6 if phantoms still leak, lower if real speech is cut.
+const CONFIDENCE_FLOOR: f32 = 0.5;
 
 /// Extra confidence margin required to TRUST an auto-detected language (#93).
 ///
@@ -43,10 +42,10 @@ const CONFIDENCE_FLOOR: f32 = 0.35;
 /// it only guards Auto mode. An auto-detected utterance whose confidence sits
 /// in `[CONFIDENCE_FLOOR, AUTO_DETECT_CONFIDENCE_FLOOR)` is dropped rather than
 /// emitted with a possibly-wrong language label (which would mis-route the
-/// channel and translate in the wrong direction). EMPIRICALLY TUNED; kept just
-/// above the plain floor so only the shortest/borderline auto detections — the
-/// ones most prone to misdetection — are dropped, while real speech survives.
-const AUTO_DETECT_CONFIDENCE_FLOOR: f32 = 0.4;
+/// channel and translate in the wrong direction). On the real-token-probability
+/// scale (see `CONFIDENCE_FLOOR`), kept just above the plain floor so only
+/// borderline auto detections are dropped while confident speech survives.
+const AUTO_DETECT_CONFIDENCE_FLOOR: f32 = 0.6;
 
 /// A transcribed utterance.
 #[derive(Debug, Clone)]
@@ -185,13 +184,24 @@ impl WhisperEngine {
                 Err(_) => continue,
             };
 
-            // Heuristic confidence based on segment text length (from
-            // Meetily; whisper-rs does not expose token probabilities here).
-            let segment_length = segment_text.len() as f32;
-            let segment_confidence = if segment_length > 0.0 {
-                (segment_length / 100.0).min(0.9) + 0.1
+            // Real per-token confidence (#92): average whisper's token
+            // probabilities for this segment. Hallucinations on silence/noise
+            // score low here; real speech is high (~0.85+). This replaces the
+            // old text-length heuristic, which only measured length and so
+            // dropped legitimate SHORT phrases while passing long phantoms.
+            let n_tokens = state.full_n_tokens(i).unwrap_or(0);
+            let mut seg_prob_sum = 0.0f32;
+            let mut tok_count = 0u32;
+            for t in 0..n_tokens {
+                if let Ok(p) = state.full_get_token_prob(i, t) {
+                    seg_prob_sum += p;
+                    tok_count += 1;
+                }
+            }
+            let segment_confidence = if tok_count > 0 {
+                seg_prob_sum / tok_count as f32
             } else {
-                0.1
+                0.0
             };
             total_confidence += segment_confidence;
             segment_count += 1;
