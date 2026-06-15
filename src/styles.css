@@ -240,9 +240,16 @@ body[data-phase="paused"] #summary .lbl {
   /* rule 4: motion is fade, never slide — opacity only */
   transition: opacity var(--fade) ease;
 }
+/* #4: mic ("me") blocks mirror the left blocks cleanly — hug the right edge
+   (align-self handles the offset; no stray horizontal margin), text right-aligned.
+   The row reverses so the ghost actions sit on the inner (left) side, mirroring
+   the them-side layout instead of colliding with the right edge. */
 .cap.me {
   align-self: flex-end;
   text-align: right;
+}
+.cap.me .row {
+  flex-direction: row-reverse;
 }
 .cap.fading-in,
 .card.fading-in {
@@ -252,9 +259,6 @@ body[data-phase="paused"] #summary .lbl {
   display: flex;
   align-items: baseline;
   gap: 8px;
-}
-.cap.me .row {
-  justify-content: flex-end;
 }
 .cap .src {
   color: var(--text-original);
@@ -320,10 +324,11 @@ body[data-phase="paused"] #summary .lbl {
   display: inline;
 }
 
-/* ghost actions: appear on hover only (rule 1) */
+/* ghost actions: appear on hover only (rule 1). #1: larger hit area + glyph so
+   they are easy to see and tap. */
 .cap .ghost {
   display: inline-flex;
-  gap: 4px;
+  gap: 2px;
   opacity: 0;
   pointer-events: none;
   transition: opacity var(--fade) ease;
@@ -336,15 +341,26 @@ body[data-phase="paused"] #summary .lbl {
   display: none;
 }
 .g {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
   border: none;
+  border-radius: 7px;
   background: none;
   color: var(--text-meta);
-  font-size: 11px;
-  padding: 0 2px;
+  font-size: 15px;
+  line-height: 1;
+  padding: 0;
   cursor: pointer;
+  transition:
+    color var(--fade) ease,
+    background var(--fade) ease;
 }
 .g:hover {
   color: var(--text-original);
+  background: rgba(255, 255, 255, 0.1);
 }
 .cap.is-pinned .g-pin {
   color: var(--accent-live);
@@ -401,11 +417,47 @@ body[data-mode="capsule"] #live-chip {
   overflow-y: auto;
 }
 .card {
+  position: relative;
   background: rgba(255, 255, 255, 0.05);
   border-radius: 12px;
   padding: 10px 12px;
   margin-bottom: 8px;
   transition: opacity var(--fade) ease;
+}
+/* #3: a clear, larger ✕ close at the TOP-RIGHT of every inline card. Shared by
+   reply / quick-translate / analysis cards (and the review's coach cards). */
+.card-x,
+.coach-card .card-x {
+  position: absolute;
+  top: 6px;
+  right: 6px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  border: none;
+  border-radius: 8px;
+  background: none;
+  color: var(--text-meta);
+  cursor: pointer;
+  transition:
+    color var(--fade) ease,
+    background var(--fade) ease;
+}
+.card-x svg,
+.coach-card .card-x svg {
+  width: 14px;
+  height: 14px;
+}
+.card-x:hover,
+.coach-card .card-x:hover {
+  color: var(--text-original);
+  background: rgba(255, 255, 255, 0.1);
+}
+.card-label {
+  /* keep the label clear of the absolute top-right ✕ */
+  padding-right: 30px;
 }
 .card-body {
   color: var(--text-original);
@@ -417,21 +469,18 @@ body[data-mode="capsule"] #live-chip {
 }
 .card-actions {
   display: flex;
-  gap: 10px;
+  gap: 14px;
 }
 .card-actions button {
   border: none;
   background: none;
   color: var(--text-meta);
-  font-size: 11px;
-  padding: 0;
+  font-size: 12px;
+  padding: 2px 0;
   cursor: pointer;
 }
 .card-actions button:hover {
   color: var(--text-original);
-}
-.card-actions .c-close {
-  margin-left: auto;
 }
 
 /* ---- reply chips ---- */
@@ -516,30 +565,45 @@ body[data-mode="capsule"] #live-chip {
 }
 
 /* ---- strip / capsule views (latest line(s) from the same stream) ---- */
+/* #6: TV-subtitle layout (design/screens/03-strip-mode.png). Source caption on
+   top (bright), translation underneath (one tone down), both centered and FILLING
+   the strip width — they wrap rather than truncate so the whole line is readable. */
 #strip-view {
   display: none;
   flex: 1;
   min-height: 0;
   flex-direction: column;
   justify-content: center;
+  align-items: center;
   text-align: center;
-  padding: 10px 22px;
+  padding: 10px 24px;
   overflow: hidden;
 }
 body[data-mode="strip"] #strip-view {
   display: flex;
 }
 #strip-view .src {
-  font-size: 16px;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
+  width: 100%;
+  color: var(--text-original);
+  font-size: 17px;
+  font-weight: 500;
+  line-height: 1.35;
+  overflow-wrap: anywhere;
+}
+#strip-view .src.t-partial {
+  color: var(--text-partial);
+  font-weight: 400;
 }
 #strip-view .tr {
-  margin-top: 4px;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
+  width: 100%;
+  margin-top: 5px;
+  color: var(--text-translation);
+  font-size: 14.5px;
+  line-height: 1.3;
+  overflow-wrap: anywhere;
+}
+#strip-view .tr.empty {
+  display: none;
 }
 
 #capsule-view {
@@ -1037,14 +1101,27 @@ body[data-mode="capsule"] #review {
 }
 .review-close {
   margin-left: auto;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 30px;
+  height: 30px;
   border: none;
+  border-radius: 8px;
   background: none;
   color: var(--text-meta);
-  font-size: 13px;
   cursor: pointer;
+  transition:
+    color var(--fade) ease,
+    background var(--fade) ease;
+}
+.review-close svg {
+  width: 15px;
+  height: 15px;
 }
 .review-close:hover {
   color: var(--text-original);
+  background: rgba(255, 255, 255, 0.1);
 }
 .review-body {
   flex: 1;
@@ -1183,6 +1260,7 @@ body[data-mode="capsule"] #review {
   margin-top: 12px;
 }
 .coach-card {
+  position: relative;
   background: rgba(255, 255, 255, 0.05);
   border-radius: 12px;
   padding: 10px 12px;
@@ -1191,6 +1269,22 @@ body[data-mode="capsule"] #review {
 }
 .coach-card.fading-in {
   opacity: 0;
+}
+.coach-progress {
+  padding-right: 30px;
+}
+.coach-retry {
+  border: none;
+  background: rgba(255, 255, 255, 0.08);
+  color: var(--text-translation);
+  font-size: 12px;
+  padding: 5px 12px;
+  border-radius: 8px;
+  margin-top: 6px;
+  cursor: pointer;
+}
+.coach-retry:hover {
+  color: var(--text-original);
 }
 .coach-item {
   padding: 6px 0;
@@ -1224,12 +1318,15 @@ body[data-mode="capsule"] #review {
 }
 .coach-play {
   flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
   border: none;
   background: rgba(255, 255, 255, 0.08);
   color: var(--text-translation);
-  font-size: 11px;
-  width: 22px;
-  height: 22px;
+  font-size: 14px;
+  width: 30px;
+  height: 30px;
   border-radius: 50%;
   cursor: pointer;
 }

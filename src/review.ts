@@ -16,6 +16,11 @@
 
 import type { BoardWire, CoachingItemWire } from "./protocol";
 
+/** Shared close glyph (matches main.ts ICONS.close) so review cards get the same
+ *  clear ✕ as the inline feed cards (#1/#3). */
+const CLOSE_ICON =
+  '<svg viewBox="0 0 12 12" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" fill="none" aria-hidden="true"><path d="M3 3l6 6M9 3l-6 6"/></svg>';
+
 /** One of the user's own utterances, as listed in the coaching tab. */
 export interface MicUtterance {
   /** Caption id (the host resolves its text by this). */
@@ -123,7 +128,7 @@ export function buildReview(callbacks: ReviewCallbacks): ReviewSurface {
         <button class="review-tab" data-tab="summary" aria-selected="true">Review</button>
         <button class="review-tab" data-tab="coaching" aria-selected="false">Coaching</button>
       </div>
-      <button class="review-close" title="Back to live">✕</button>
+      <button class="review-close" title="Close — back to live" aria-label="Close">${CLOSE_ICON}</button>
     </div>
     <div class="review-body">
       <div class="review-pane" data-pane="summary">
@@ -143,14 +148,14 @@ export function buildReview(callbacks: ReviewCallbacks): ReviewSurface {
         <h3 class="review-h">Board</h3>
         <div class="review-board" id="rv-board"></div>
         <div class="review-actions">
-          <button id="rv-copy">⧉ Copy summary</button>
-          <button id="rv-open">Open saved file</button>
+          <button id="rv-copy" title="Copy the summary">⧉ Copy summary</button>
+          <button id="rv-open" title="Copy the saved file path">Open saved file</button>
         </div>
       </div>
       <div class="review-pane" data-pane="coaching" hidden>
         <div class="coach-toolbar">
           <span class="t-meta" id="coach-count"></span>
-          <button id="coach-all">Review all</button>
+          <button id="coach-all" title="Coach all your utterances">Review all</button>
         </div>
         <div class="coach-list" id="coach-list"></div>
         <div class="coach-cards" id="coach-cards"></div>
@@ -210,11 +215,16 @@ export function buildReview(callbacks: ReviewCallbacks): ReviewSurface {
     const el = document.createElement("div");
     el.className = "coach-card fading-in";
     el.innerHTML = `
+      <button class="card-x" title="Close" aria-label="Close">${CLOSE_ICON}</button>
       <div class="coach-progress t-meta">Coaching ${String(ids.length)} utterance${ids.length === 1 ? "" : "s"}…</div>
       <div class="coach-items"></div>
     `;
     const itemsEl = el.querySelector<HTMLDivElement>(".coach-items") as HTMLDivElement;
     const progressEl = el.querySelector<HTMLDivElement>(".coach-progress") as HTMLDivElement;
+    el.querySelector<HTMLButtonElement>(".card-x")?.addEventListener("click", () => {
+      coachingCards.delete(cardId);
+      el.remove();
+    });
     coachCardsEl.prepend(el);
     requestAnimationFrame(() => el.classList.remove("fading-in"));
 
@@ -224,9 +234,21 @@ export function buildReview(callbacks: ReviewCallbacks): ReviewSurface {
       for (const item of items) renderCoachItem(itemsEl, item);
       coachingCards.delete(cardId);
     };
+    // On failure: show an error state with a Retry that re-runs coaching for the
+    // same ids (#5 — extrasFailed must clear the spinner, not hang forever).
     card.fail = (detail) => {
-      progressEl.textContent = `unavailable (${detail})`;
       coachingCards.delete(cardId);
+      progressEl.textContent = `Coaching unavailable (${detail})`;
+      itemsEl.replaceChildren();
+      const retry = document.createElement("button");
+      retry.className = "coach-retry";
+      retry.title = "Retry";
+      retry.textContent = "⟳ Retry";
+      retry.addEventListener("click", () => {
+        el.remove();
+        runCoaching(ids);
+      });
+      itemsEl.appendChild(retry);
     };
   }
 

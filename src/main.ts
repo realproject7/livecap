@@ -445,11 +445,34 @@ function requestAnalysis(captionId: number, cardId: number): void {
 
 function syncMiniViews(): void {
   const latest = feed.latest();
-  stripSrc.textContent = latest?.source ?? "";
-  stripSrc.classList.toggle("t-partial", latest?.state === "streaming");
-  stripSrc.classList.toggle("t-original", latest?.state !== "streaming");
-  stripTr.textContent = latest?.translation ?? "";
-  capsuleTxt.textContent = latest?.source ?? (sessionRunning() ? "Listening…" : "LiveCap");
+
+  // #6 Strip (TV-subtitle style, design/screens/03-strip-mode.png): the latest
+  // finalized line as SOURCE (caption) on top + TRANSLATION underneath, both
+  // filling the strip width. A still-streaming partial shows in the partial tone
+  // with no translation yet.
+  const streaming = latest?.state === "streaming";
+  stripSrc.textContent = latest?.source ?? (sessionRunning() ? "Listening…" : "LiveCap");
+  stripSrc.classList.toggle("t-partial", streaming);
+  stripSrc.classList.toggle("t-original", !streaming);
+  const stripTranslation = latest?.translation ?? "";
+  stripTr.textContent = stripTranslation;
+  stripTr.classList.toggle("empty", stripTranslation === "");
+
+  // #7 Capsule (one-line 44px pill, design/screens/04-capsule-mode.png): show the
+  // most useful single line — the latest TRANSLATION, since that is the value the
+  // user can't otherwise understand. Fall back to the source when no translation
+  // exists yet (still streaming, pending, or failed). The source rides along as a
+  // native tooltip; the live dot already marks the channel.
+  const capsuleLine =
+    latest === null
+      ? sessionRunning()
+        ? "Listening…"
+        : "LiveCap"
+      : latest.translation !== ""
+        ? latest.translation
+        : latest.source;
+  capsuleTxt.textContent = capsuleLine;
+  capsuleTxt.title = latest?.source ?? "";
 }
 
 /* ---- inline result cards (reply chips + quick translate, §8.5) ---- */
@@ -474,12 +497,12 @@ function newCard(label: string, intent?: ReplyIntentWire): number {
   const el = document.createElement("div");
   el.className = "card fading-in";
   el.innerHTML = `
+    <button class="card-x" title="Close" aria-label="Close">${ICONS.close}</button>
     <div class="card-label t-meta"></div>
     <div class="card-body"></div>
     <div class="card-actions">
-      <button class="c-copy">⧉ Copy</button>
-      ${intent !== undefined ? '<button class="c-again">⟳ Another</button>' : ""}
-      <button class="c-close">✕</button>
+      <button class="c-copy" title="Copy">⧉ Copy</button>
+      ${intent !== undefined ? '<button class="c-again" title="Generate another">⟳ Another</button>' : ""}
     </div>
   `;
   const labelEl = el.querySelector<HTMLDivElement>(".card-label");
@@ -492,7 +515,7 @@ function newCard(label: string, intent?: ReplyIntentWire): number {
       () => showToast("Copy failed"),
     );
   });
-  el.querySelector<HTMLButtonElement>(".c-close")?.addEventListener("click", () => {
+  el.querySelector<HTMLButtonElement>(".card-x")?.addEventListener("click", () => {
     pendingCards.forEach((card, key) => {
       if (card.el === el) pendingCards.delete(key);
     });
@@ -531,6 +554,7 @@ function newAnalysisCard(targetSource: string, onRegenerate: () => void): Analys
   const el = document.createElement("div");
   el.className = "card analysis-card fading-in";
   el.innerHTML = `
+    <button class="card-x" title="Close" aria-label="Close">${ICONS.close}</button>
     <div class="card-label t-meta">✦ Analysis</div>
     <div class="card-target t-meta"></div>
     <div class="analysis-section">
@@ -542,9 +566,8 @@ function newAnalysisCard(targetSource: string, onRegenerate: () => void): Analys
       <div class="analysis-reply card-body"></div>
     </div>
     <div class="card-actions">
-      <button class="c-copy">⧉ Copy reply</button>
-      <button class="c-again">⟳ Regenerate</button>
-      <button class="c-close">✕</button>
+      <button class="c-copy" title="Copy reply">⧉ Copy reply</button>
+      <button class="c-again" title="Regenerate analysis">⟳ Regenerate</button>
     </div>
   `;
   const targetEl = el.querySelector<HTMLDivElement>(".card-target");
@@ -579,7 +602,7 @@ function newAnalysisCard(targetSource: string, onRegenerate: () => void): Analys
     card.setPending();
     onRegenerate();
   });
-  el.querySelector<HTMLButtonElement>(".c-close")?.addEventListener("click", () => {
+  el.querySelector<HTMLButtonElement>(".card-x")?.addEventListener("click", () => {
     analysisCards.delete(id);
     el.remove();
   });
@@ -596,7 +619,15 @@ const reviewCallbacks: ReviewCallbacks = {
   requestCoaching: (ids) => {
     requestCounter += 1;
     const cardId = requestCounter;
-    void hostRequest({ type: "coach", cardId, captionIds: ids });
+    // Route a SYNCHRONOUS forward failure (e.g. the host request is rejected) to
+    // the coaching card so it shows an error + retry instead of spinning forever
+    // (#5). A successful forward resolves later via a "coaching"/"extrasFailed"
+    // host event, which the host://event handler routes to the same card.
+    void invoke("host_request", { message: { type: "coach", cardId, captionIds: ids } }).catch(
+      (error: unknown) => {
+        coachingCards.get(cardId)?.fail(String(error));
+      },
+    );
     return cardId;
   },
   copy: (text) =>
