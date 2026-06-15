@@ -491,3 +491,121 @@ The live E2E below needs a real video with audio and the operator's mic.
   over the FULL session (all finalized captions), not the windowed feed.
 - TTS uses whatever WKWebView/system voices are installed for the meeting
   language; an unavailable voice degrades to the default voice or no-ops.
+
+---
+
+# v1.1.x UX fixes (explicit start · per-session language · windowing · credit copy)
+
+Automated coverage (already green, run from this checkout):
+- Session lifecycle state machine — `cargo test -p livecap-app session`
+  (`the_default_lifecycle_phase_is_idle`, `explicit_start_gate_only_admits_an_idle_session`,
+  `stop_gate_only_admits_a_running_session`, plus the existing `try_begin_live`
+  / phase round-trip tests).
+- Per-session language persistence — `pnpm exec vitest run test/session-language`
+  (`nextSettingsForSessionLanguage`: a new pick is persisted as the next
+  default, an unchanged pick is a no-op, tags are normalized like the Rust
+  sanitizer, empty picks are ignored, arbitrary BCP-47 rides through).
+- Settings round-trip incl. `targetLanguage` — `cargo test -p livecap-app settings`.
+
+Headless smoke (no audio), confirms idle-on-launch + clean module eval:
+```sh
+pnpm build && pnpm tauri build --debug --bundles app
+rm -f ~/Library/Application\ Support/app.livecap.desktop/ui-heartbeat.json
+LIVECAP_CAPTURE_VISIBLE=1 ./target/debug/bundle/macos/LiveCap.app/Contents/MacOS/livecap-app &
+sleep 4
+cat ~/Library/Application\ Support/app.livecap.desktop/ui-heartbeat.json   # bootError:null, mode:panel
+pgrep -f dist-host/main.mjs || echo "idle: NO session host spawned"        # must print the idle line
+pkill -f livecap-app
+```
+Expect a ticking heartbeat with `"bootError": null` AND **no** session host
+process — i.e. the app launched idle and did not auto-start a session.
+
+The live items below need the real rig (screen, mouse, mic).
+
+## 1. Explicit session start (no auto-start)
+
+1. Launch (onboarding already done) → the Panel opens on the **Start screen**:
+   a `LiveCap` mark, a "Translate into" picker, a prominent amber **Start
+   captioning** button, and "Nothing is captured until you start." The live
+   feed / chips / composer are NOT shown; the menu-bar glyph is monochrome (not
+   amber); the tray item reads **Start Captioning**.
+2. Confirm NO captions and NO mic/system prompts appear before you press Start
+   (and the headless check above shows no session host running).
+3. Press **Start captioning** (or the tray **Start Captioning**, or ▶ in the
+   chrome) → the session starts exactly as before (status walks
+   "preparing…" → "starting…" → live; glyph turns amber; tray flips to **Stop
+   Captioning**).
+4. **Stop** (⏹ / tray) → returns to the Start screen (idle), glyph reverts.
+   The post-meeting review still appears first; closing it lands on the Start
+   screen.
+5. Dev aid only: `LIVECAP_AUTOSTART=1 pnpm tauri dev` still auto-starts (it is
+   the headless-E2E shortcut, never the normal path).
+
+## 2. Per-session target language
+
+1. On the Start screen the picker defaults to the **last-used** target (the one
+   onboarding seeded on first run; afterwards, whatever you last started with).
+2. Change it (e.g. 한국어 → 日本語) and press Start → the session translates into
+   the new language (captions + summary); the archive header reads e.g.
+   `EN → JA`. You did NOT open Settings to do this.
+3. Stop, then start again → the picker now defaults to **日本語** (the last pick
+   was remembered). Confirm `settings.json` `targetLanguage` updated to `ja`.
+4. Settings → "Translate into" still exposes a default and stays in sync, but
+   the per-session picker at Start is the authoritative choice for that session
+   (it is not a global the session ignores).
+
+## 3. Windowing: native dropdowns, moving, hiding
+
+1. **Dropdown on mouse-move (the regression):** on the Start screen click the
+   "Translate into" picker → the native macOS popup opens. **Move the cursor
+   over the options and to a different option** → the popup stays open and
+   tracks the cursor normally; pick one → it commits. Repeat inside Settings →
+   the "Translate into" / Plan / Retention selects all behave the same. (Before:
+   the popup closed/glitched the instant the cursor moved.)
+2. **Move:** press-drag from a non-control area (the top chrome/title region, or
+   the summary strip while live) → the window follows the cursor and still
+   magnet-snaps at edges. A press-drag that *starts* on a button/select/input/
+   feed never moves the window (those controls work normally); a plain click on
+   a control never begins a drag.
+3. **Hide/show:** ⌥Space hides the overlay and ⌥Space shows it again; the ✕
+   chrome button hides it too. No glitching, and capture exclusion is unchanged.
+4. **Always-on-top intact:** with the overlay visible,
+   `await invoke("shell_diagnostics")` → `{ captureExcluded: true,
+   joinsAllSpacesAndFullscreen: true }` (production, i.e. WITHOUT
+   `LIVECAP_CAPTURE_VISIBLE=1`); the overlay still floats over a fullscreen app
+   and follows across Spaces (#10 §2 still passes). `LIVECAP_CAPTURE_VISIBLE=1`
+   remains dev-only and disables exclusion for screenshot checks.
+
+Root cause (for the reviewer): the drag handler started a Rust drag + took
+`setPointerCapture` on `pointerdown` for any target not matching
+`button, input` — which **excluded `<select>`**. Clicking the language picker
+therefore captured the OS pointer stream and ran the cursor-following drag loop,
+so the native popup (a separate NSWindow) lost its pointer events and closed the
+moment the cursor moved. Fix: the drag now excludes every form control +
+interactive container and only captures the pointer *after* movement passes a
+threshold (a plain control click never captures). `NSStatusWindowLevel` (25) is
+below `NSPopUpMenuWindowLevel`, so popups already render above the overlay — the
+level was not the cause and is unchanged.
+
+## 4. Calmer credit messaging
+
+1. Onboarding card 3 with `claude` on PATH now reads "✓ Claude CLI found ·
+   Signed in on your plan — covered by your Claude subscription. If Anthropic's
+   policy changes, LiveCap falls back to the free local model automatically." —
+   NO "uses your plan's SDK credits / ~N hrs/month".
+2. Settings → Engine: a calm note ("…currently covered by your Claude
+   subscription…fall back to the free local model automatically"), the gauge is
+   labeled **Usage this month** with meta "Tracked in case credits ever apply ·
+   would reset <day>" (not "≈ N meeting-hours left"), and the auto-switch
+   checkbox reads "Fall back to Local if credits ever start to apply".
+3. The local-fallback safety message is retained throughout; README + PROPOSAL
+   §4/§6/§8.7 carry the same reframing (factual policy note kept, app no longer
+   presents active charging).
+
+## Known limits for the reviewer (UX fixes)
+- The Start screen owns the Panel only while idle; in Strip/Capsule modes the
+  idle status line ("Start captioning from the menu bar, or press ▶ above.")
+  carries the same explicit-start cue.
+- The per-session picker writes the chosen language to `settings.json` before
+  starting, so it doubles as the persisted default; a session already running
+  keeps its language (engine/language changes apply from the next start, per #12).
