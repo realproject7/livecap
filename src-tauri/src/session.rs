@@ -479,6 +479,10 @@ async fn start_inner(app: &AppHandle) -> Result<Option<String>, String> {
         "appDataDir": app_data_dir,
         "archiveDir": archive_dir,
         "targetLanguageCode": settings.target_language,
+        // #94: spoken/source language for transcription ("auto" = auto-detect).
+        // Whisper runs in the Rust pipeline below; the host carries this only
+        // for contract completeness (it translates, it does not transcribe).
+        "sourceLanguageCode": settings.source_language,
         "enginePref": settings.engine_pref,
         "poolUsd": settings.pool_usd,
         "resetDay": settings.reset_day,
@@ -496,7 +500,9 @@ async fn start_inner(app: &AppHandle) -> Result<Option<String>, String> {
         let _ = host.child.kill();
     };
 
-    let config = PipelineConfig::new(models_dir);
+    // #94: force whisper to the chosen spoken language ("auto" → per-utterance
+    // detection), improving STT accuracy and eliminating auto-misdetection (#93).
+    let config = PipelineConfig::new(models_dir).with_source_language(&settings.source_language);
     let (mut pipeline, mut events_rx) = match CaptionPipeline::new(config).await {
         Ok(built) => built,
         Err(error) => {

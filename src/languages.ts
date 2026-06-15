@@ -35,6 +35,20 @@ export const LANGUAGES: readonly LanguageOption[] = [
 
 export const DEFAULT_LANGUAGE_CODE = "ko";
 
+/** Sentinel code for "let whisper auto-detect the spoken language" (#94). */
+export const SOURCE_AUTO_CODE = "auto";
+
+/**
+ * Spoken/source-language picker entries (#94): an "Auto" entry (auto-detect,
+ * the default and current behavior) followed by the same curated languages as
+ * the target picker. The persisted value is the code; "auto" maps to
+ * per-utterance detection in the whisper pipeline.
+ */
+export const SOURCE_LANGUAGES: readonly LanguageOption[] = [
+  { code: SOURCE_AUTO_CODE, name: "Auto", native: "Auto-detect", archiveLabel: "AUTO" },
+  ...LANGUAGES,
+] as const;
+
 /**
  * Resolve a BCP-47 tag to a language option. Tags outside the curated list
  * resolve to a synthesized entry (tag as name, primary subtag uppercased as

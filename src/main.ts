@@ -11,10 +11,11 @@ import { ask } from "@tauri-apps/plugin-dialog";
 import {
   applyCaptionSize,
   nextSettingsForSessionLanguage,
+  nextSettingsForSessionSourceLanguage,
   type AppSettings,
 } from "./app-settings";
 import { bootstrap } from "./bootstrap";
-import { LANGUAGES, languageByCode } from "./languages";
+import { LANGUAGES, SOURCE_AUTO_CODE, SOURCE_LANGUAGES, languageByCode } from "./languages";
 import { FeedState, type CaptionBlock } from "./feed-state";
 import {
   buildReview,
@@ -103,6 +104,8 @@ document.body.innerHTML = `
           <div class="sp-guide-row"><span class="sp-guide-ico">🌐</span><span>Translates each line into your language, right underneath.</span></div>
           <div class="sp-guide-row"><span class="sp-guide-ico">🔒</span><span>On-device &amp; private — hidden from screen sharing.</span></div>
         </div>
+        <label class="sp-lang-label" for="sp-source">Spoken language</label>
+        <select id="sp-source" class="sp-lang" aria-label="Spoken (source) language for this session"></select>
         <label class="sp-lang-label" for="sp-lang">Translate into</label>
         <select id="sp-lang" class="sp-lang" aria-label="Target language for this session"></select>
         <button id="sp-start" type="button" class="sp-start">Start captioning</button>
@@ -177,6 +180,7 @@ const stripTr = document.querySelector<HTMLDivElement>("#strip-view .tr") as HTM
 const capsuleTxt = document.querySelector<HTMLSpanElement>("#capsule-view .txt") as HTMLSpanElement;
 const onboardingEl = $<HTMLDivElement>("onboarding");
 const startPanel = $<HTMLDivElement>("start-panel");
+const startSourceSelect = $<HTMLSelectElement>("sp-source");
 const startLangSelect = $<HTMLSelectElement>("sp-lang");
 const startBtn = $<HTMLButtonElement>("sp-start");
 
@@ -186,6 +190,7 @@ let appSettings: AppSettings = {
   onboardingComplete: true, // assume done until get_settings says otherwise
   engine: "cli",
   targetLanguage: "ko",
+  sourceLanguage: "auto", // #94: per-utterance auto-detect until the user picks
   poolUsd: 20,
   resetDay: 1,
   autoSwitch: true,
@@ -233,8 +238,15 @@ async function sessionCommand(command: string): Promise<void> {
   }
 }
 
-/** Populate the start-panel picker and select the remembered default. */
+/** Populate the start-panel pickers and select the remembered defaults. */
 function renderStartPanel(): void {
+  // Spoken (source) language picker (#94): "Auto" first, then the same
+  // curated languages as the target picker.
+  if (startSourceSelect.options.length === 0) {
+    startSourceSelect.innerHTML = SOURCE_LANGUAGES.map(
+      (l) => `<option value="${l.code}">${l.native}</option>`,
+    ).join("");
+  }
   if (startLangSelect.options.length === 0) {
     startLangSelect.innerHTML = LANGUAGES.map(
       (l) => `<option value="${l.code}">${l.native}</option>`,
@@ -250,13 +262,32 @@ function renderStartPanel(): void {
     startLangSelect.appendChild(opt);
   }
   startLangSelect.value = current.code;
+
+  // The last-used spoken language (#94); "auto" or any curated code resolves,
+  // an arbitrary persisted tag is seeded so it stays selectable.
+  const source = languageByCode(appSettings.sourceLanguage);
+  if (!SOURCE_LANGUAGES.some((l) => l.code === source.code)) {
+    const opt = document.createElement("option");
+    opt.value = source.code;
+    opt.textContent = source.native;
+    startSourceSelect.appendChild(opt);
+  }
+  startSourceSelect.value = SOURCE_LANGUAGES.some((l) => l.code === appSettings.sourceLanguage)
+    ? appSettings.sourceLanguage
+    : source.code;
 }
 
 /** Start a session with the language chosen in the start panel (#1/#2). The
  *  pick is persisted FIRST so (a) it becomes the next session's default and
  *  (b) start_inner — which reads settings fresh — honors it. */
 async function startSession(): Promise<void> {
-  const next = nextSettingsForSessionLanguage(appSettings, startLangSelect.value);
+  // Fold both per-session picks (target #2 + spoken source #94) into one write
+  // so the next session defaults to them and start_inner (which reads settings
+  // fresh) honors the forced source language.
+  let next = nextSettingsForSessionLanguage(appSettings, startLangSelect.value);
+  const sourcePick = startSourceSelect.value || SOURCE_AUTO_CODE;
+  const withSource = nextSettingsForSessionSourceLanguage(next ?? appSettings, sourcePick);
+  next = withSource ?? next;
   if (next) {
     try {
       await persistSettings(next);

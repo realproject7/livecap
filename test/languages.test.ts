@@ -3,7 +3,13 @@
 
 import { describe, expect, it } from "vitest";
 
-import { DEFAULT_LANGUAGE_CODE, LANGUAGES, languageByCode } from "../src/languages";
+import {
+  DEFAULT_LANGUAGE_CODE,
+  LANGUAGES,
+  SOURCE_AUTO_CODE,
+  SOURCE_LANGUAGES,
+  languageByCode,
+} from "../src/languages";
 
 describe("languageByCode", () => {
   it("resolves the supported minimum (EN, KO) with KO as the default", () => {
@@ -30,6 +36,20 @@ describe("languageByCode", () => {
 
   it("keeps picker entries unique by code", () => {
     const codes = LANGUAGES.map((l) => l.code);
+    expect(new Set(codes).size).toBe(codes.length);
+  });
+});
+
+describe("SOURCE_LANGUAGES (#94 spoken-language picker)", () => {
+  it("leads with an Auto entry, then the same curated languages", () => {
+    expect(SOURCE_LANGUAGES[0].code).toBe(SOURCE_AUTO_CODE);
+    expect(SOURCE_AUTO_CODE).toBe("auto");
+    // Everything after Auto is the target-language list, in order.
+    expect(SOURCE_LANGUAGES.slice(1).map((l) => l.code)).toEqual(LANGUAGES.map((l) => l.code));
+  });
+
+  it("keeps source picker entries unique by code", () => {
+    const codes = SOURCE_LANGUAGES.map((l) => l.code);
     expect(new Set(codes).size).toBe(codes.length);
   });
 });

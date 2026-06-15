@@ -82,6 +82,11 @@ export type HostInbound =
       archiveDir: string;
       /** Translate-into target as a BCP-47 tag, e.g. "ko" (§8.6 screen 2). */
       targetLanguageCode: string;
+      /** Spoken/source language for transcription (#94): a BCP-47 / ISO-639-1
+       *  tag forces whisper to that language; "auto" keeps per-utterance
+       *  detection. Whisper runs in the Rust pipeline — the host carries this
+       *  for contract completeness only (it translates, it does not transcribe). */
+      sourceLanguageCode: string;
       /** Engine tier to lead with (router default; §8.7 segmented control). */
       enginePref: EnginePref;
       /** Agent SDK monthly pool in USD (PROPOSAL §6). */
