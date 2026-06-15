@@ -17,6 +17,37 @@ use super::acceleration::whisper_context_acceleration;
 /// with trailing silence (Meetily logged a warning and let it fail instead).
 const MIN_SAMPLES: usize = 16000 + 1600; // 1.1 s at 16 kHz
 
+/// Confidence floor below which a transcribed utterance is dropped (#92).
+///
+/// whisper.cpp hallucinates plausible-looking captions on silence / ambient
+/// noise (the VAD lets a faint segment through and the decoder fills it with a
+/// phantom sentence). `avg_confidence` was computed but never used to gate;
+/// this floor drops those low-confidence utterances before they pollute the
+/// feed, summary, and coaching list.
+///
+/// EMPIRICALLY TUNED — adjust live against real captures (the operator owns the
+/// Metal/whisper-run + real-audio loop). Note the scale: `avg_confidence` (see
+/// `transcribe`) is a TEXT-LENGTH heuristic, not whisper's logprob — it is
+/// `segment_len/100` capped at 0.9, plus 0.1. So a ~25-char phantom scores ~0.35
+/// while a ~45-char real sentence scores ~0.55. The cited #92 phantoms ("I love
+/// musicals", "You ate gin, Robin") are short and land at/under this floor; real
+/// single sentences clear it. 0.35 is the CI-verified seed against the `tiny`
+/// model; the operator can raise it once a larger model's confidences are known.
+const CONFIDENCE_FLOOR: f32 = 0.35;
+
+/// Extra confidence margin required to TRUST an auto-detected language (#93).
+///
+/// In Auto mode (`language` = `None`/`"auto"`) whisper picks the language per
+/// utterance and is unreliable on noise / short audio — it has emitted CJK for
+/// English-only audio. When the user forces a source language this never runs;
+/// it only guards Auto mode. An auto-detected utterance whose confidence sits
+/// in `[CONFIDENCE_FLOOR, AUTO_DETECT_CONFIDENCE_FLOOR)` is dropped rather than
+/// emitted with a possibly-wrong language label (which would mis-route the
+/// channel and translate in the wrong direction). EMPIRICALLY TUNED; kept just
+/// above the plain floor so only the shortest/borderline auto detections — the
+/// ones most prone to misdetection — are dropped, while real speech survives.
+const AUTO_DETECT_CONFIDENCE_FLOOR: f32 = 0.4;
+
 /// A transcribed utterance.
 #[derive(Debug, Clone)]
 pub struct Utterance {
@@ -183,12 +214,51 @@ impl WhisperEngine {
             0.0
         };
 
+        // Confidence-floor gate (#92): drop low-confidence utterances — these
+        // are whisper hallucinations on silence / ambient noise. Empty text is
+        // the pipeline's "nothing to emit" signal (it `continue`s past it), so
+        // this is additive to VAD, not a replacement. No caption content in
+        // logs (SECURITY.md / EPIC #1) — length + score only.
+        let auto_detect = matches!(language, Some("auto") | None);
+        if is_low_confidence_drop(&cleaned_result, avg_confidence, auto_detect) {
+            log::debug!(
+                "Dropping low-confidence utterance ({} chars, conf {:.2} < {:.2}, auto={})",
+                cleaned_result.chars().count(),
+                avg_confidence,
+                confidence_floor(auto_detect),
+                auto_detect
+            );
+            return Ok(Utterance {
+                text: String::new(),
+                lang,
+                confidence: avg_confidence,
+            });
+        }
+
         Ok(Utterance {
             text: cleaned_result,
             lang,
             confidence: avg_confidence,
         })
     }
+}
+
+/// The confidence floor an utterance must clear to be emitted (#92/#93).
+/// Auto-detected language gets the stricter [`AUTO_DETECT_CONFIDENCE_FLOOR`];
+/// a forced source language gets the plain [`CONFIDENCE_FLOOR`].
+fn confidence_floor(auto_detect: bool) -> f32 {
+    if auto_detect {
+        AUTO_DETECT_CONFIDENCE_FLOOR
+    } else {
+        CONFIDENCE_FLOOR
+    }
+}
+
+/// Whether an utterance should be dropped as a low-confidence hallucination
+/// (#92). Empty text is never "dropped" here (it carried nothing to begin
+/// with); non-empty text below the floor is.
+fn is_low_confidence_drop(text: &str, avg_confidence: f32, auto_detect: bool) -> bool {
+    !text.is_empty() && avg_confidence < confidence_floor(auto_detect)
 }
 
 // ---------------------------------------------------------------------------
@@ -358,5 +428,61 @@ mod tests {
     fn keeps_normal_sentences() {
         let s = "The quick brown fox jumps over the lazy dog";
         assert_eq!(clean_repetitive_text(s), s);
+    }
+
+    // ---- confidence-floor gate (#92/#93) ----
+
+    #[test]
+    fn confidence_floor_is_stricter_in_auto_mode() {
+        // #93: auto-detected language demands a higher margin than a forced one.
+        assert_eq!(confidence_floor(false), CONFIDENCE_FLOOR);
+        assert_eq!(confidence_floor(true), AUTO_DETECT_CONFIDENCE_FLOOR);
+        const { assert!(AUTO_DETECT_CONFIDENCE_FLOOR >= CONFIDENCE_FLOOR) };
+    }
+
+    #[test]
+    fn low_confidence_utterance_is_dropped() {
+        // #92: below the floor → drop (whisper hallucination on silence).
+        // Expressed relative to the consts so it tracks live tuning.
+        let below_plain = CONFIDENCE_FLOOR - 0.05;
+        assert!(is_low_confidence_drop("scarf off the popcorn", below_plain, false));
+        let below_auto = AUTO_DETECT_CONFIDENCE_FLOOR - 0.05;
+        assert!(is_low_confidence_drop("這一點是我的建議", below_auto, true));
+    }
+
+    #[test]
+    fn confident_utterance_is_kept() {
+        // Real speech that clears the floor is emitted (the floor is inclusive).
+        assert!(!is_low_confidence_drop("a clear confident sentence", 0.95, false));
+        assert!(!is_low_confidence_drop(
+            "a clear confident sentence",
+            CONFIDENCE_FLOOR,
+            false
+        ));
+        assert!(!is_low_confidence_drop(
+            "a clear confident sentence",
+            AUTO_DETECT_CONFIDENCE_FLOOR,
+            true
+        ));
+    }
+
+    #[test]
+    fn borderline_auto_detection_is_dropped_but_forced_is_kept() {
+        // #93: confidence between the two floors — trusted when the source
+        // language was forced, dropped when it was auto-detected. (When the two
+        // floors are equal this still holds: the forced case sits AT its floor,
+        // which is kept; the auto case below its floor is dropped.)
+        let between = (CONFIDENCE_FLOOR + AUTO_DETECT_CONFIDENCE_FLOOR) / 2.0;
+        assert!(!is_low_confidence_drop("forced language text", between, false));
+        if AUTO_DETECT_CONFIDENCE_FLOOR > CONFIDENCE_FLOOR {
+            assert!(is_low_confidence_drop("auto language text", between, true));
+        }
+    }
+
+    #[test]
+    fn empty_text_is_never_a_low_confidence_drop() {
+        // Empty text carried nothing — the gate is only for non-empty phantoms.
+        assert!(!is_low_confidence_drop("", 0.0, false));
+        assert!(!is_low_confidence_drop("", 0.0, true));
     }
 }
