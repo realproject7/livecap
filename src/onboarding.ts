@@ -1,14 +1,16 @@
 // First-run onboarding (#12, PROPOSAL §8.6, design/screens/06-onboarding.png):
-// three cards, under a minute — audio access (real TCC prompts), target
-// language, engine. Shown when settings.onboardingComplete is false; ends by
-// persisting the choices and landing on the idle Start screen (#1 — the user
-// presses Start when ready; onboarding no longer auto-starts a session). Never
-// a dead end: every step can continue regardless of what was granted/detected.
+// two cards, under a minute — audio access (real TCC prompts) and engine.
+// Target language is NOT chosen here: it's a per-session pick on the idle Start
+// screen (#2), so onboarding no longer duplicates it. Shown when
+// settings.onboardingComplete is false; ends by persisting the engine choice
+// and landing on the idle Start screen (#1 — the user presses Start when ready;
+// onboarding never auto-starts a session). Never a dead end: every step can
+// continue regardless of what was granted/detected.
 
 import { invoke } from "@tauri-apps/api/core";
 
 import type { AppSettings, EnginePref } from "./app-settings";
-import { DEFAULT_LANGUAGE_CODE, LANGUAGES } from "./languages";
+import { DEFAULT_LANGUAGE_CODE } from "./languages";
 import type { ProbeResult } from "./protocol";
 
 interface AudioAccess {
@@ -32,13 +34,11 @@ function el<T extends HTMLElement>(root: ParentNode, selector: string): T {
 
 export function startOnboarding(options: OnboardingOptions): void {
   const { host, settings } = options;
-  let targetLanguage = settings.targetLanguage || DEFAULT_LANGUAGE_CODE;
+  // Language is picked per-session on the Start screen (#2); onboarding just
+  // carries the existing default through untouched.
+  const targetLanguage = settings.targetLanguage || DEFAULT_LANGUAGE_CODE;
   let engine: EnginePref = "cli";
   let cliFound = false;
-
-  const languageChoices = LANGUAGES.map(
-    (l) => `<option value="${l.code}"${l.code === targetLanguage ? " selected" : ""}>${l.native}</option>`,
-  ).join("");
 
   host.innerHTML = `
     <div class="ob-card" data-step="1">
@@ -57,16 +57,7 @@ export function startOnboarding(options: OnboardingOptions): void {
       </div>
     </div>
     <div class="ob-card" data-step="2" hidden>
-      <div class="ob-step">2 · LANGUAGE</div>
-      <h2 class="ob-title">Translate into…</h2>
-      <select class="ob-select" id="ob-lang">${languageChoices}</select>
-      <p class="ob-note">Spoken language is detected automatically — there is no source language to pick.</p>
-      <div class="ob-actions">
-        <button class="ob-primary" id="ob-next2">Continue</button>
-      </div>
-    </div>
-    <div class="ob-card" data-step="3" hidden>
-      <div class="ob-step">3 · ENGINE</div>
+      <div class="ob-step">2 · ENGINE</div>
       <h2 class="ob-title" id="ob-engine-title">Checking for the Claude CLI…</h2>
       <p class="ob-note" id="ob-engine-body"></p>
       <p class="ob-note ob-alt" id="ob-engine-alt"></p>
@@ -157,18 +148,12 @@ export function startOnboarding(options: OnboardingOptions): void {
     void invoke<string>("mic_permission_status").then(renderMic, () => undefined);
   });
 
-  next1.addEventListener("click", () => show(2));
-
-  /* ---- step 2: target language ---- */
-
-  const langSelect = el<HTMLSelectElement>(host, "#ob-lang");
-  el<HTMLButtonElement>(host, "#ob-next2").addEventListener("click", () => {
-    targetLanguage = langSelect.value;
-    show(3);
+  next1.addEventListener("click", () => {
+    show(2);
     void probeEngine();
   });
 
-  /* ---- step 3: engine (real CLI detection — never a dead end) ---- */
+  /* ---- step 2: engine (real CLI detection — never a dead end) ---- */
 
   const engineTitle = el<HTMLHeadingElement>(host, "#ob-engine-title");
   const engineBody = el<HTMLParagraphElement>(host, "#ob-engine-body");
