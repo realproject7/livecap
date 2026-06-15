@@ -6,7 +6,16 @@ import { describe, expect, it } from "vitest";
 import { FEED_WINDOW, FeedState } from "../src/feed-state";
 
 function finalized(id: number, channel: "them" | "me", text: string, lowConfidence = false) {
-  return { type: "finalized" as const, id, channel, text, lang: "en", lowConfidence, epochMs: 1_000 + id };
+  return {
+    type: "finalized" as const,
+    id,
+    channel,
+    text,
+    lang: "en",
+    lowConfidence,
+    epochMs: 1_000 + id,
+    durationMs: 900,
+  };
 }
 
 describe("FeedState", () => {
@@ -220,5 +229,33 @@ describe("FeedState — render window (#57)", () => {
     fill(feed, 5);
     expect(feed.evictOverflow()).toHaveLength(0);
     expect(feed.evictedCount).toBe(0);
+  });
+
+  // #82: the coaching tab lists only the user's OWN (mic) finalized utterances.
+  describe("micUtterances (#82 coaching list)", () => {
+    it("returns only finalized 'me' blocks, oldest first, with resolved ids", () => {
+      const feed = new FeedState();
+      feed.applyCaption(finalized(1, "them", "How are you?"));
+      feed.applyCaption(finalized(2, "me", "I'm, um, doing well"));
+      feed.applyCaption(finalized(3, "them", "Great."));
+      feed.applyCaption(finalized(4, "me", "Thanks for asking"));
+
+      const mine = feed.micUtterances();
+      expect(mine.map((b) => b.id)).toEqual([2, 4]);
+      expect(mine.map((b) => b.source)).toEqual(["I'm, um, doing well", "Thanks for asking"]);
+      expect(mine.every((b) => b.channel === "me")).toBe(true);
+    });
+
+    it("excludes live (un-finalized) mic partials", () => {
+      const feed = new FeedState();
+      feed.applyCaption({ type: "partial", channel: "me", text: "still talking" });
+      expect(feed.micUtterances()).toHaveLength(0);
+    });
+
+    it("never includes system ('them') lines (privacy + correctness)", () => {
+      const feed = new FeedState();
+      feed.applyCaption(finalized(1, "them", "secret from the other side"));
+      expect(feed.micUtterances()).toHaveLength(0);
+    });
   });
 });

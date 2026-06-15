@@ -84,6 +84,7 @@ fn capture_excluded(window: WebviewWindow) -> Result<bool, String> {
 struct ShellDiagnostics {
     capture_excluded: bool,
     joins_all_spaces_and_fullscreen: bool,
+    pinned: bool,
 }
 
 /// Read back the overlay's NSWindow flags for manual verification.
@@ -92,6 +93,7 @@ fn shell_diagnostics(window: WebviewWindow) -> Result<ShellDiagnostics, String> 
     on_main_thread(&window, |w| ShellDiagnostics {
         capture_excluded: platform::capture_excluded(w),
         joins_all_spaces_and_fullscreen: platform::joins_all_spaces_and_fullscreen(w),
+        pinned: platform::pinned(w),
     })
 }
 
@@ -110,6 +112,31 @@ fn cycle_mode(app: AppHandle) {
 #[tauri::command]
 fn set_click_through(app: AppHandle, enabled: bool) {
     overlay::set_click_through(&app, enabled);
+}
+
+/// Toggle pin-on-top at runtime (no relaunch): flips the NSWindow level +
+/// Spaces/fullscreen behavior and Tauri's always-on-top, persists the choice,
+/// and mirrors it to the tray. Pinned floats over every Space; unpinned is a
+/// normal window.
+#[tauri::command]
+fn set_pinned(app: AppHandle, pinned: bool) {
+    overlay::set_pinned(&app, pinned);
+}
+
+/// Re-apply the persisted pin preference to the window. main.ts calls this once
+/// first-run onboarding completes: the app boots unpinned during onboarding (so
+/// the overlay can't cover the macOS permission sheets), then restores the saved
+/// pin here.
+#[tauri::command]
+fn reapply_pin(app: AppHandle) {
+    let pinned = app
+        .state::<Shell>()
+        .inner()
+        .config
+        .lock()
+        .expect("config lock")
+        .pinned;
+    overlay::set_pinned(&app, pinned);
 }
 
 #[tauri::command]
@@ -259,6 +286,8 @@ pub fn run() {
             set_mode,
             cycle_mode,
             set_click_through,
+            set_pinned,
+            reapply_pin,
             begin_drag,
             end_drag,
             hide_overlay,
@@ -283,8 +312,18 @@ pub fn run() {
             permissions::open_privacy_settings,
         ])
         .setup(|app| {
+            // Regular: LiveCap shows a Dock icon (and a standard app menu) on
+            // top of its menu-bar tray, so it can be launched/quit like an
+            // ordinary app (⌘Q, Dock right-click). The tray stays regardless.
             #[cfg(target_os = "macos")]
-            app.set_activation_policy(tauri::ActivationPolicy::Accessory);
+            {
+                app.set_activation_policy(tauri::ActivationPolicy::Regular);
+                // A standard app menu so ⌘Q and the Edit shortcuts (⌘C/⌘V/⌘A,
+                // needed by the quick-translate input) work now that the app is
+                // a regular, Dock-visible app. The menu-bar tray is separate.
+                let menu = tauri::menu::Menu::default(app.handle())?;
+                app.set_menu(menu)?;
+            }
 
             let window = app
                 .get_webview_window(overlay::WINDOW_LABEL)
@@ -302,14 +341,40 @@ pub fn run() {
             let config_path = app.path().app_data_dir()?.join(config::FILE_NAME);
             let cfg = config::load(&config_path);
             let initial_mode = overlay::initial_mode(&window, &cfg);
+            // Pin-on-top preference restored from disk (default true). The
+            // window's tauri.conf.json declares alwaysOnTop/visibleOnAllWorkspaces
+            // = true; if the operator left it unpinned last run we flip both
+            // off below so the restored state matches.
+            //
+            // BUT never boot pinned into first-run onboarding: a pinned overlay
+            // (always-on-top) sits above the macOS audio-permission sheets and
+            // hides them, so "Grant audio access" appears to do nothing. While
+            // onboarding is pending the window stays a normal, non-floating
+            // window; main.ts re-applies the saved pin via `reapply_pin` once
+            // setup finishes. The persisted preference (cfg.pinned) is untouched.
+            let onboarding_done = app
+                .state::<settings::SettingsState>()
+                .snapshot()
+                .onboarding_complete;
+            let initial_pinned = cfg.pinned && onboarding_done;
             app.manage(Shell::new(config_path, cfg, initial_mode));
 
             // Screen-capture exclusion (EPIC launch gate) + Spaces/fullscreen
             // behavior + window level. Setup runs on the main thread.
-            window.set_content_protected(true)?;
-            platform::configure_overlay(&window);
+            // LIVECAP_CAPTURE_VISIBLE=1 disables BOTH exclusion mechanisms
+            // (Tauri content-protection here + NSWindow sharingType in
+            // platform::configure_overlay) — DEV/VERIFICATION ONLY (#54).
+            if std::env::var("LIVECAP_CAPTURE_VISIBLE").as_deref() != Ok("1") {
+                window.set_content_protected(true)?;
+            }
+            platform::configure_overlay(&window, initial_pinned);
+            // Keep Tauri's own always-on-top flag in sync with the restored pin
+            // state (the conf default is true; flip it off if unpinned).
+            if !initial_pinned {
+                let _ = window.set_always_on_top(false);
+            }
 
-            tray::create(app.handle(), initial_mode)?;
+            tray::create(app.handle(), initial_mode, initial_pinned)?;
             overlay::apply_mode(app.handle(), initial_mode);
             window.show()?;
 
@@ -396,9 +461,16 @@ pub fn run() {
         })
         .build(tauri::generate_context!())
         .expect("error while building tauri application")
-        .run(|app, event| {
-            if let RunEvent::Exit = event {
-                app.state::<Shell>().save_now();
+        .run(|app, event| match event {
+            RunEvent::Exit => app.state::<Shell>().save_now(),
+            // Dock icon clicked (macOS): re-show the overlay if it was hidden.
+            #[cfg(target_os = "macos")]
+            RunEvent::Reopen { .. } => {
+                if let Some(window) = overlay::overlay_window(app) {
+                    let _ = window.show();
+                    let _ = window.set_focus();
+                }
             }
+            _ => {}
         });
 }

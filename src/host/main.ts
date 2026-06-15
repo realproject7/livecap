@@ -62,6 +62,11 @@ const lines = createInterface({ input: process.stdin, crlfDelay: Infinity });
 // processed, and stop must run after everything queued ahead of it.
 let chain: Promise<void> = Promise.resolve();
 
+// The host no longer exits on `stop` (#82): after the session stops the engine
+// stays warm so the post-meeting review screen's Coaching tab can still reach it
+// (the review surface opens AFTER stop). The process exits only when the Rust
+// shell closes stdin (`close` → terminate) or on a termination signal — both of
+// which reap the engine via session.dispose()/stop().
 lines.on("line", (line) => {
   const trimmed = line.trim();
   if (trimmed === "") return;
@@ -74,13 +79,6 @@ lines.on("line", (line) => {
   }
   chain = chain
     .then(() => session.handle(message))
-    .then(() => {
-      if (message.type === "stop" && !exiting) {
-        exiting = true;
-        // Give stdout a tick to flush the trailing "stopped" event.
-        setTimeout(() => process.exit(0), 50);
-      }
-    })
     .catch((error: unknown) => {
       fail(error instanceof Error ? `${error.name}: ${error.message}` : "host failure");
     });

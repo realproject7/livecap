@@ -202,6 +202,7 @@ fn clean_repetitive_text(text: &str) -> String {
     }
 
     if is_meaningless_output(text) {
+        // No caption content in logs (SECURITY.md / EPIC #1) — length only.
         log::debug!("Detected meaningless output ({} chars), returning empty", text.chars().count());
         return String::new();
     }

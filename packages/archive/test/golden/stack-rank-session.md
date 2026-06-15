@@ -10,6 +10,10 @@
 **Action items** — Mike: share apps list · Me: budget memo by Fri
 **Open questions** — Which MAU definition wins?
 
+## Metrics
+**Talk ratio (me)** — 39%
+**Smooth Score** — 83
+
 ## Transcript
 **Them** (10:45) — Pat, thanks a lot.
 > Pat, 정말 고마워요.

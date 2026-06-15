@@ -61,6 +61,7 @@ export class SessionArchiveWriter {
       costUsd: 0,
       summary: [],
       board: { decisions: [], actionItems: [], openQuestions: [] },
+      metrics: undefined,
       entries: this.entries,
     };
   }
@@ -135,6 +136,7 @@ export class SessionArchiveWriter {
     if (brief.endClock !== undefined) this.model.endClock = brief.endClock;
     if (brief.durationMin !== undefined) this.model.durationMin = brief.durationMin;
     if (brief.costUsd !== undefined) this.model.costUsd = brief.costUsd;
+    if (brief.metrics !== undefined) this.model.metrics = brief.metrics;
   }
 
   /** Write to a temp sibling then atomically rename into place. */

@@ -85,8 +85,8 @@ body[data-mode="capsule"] #chrome {
 }
 
 .btn {
-  width: 22px;
-  height: 22px;
+  width: 26px;
+  height: 26px;
   flex-shrink: 0;
   border: none;
   border-radius: var(--radius-control);
@@ -97,15 +97,19 @@ body[data-mode="capsule"] #chrome {
   justify-content: center;
   padding: 0;
   cursor: pointer;
-  transition: opacity var(--fade) ease;
+  transition:
+    opacity var(--fade) ease,
+    color var(--fade) ease,
+    background var(--fade) ease;
 }
 .btn svg {
-  width: 12px;
-  height: 12px;
+  width: 14px;
+  height: 14px;
   display: block;
 }
 .btn:hover:not(:disabled) {
   color: var(--text-original);
+  background: rgba(255, 255, 255, 0.12);
 }
 .btn:disabled {
   opacity: 0.35;
@@ -113,6 +117,15 @@ body[data-mode="capsule"] #chrome {
 }
 .btn[aria-pressed="true"] {
   color: var(--accent-live);
+}
+/* Pinned: clear amber active state (color + tinted fill) so the operator can
+   tell at a glance whether the overlay is floating on top. */
+#btn-pin[aria-pressed="true"] {
+  color: var(--accent-live);
+  background: rgba(232, 184, 75, 0.18);
+}
+#btn-pin[aria-pressed="true"]:hover {
+  background: rgba(232, 184, 75, 0.26);
 }
 
 /* ===================== #11: live panel ===================== */
@@ -160,6 +173,114 @@ body[data-mode="capsule"] #panel-body {
   background: var(--hairline);
   margin: 0 18px;
   flex-shrink: 0;
+}
+
+/* ---- #1 idle Start screen (explicit session start, no auto-run) ---- */
+#start-panel {
+  display: none;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  flex: 1;
+  min-height: 0;
+  gap: 10px;
+  padding: 24px 28px;
+  text-align: center;
+}
+#start-panel.visible {
+  display: flex;
+}
+/* When the Start screen owns the Panel, the live surfaces stay hidden. */
+#start-panel.visible ~ #summary,
+#start-panel.visible ~ .hairline,
+#start-panel.visible ~ #feed-wrap,
+#start-panel.visible ~ #live-chip,
+#start-panel.visible ~ #pinned,
+#start-panel.visible ~ #cards,
+#start-panel.visible ~ #chips,
+#start-panel.visible ~ #composer {
+  display: none;
+}
+.sp-mark {
+  color: var(--accent-live);
+  font-size: 13px;
+  font-weight: 600;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+}
+.sp-sub {
+  color: var(--text-translation);
+  font-size: 13px;
+  line-height: 1.4;
+  max-width: 300px;
+  margin-bottom: 2px;
+}
+.sp-guide {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin: 6px 0 4px;
+  max-width: 320px;
+  text-align: left;
+}
+.sp-guide-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 9px;
+  color: var(--text-translation);
+  font-size: 12.5px;
+  line-height: 1.45;
+}
+.sp-guide-row b {
+  color: var(--text-original);
+  font-weight: 600;
+}
+.sp-guide-ico {
+  flex: none;
+  font-size: 13px;
+  line-height: 1.4;
+  opacity: 0.9;
+}
+.sp-lang-label {
+  color: var(--text-meta);
+  font-size: 10.5px;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  align-self: center;
+}
+.sp-lang {
+  width: 200px;
+  padding: 8px 10px;
+  border: none;
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.08);
+  color: var(--text-original);
+  font-size: 13.5px;
+  font-family: var(--font);
+}
+.sp-start {
+  margin-top: 6px;
+  border: none;
+  border-radius: 10px;
+  padding: 11px 28px;
+  background: var(--accent-live);
+  color: #1a1205;
+  font-size: 14px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: opacity var(--fade) ease;
+}
+.sp-start:hover:not(:disabled) {
+  opacity: 0.9;
+}
+.sp-start:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+.sp-hint {
+  font-size: 11.5px;
+  margin-top: 2px;
 }
 
 /* ---- live summary strip (amber dot + one line) ---- */
@@ -240,9 +361,16 @@ body[data-phase="paused"] #summary .lbl {
   /* rule 4: motion is fade, never slide — opacity only */
   transition: opacity var(--fade) ease;
 }
+/* #4: mic ("me") blocks mirror the left blocks cleanly — hug the right edge
+   (align-self handles the offset; no stray horizontal margin), text right-aligned.
+   The row reverses so the ghost actions sit on the inner (left) side, mirroring
+   the them-side layout instead of colliding with the right edge. */
 .cap.me {
   align-self: flex-end;
   text-align: right;
+}
+.cap.me .row {
+  flex-direction: row-reverse;
 }
 .cap.fading-in,
 .card.fading-in {
@@ -252,9 +380,6 @@ body[data-phase="paused"] #summary .lbl {
   display: flex;
   align-items: baseline;
   gap: 8px;
-}
-.cap.me .row {
-  justify-content: flex-end;
 }
 .cap .src {
   color: var(--text-original);
@@ -320,10 +445,11 @@ body[data-phase="paused"] #summary .lbl {
   display: inline;
 }
 
-/* ghost actions: appear on hover only (rule 1) */
+/* ghost actions: appear on hover only (rule 1). #1: larger hit area + glyph so
+   they are easy to see and tap. */
 .cap .ghost {
   display: inline-flex;
-  gap: 4px;
+  gap: 2px;
   opacity: 0;
   pointer-events: none;
   transition: opacity var(--fade) ease;
@@ -336,15 +462,26 @@ body[data-phase="paused"] #summary .lbl {
   display: none;
 }
 .g {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
   border: none;
+  border-radius: 7px;
   background: none;
   color: var(--text-meta);
-  font-size: 11px;
-  padding: 0 2px;
+  font-size: 15px;
+  line-height: 1;
+  padding: 0;
   cursor: pointer;
+  transition:
+    color var(--fade) ease,
+    background var(--fade) ease;
 }
 .g:hover {
   color: var(--text-original);
+  background: rgba(255, 255, 255, 0.1);
 }
 .cap.is-pinned .g-pin {
   color: var(--accent-live);
@@ -401,11 +538,47 @@ body[data-mode="capsule"] #live-chip {
   overflow-y: auto;
 }
 .card {
+  position: relative;
   background: rgba(255, 255, 255, 0.05);
   border-radius: 12px;
   padding: 10px 12px;
   margin-bottom: 8px;
   transition: opacity var(--fade) ease;
+}
+/* #3: a clear, larger ✕ close at the TOP-RIGHT of every inline card. Shared by
+   reply / quick-translate / analysis cards (and the review's coach cards). */
+.card-x,
+.coach-card .card-x {
+  position: absolute;
+  top: 6px;
+  right: 6px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  border: none;
+  border-radius: 8px;
+  background: none;
+  color: var(--text-meta);
+  cursor: pointer;
+  transition:
+    color var(--fade) ease,
+    background var(--fade) ease;
+}
+.card-x svg,
+.coach-card .card-x svg {
+  width: 14px;
+  height: 14px;
+}
+.card-x:hover,
+.coach-card .card-x:hover {
+  color: var(--text-original);
+  background: rgba(255, 255, 255, 0.1);
+}
+.card-label {
+  /* keep the label clear of the absolute top-right ✕ */
+  padding-right: 30px;
 }
 .card-body {
   color: var(--text-original);
@@ -417,21 +590,18 @@ body[data-mode="capsule"] #live-chip {
 }
 .card-actions {
   display: flex;
-  gap: 10px;
+  gap: 14px;
 }
 .card-actions button {
   border: none;
   background: none;
   color: var(--text-meta);
-  font-size: 11px;
-  padding: 0;
+  font-size: 12px;
+  padding: 2px 0;
   cursor: pointer;
 }
 .card-actions button:hover {
   color: var(--text-original);
-}
-.card-actions .c-close {
-  margin-left: auto;
 }
 
 /* ---- reply chips ---- */
@@ -516,30 +686,45 @@ body[data-mode="capsule"] #live-chip {
 }
 
 /* ---- strip / capsule views (latest line(s) from the same stream) ---- */
+/* #6: TV-subtitle layout (design/screens/03-strip-mode.png). Source caption on
+   top (bright), translation underneath (one tone down), both centered and FILLING
+   the strip width — they wrap rather than truncate so the whole line is readable. */
 #strip-view {
   display: none;
   flex: 1;
   min-height: 0;
   flex-direction: column;
   justify-content: center;
+  align-items: center;
   text-align: center;
-  padding: 10px 22px;
+  padding: 10px 24px;
   overflow: hidden;
 }
 body[data-mode="strip"] #strip-view {
   display: flex;
 }
 #strip-view .src {
-  font-size: 16px;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
+  width: 100%;
+  color: var(--text-original);
+  font-size: 17px;
+  font-weight: 500;
+  line-height: 1.35;
+  overflow-wrap: anywhere;
+}
+#strip-view .src.t-partial {
+  color: var(--text-partial);
+  font-weight: 400;
 }
 #strip-view .tr {
-  margin-top: 4px;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
+  width: 100%;
+  margin-top: 5px;
+  color: var(--text-translation);
+  font-size: 14.5px;
+  line-height: 1.3;
+  overflow-wrap: anywhere;
+}
+#strip-view .tr.empty {
+  display: none;
 }
 
 #capsule-view {
@@ -611,7 +796,8 @@ body[data-capsize="l"] #capsule-view .txt { font-size: 15.5px; }
   position: absolute;
   inset: 0;
   z-index: 6;
-  background: var(--glass-bg);
+  /* Near-opaque so the live feed/chips never bleed through the first-run flow. */
+  background: #0d0f12;
   border-radius: var(--radius-panel);
   align-items: center;
   justify-content: center;
@@ -628,6 +814,10 @@ body[data-capsize="l"] #capsule-view .txt { font-size: 15.5px; }
   background: rgba(255, 255, 255, 0.04);
   border-radius: 14px;
   padding: 22px 20px 18px;
+}
+/* One card at a time — a bare [hidden] is overridden by .ob-card's display. */
+.ob-card[hidden] {
+  display: none;
 }
 .ob-step {
   color: var(--text-meta);
@@ -860,6 +1050,12 @@ body[data-capsize="l"] #capsule-view .txt { font-size: 15.5px; }
   margin-bottom: 8px;
   font-variant-numeric: tabular-nums;
 }
+/* #4: calm, accurate framing above the optional usage gauge. */
+.sh-engine-note {
+  font-size: 11.5px;
+  line-height: 1.5;
+  margin: 4px 0 10px;
+}
 .sh-check {
   display: flex;
   align-items: center;
@@ -961,4 +1157,316 @@ body[data-capsize="l"] #capsule-view .txt { font-size: 15.5px; }
   padding: 2px 6px;
   font-size: 11px;
   color: var(--text-original);
+}
+
+/* ---- #80 targeted analysis card (strategy + suggested reply) ---- */
+.analysis-card .card-target {
+  font-size: 12px;
+  line-height: 1.4;
+  margin-bottom: 6px;
+  opacity: 0.8;
+  font-style: italic;
+}
+.analysis-section {
+  margin-bottom: 6px;
+}
+.analysis-head {
+  font-size: 10.5px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  margin-bottom: 2px;
+}
+.analysis-strategy {
+  color: var(--text-translation);
+  margin: 0 0 2px;
+}
+.analysis-reply {
+  color: var(--text-original);
+  margin: 0;
+}
+
+/* ---- #81 post-meeting review surface ---- */
+#review {
+  position: absolute;
+  inset: 0;
+  z-index: 6;
+  display: none;
+  flex-direction: column;
+  background: var(--glass-bg);
+  backdrop-filter: blur(var(--glass-blur));
+  border-radius: var(--radius-panel);
+  overflow: hidden;
+}
+#review.open {
+  display: flex;
+}
+body[data-mode="strip"] #review,
+body[data-mode="capsule"] #review {
+  display: none;
+}
+.review-head {
+  display: flex;
+  align-items: center;
+  padding: 12px 18px 0;
+  flex-shrink: 0;
+}
+.review-tabs {
+  display: flex;
+  gap: 6px;
+}
+.review-tab {
+  border: none;
+  background: none;
+  color: var(--text-meta);
+  font-size: 13px;
+  padding: 4px 10px;
+  border-radius: 99px;
+  cursor: pointer;
+  transition: color var(--fade) ease;
+}
+.review-tab[aria-selected="true"] {
+  color: var(--text-original);
+  background: rgba(255, 255, 255, 0.08);
+}
+.review-tab:hover {
+  color: var(--text-original);
+}
+.review-close {
+  margin-left: auto;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 30px;
+  height: 30px;
+  border: none;
+  border-radius: 8px;
+  background: none;
+  color: var(--text-meta);
+  cursor: pointer;
+  transition:
+    color var(--fade) ease,
+    background var(--fade) ease;
+}
+.review-close svg {
+  width: 15px;
+  height: 15px;
+}
+.review-close:hover {
+  color: var(--text-original);
+  background: rgba(255, 255, 255, 0.1);
+}
+.review-body {
+  flex: 1;
+  overflow-y: auto;
+  padding: 14px 20px 20px;
+}
+.review-pane[hidden] {
+  display: none;
+}
+.review-metrics {
+  display: flex;
+  gap: 28px;
+  margin-bottom: 10px;
+}
+.metric-value {
+  color: var(--accent-live);
+  font-size: 30px;
+  font-weight: 600;
+  line-height: 1;
+}
+.metric-label {
+  font-size: 11px;
+  margin-top: 4px;
+}
+.talk-bar {
+  height: 4px;
+  border-radius: 2px;
+  background: rgba(255, 255, 255, 0.08);
+  overflow: hidden;
+  margin-bottom: 16px;
+}
+.talk-bar-mic {
+  height: 100%;
+  background: var(--accent-live);
+  border-radius: 2px;
+  transition: width var(--fade) ease;
+}
+.review-h {
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--text-meta);
+  margin: 14px 0 6px;
+  font-weight: 600;
+}
+.review-summary {
+  margin: 0;
+  padding-left: 18px;
+  color: var(--text-original);
+  font-size: 14px;
+  line-height: 1.5;
+}
+.review-board .board-row {
+  margin-bottom: 8px;
+}
+.review-board .board-head {
+  color: var(--accent-live);
+  font-size: 12px;
+  font-weight: 600;
+}
+.review-board ul {
+  margin: 2px 0 0;
+  padding-left: 18px;
+  color: var(--text-translation);
+  font-size: 13px;
+  line-height: 1.45;
+}
+.review-actions {
+  display: flex;
+  gap: 14px;
+  margin-top: 18px;
+}
+.review-actions button {
+  border: none;
+  background: rgba(255, 255, 255, 0.06);
+  color: var(--text-translation);
+  font-size: 12px;
+  padding: 6px 12px;
+  border-radius: 8px;
+  cursor: pointer;
+}
+.review-actions button:hover:not(:disabled) {
+  color: var(--text-original);
+}
+.review-actions button:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
+/* ---- #82 coaching tab ---- */
+.coach-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 10px;
+}
+.coach-toolbar button {
+  border: none;
+  background: rgba(255, 255, 255, 0.06);
+  color: var(--text-translation);
+  font-size: 12px;
+  padding: 6px 12px;
+  border-radius: 8px;
+  cursor: pointer;
+}
+.coach-toolbar button:hover:not(:disabled) {
+  color: var(--text-original);
+}
+.coach-toolbar button:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+.coach-row {
+  display: flex;
+  gap: 10px;
+  width: 100%;
+  text-align: left;
+  border: none;
+  background: rgba(255, 255, 255, 0.04);
+  color: var(--text-original);
+  font-size: 13.5px;
+  line-height: 1.4;
+  padding: 8px 10px;
+  border-radius: 8px;
+  margin-bottom: 6px;
+  cursor: pointer;
+}
+.coach-row:hover {
+  background: rgba(255, 255, 255, 0.08);
+}
+.coach-row-time {
+  flex-shrink: 0;
+  font-size: 11px;
+}
+.coach-cards {
+  margin-top: 12px;
+}
+.coach-card {
+  position: relative;
+  background: rgba(255, 255, 255, 0.05);
+  border-radius: 12px;
+  padding: 10px 12px;
+  margin-bottom: 10px;
+  transition: opacity var(--fade) ease;
+}
+.coach-card.fading-in {
+  opacity: 0;
+}
+.coach-progress {
+  padding-right: 30px;
+}
+.coach-retry {
+  border: none;
+  background: rgba(255, 255, 255, 0.08);
+  color: var(--text-translation);
+  font-size: 12px;
+  padding: 5px 12px;
+  border-radius: 8px;
+  margin-top: 6px;
+  cursor: pointer;
+}
+.coach-retry:hover {
+  color: var(--text-original);
+}
+.coach-item {
+  padding: 6px 0;
+  border-top: 1px solid var(--hairline);
+}
+.coach-item:first-child {
+  border-top: none;
+}
+.coach-before {
+  font-size: 12px;
+  margin-bottom: 4px;
+  text-decoration: line-through;
+  opacity: 0.7;
+}
+.coach-better-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+}
+.coach-better {
+  flex: 1;
+  color: var(--text-original);
+  font-size: 14px;
+  line-height: 1.45;
+}
+.coach-change {
+  color: #7ad17a;
+  background: rgba(122, 209, 122, 0.14);
+  border-radius: 3px;
+  padding: 0 2px;
+}
+.coach-play {
+  flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: none;
+  background: rgba(255, 255, 255, 0.08);
+  color: var(--text-translation);
+  font-size: 14px;
+  width: 30px;
+  height: 30px;
+  border-radius: 50%;
+  cursor: pointer;
+}
+.coach-play:hover {
+  color: var(--text-original);
+}
+.coach-explain {
+  font-size: 12px;
+  line-height: 1.4;
+  margin-top: 4px;
 }

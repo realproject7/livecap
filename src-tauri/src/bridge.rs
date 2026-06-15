@@ -38,6 +38,9 @@ pub enum BridgeCaption {
         lang: String,
         low_confidence: bool,
         epoch_ms: u64,
+        /// Spoken duration in ms (`end_ms - start_ms`), for the post-meeting
+        /// talk-ratio + Smooth Score metrics (#81/#78). NOT wall-clock epoch_ms.
+        duration_ms: u64,
     },
 }
 
@@ -53,7 +56,8 @@ impl BridgeCaption {
                 text,
                 lang,
                 confidence,
-                ..
+                start_ms,
+                end_ms,
             } => BridgeCaption::Finalized {
                 id: next_id(),
                 channel,
@@ -61,6 +65,9 @@ impl BridgeCaption {
                 lang,
                 low_confidence: confidence < LOW_CONFIDENCE_THRESHOLD,
                 epoch_ms,
+                // Spoken duration; saturating so a malformed (end < start) span
+                // never underflows into a huge u64.
+                duration_ms: end_ms.saturating_sub(start_ms),
             },
         }
     }
@@ -76,6 +83,7 @@ impl BridgeCaption {
                 text,
                 low_confidence,
                 epoch_ms,
+                duration_ms,
                 ..
             } => Some(serde_json::json!({
                 "type": "caption",
@@ -84,6 +92,7 @@ impl BridgeCaption {
                 "text": text,
                 "lowConfidence": low_confidence,
                 "epochMs": epoch_ms,
+                "durationMs": duration_ms,
             })),
         }
     }
@@ -151,6 +160,26 @@ mod tests {
         assert_eq!(json["lang"], "en");
         assert_eq!(json["lowConfidence"], false);
         assert_eq!(json["epochMs"], 1234);
+        // Spoken duration = end_ms - start_ms (900 - 0) from the helper.
+        assert_eq!(json["durationMs"], 900);
+    }
+
+    #[test]
+    fn finalized_carries_spoken_duration_saturating_on_inverted_span() {
+        let event = CaptionEvent {
+            channel: Channel::Mic,
+            kind: CaptionKind::Finalized {
+                text: "hello there".into(),
+                lang: "en".into(),
+                confidence: 0.9,
+                // Inverted span (end < start) must not underflow.
+                start_ms: 900,
+                end_ms: 100,
+            },
+        };
+        let mapped = BridgeCaption::from_event(event, || 1, 0);
+        let json = serde_json::to_value(&mapped).unwrap();
+        assert_eq!(json["durationMs"], 0);
     }
 
     #[test]
@@ -171,5 +200,6 @@ mod tests {
         assert_eq!(msg["text"], "hello there");
         assert_eq!(msg["lowConfidence"], true);
         assert_eq!(msg["epochMs"], 99);
+        assert_eq!(msg["durationMs"], 900);
     }
 }

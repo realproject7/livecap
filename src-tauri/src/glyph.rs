@@ -1,8 +1,9 @@
 //! Menu bar glyph rasterizer.
 //!
-//! Renders design/icons/menubar-glyph.svg (36×36 viewBox: live dot + bright
-//! caption bar + dim outlined caption bar) into RGBA at build-free runtime,
-//! anti-aliased via signed distance fields. Two variants:
+//! Renders the LiveCap menu-bar glyph (36×36 viewBox: a live dot + two thick,
+//! solid caption bars) into RGBA at build-free runtime, anti-aliased via signed
+//! distance fields. The shapes are intentionally bold so the icon is easy to spot
+//! among other menu-bar items at ~18px (#8). Two variants:
 //!
 //! - default: solid black, used as a macOS template image (system recolors);
 //! - live: amber dot + mid-gray bars, used as a non-template image so the
@@ -45,14 +46,16 @@ pub fn menubar_icon(live: bool) -> Vec<u8> {
             let px = x as f64 + 0.5;
             let py = y as f64 + 0.5;
 
-            // Shapes per design/icons/menubar-glyph.svg.
-            let dot = coverage(sdf_circle(px, py, 5.0, 13.0, 3.0));
-            let bright_bar = coverage(sdf_rounded_rect(px, py, 11.0, 10.0, 22.0, 6.0, 3.0));
-            // Dim bar is a 2px stroke: |sdf| - stroke/2.
-            let dim_sdf = sdf_rounded_rect(px, py, 11.0, 21.0, 22.0, 5.0, 2.5);
-            let dim_bar = coverage(dim_sdf.abs() - 1.0);
+            // #8: bolder, more recognizable speech-bubble glyph that reads at
+            // ~18px among other menu-bar icons. A larger live dot plus TWO thick,
+            // solid caption bars (the prior dim bar was a thin 2px outline that
+            // disappeared at menu-bar size). Both bars are filled for contrast; the
+            // second is shorter so the shape still reads as "captions", not a block.
+            let dot = coverage(sdf_circle(px, py, 6.0, 12.0, 4.0));
+            let bar_top = coverage(sdf_rounded_rect(px, py, 12.0, 8.0, 21.0, 7.0, 3.5));
+            let bar_bot = coverage(sdf_rounded_rect(px, py, 12.0, 19.0, 15.0, 7.0, 3.5));
 
-            let bars = bright_bar.max(dim_bar);
+            let bars = bar_top.max(bar_bot);
             let (color, alpha) = if dot >= bars { (dot_color, dot) } else { (bar_color, bars) };
             let i = ((y * SIZE + x) * 4) as usize;
             rgba[i] = color[0];
@@ -81,14 +84,13 @@ mod tests {
     #[test]
     fn template_icon_is_black_with_opaque_shapes() {
         let rgba = menubar_icon(false);
-        let dot = pixel(&rgba, 5, 13);
+        let dot = pixel(&rgba, 6, 12);
         assert_eq!(&dot[..3], &[0, 0, 0]);
         assert_eq!(dot[3], 255);
-        // Bright bar center.
-        assert_eq!(pixel(&rgba, 22, 13)[3], 255);
-        // Dim bar is an outline: its center is hollow, its edge is drawn.
-        assert_eq!(pixel(&rgba, 22, 23)[3], 0);
-        assert!(pixel(&rgba, 22, 21)[3] > 0);
+        // Top bar center is solid (#8: both bars are filled now).
+        assert_eq!(pixel(&rgba, 20, 11)[3], 255);
+        // The bottom bar is also a SOLID filled bar (was a thin outline before).
+        assert_eq!(pixel(&rgba, 18, 22)[3], 255);
     }
 
     #[test]
@@ -102,7 +104,7 @@ mod tests {
     #[test]
     fn live_icon_has_amber_dot_and_gray_bars() {
         let rgba = menubar_icon(true);
-        assert_eq!(&pixel(&rgba, 5, 13)[..3], &AMBER);
-        assert_eq!(&pixel(&rgba, 22, 13)[..3], &GRAY);
+        assert_eq!(&pixel(&rgba, 6, 12)[..3], &AMBER);
+        assert_eq!(&pixel(&rgba, 20, 11)[..3], &GRAY);
     }
 }

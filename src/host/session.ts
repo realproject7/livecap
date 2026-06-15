@@ -9,6 +9,7 @@ import { join } from "node:path";
 
 import {
   ClaudeCliEngine,
+  computeMeetingMetrics,
   CreditAccountant,
   ExtrasBudget,
   ExtrasBudgetExceededError,
@@ -17,17 +18,25 @@ import {
   nodeLedgerFs,
   SummaryCadence,
 } from "@livecap/engine";
-import type { GaugeState, ReplyIntent, TranslationEngine, Usage } from "@livecap/engine";
+import type {
+  FinalizedRecord,
+  GaugeState,
+  MeetingMetrics,
+  ReplyIntent,
+  TranslationEngine,
+  Usage,
+} from "@livecap/engine";
 import {
   adoptOrphanRecordings,
   nodeArchiveFs,
   SessionArchiveWriter,
   sweepOldArchives,
 } from "@livecap/archive";
-import type { BoardData, CaptionEntry } from "@livecap/archive";
+import type { BoardData, CaptionEntry, MetricsData } from "@livecap/archive";
 
 import type { Channel, GaugeWire, HostInbound, HostOutbound } from "../protocol.ts";
 import { detectClaudeCli } from "./detect-cli.ts";
+import { toFinalizedRecords } from "./metrics-records.ts";
 import { LazyLocalEngine } from "./local-tier.ts";
 import { SILENCE_THRESHOLD_MS, SilenceWatchdog } from "./silence.ts";
 import { resolveStartConfig } from "./start-config.ts";
@@ -37,6 +46,8 @@ import { TranslationRunner } from "./translation-runner.ts";
 const CLI_ENGINE_LABEL = "Claude CLI";
 const LOCAL_ENGINE_LABEL = "Local (Qwen3 4B)";
 const SUMMARY_TICK_MS = 5_000;
+/** Recent transcript lines fed as context to a targeted analysis (#80). */
+const ANALYZE_CONTEXT_LINES = 10;
 const WATCHDOG_TICK_MS = 15_000;
 const DRAIN_TIMEOUT_MS = 20_000;
 /** Liveness heartbeat for the in-progress recording (#69): the writer touches
@@ -59,6 +70,9 @@ interface CaptionMeta {
   text: string;
   lowConfidence: boolean;
   epochMs: number;
+  /** Spoken duration in ms (#81/#78) — accumulated into the FinalizedRecord[]
+   *  the post-meeting metrics consume. */
+  durationMs: number;
 }
 
 function clockLabel(epochMs: number): string {
@@ -130,6 +144,12 @@ export class HostSession {
         return;
       case "reply":
         void this.onReply(message.id, message.intent);
+        return;
+      case "analyze":
+        void this.onAnalyze(message.cardId, message.captionId);
+        return;
+      case "coach":
+        void this.onCoach(message.cardId, message.captionIds);
         return;
       case "retranslate":
         this.onRetranslate(message.id);
@@ -357,6 +377,7 @@ export class HostSession {
       text: message.text,
       lowConfidence: message.lowConfidence,
       epochMs: message.epochMs,
+      durationMs: message.durationMs,
     });
     const speaker = message.channel === "me" ? "Me" : "Them";
     this.transcriptLines.push(`${speaker}: ${message.text}`);
@@ -432,6 +453,63 @@ export class HostSession {
     } catch (error) {
       this.emit({ type: "extrasFailed", id, detail: errorDetail(error) });
     }
+  }
+
+  /** Targeted analysis of ONE caption block (#80). Resolves the clicked
+   *  caption's text via `metaById` and asks the engine for a strategy read + a
+   *  suggested reply, using the recent transcript as context. On-demand only;
+   *  cost flows through the gauge like the other extras. */
+  private async onAnalyze(cardId: number, captionId: number): Promise<void> {
+    if (!this.extras) return;
+    const meta = this.metaById.get(captionId);
+    if (!meta) {
+      // The clicked caption aged out of the host's map — surface it on the card.
+      this.emit({ type: "extrasFailed", id: cardId, detail: "caption no longer available" });
+      return;
+    }
+    try {
+      const result = await this.extras.analyzeAndRespond(
+        meta.text,
+        this.transcriptLines.slice(-ANALYZE_CONTEXT_LINES),
+      );
+      this.emit({ type: "analysis", cardId, analysis: result.analysis, reply: result.reply });
+      this.emitGauge(); // extras spend changed → refresh the gauge
+    } catch (error) {
+      this.emit({ type: "extrasFailed", id: cardId, detail: errorDetail(error) });
+    }
+  }
+
+  /** Speech coaching for a batch of the user's own (mic) utterances (#82).
+   *  Resolves each id's text via `metaById` and runs the engine's batch coach;
+   *  ids that aged out are skipped. On-demand only; cost flows through the gauge. */
+  private async onCoach(cardId: number, captionIds: number[]): Promise<void> {
+    if (!this.extras) return;
+    const resolved = captionIds
+      .map((id) => ({ id, meta: this.metaById.get(id) }))
+      .filter((entry): entry is { id: number; meta: CaptionMeta } => entry.meta !== undefined);
+    if (resolved.length === 0) {
+      this.emit({ type: "extrasFailed", id: cardId, detail: "utterances no longer available" });
+      return;
+    }
+    try {
+      const results = await this.extras.coachUtterances(resolved.map((entry) => entry.meta.text));
+      const items = results.map((result, index) => ({
+        id: resolved[index].id,
+        better: result.better,
+        changes: result.changes,
+        explanation: result.explanation,
+      }));
+      this.emit({ type: "coaching", cardId, items });
+      this.emitGauge(); // extras spend changed → refresh the gauge
+    } catch (error) {
+      this.emit({ type: "extrasFailed", id: cardId, detail: errorDetail(error) });
+    }
+  }
+
+  /** Build the FinalizedRecord[] the post-meeting metrics consume (#81/#78)
+   *  from the per-id meta accumulated over the session. */
+  private finalizedRecords(): FinalizedRecord[] {
+    return toFinalizedRecords(this.metaById.values());
   }
 
   private async summaryTick(): Promise<void> {
@@ -561,6 +639,22 @@ export class HostSession {
       }
     }
 
+    // Post-meeting metrics (#81/#78): talk-time ratio + Smooth Score from the
+    // per-id meta accumulated this session. Computed once, emitted on the wire
+    // for the review screen and persisted into the archive.
+    const metrics: MeetingMetrics = computeMeetingMetrics(this.finalizedRecords());
+    this.emit({
+      type: "metrics",
+      talkRatioMic: metrics.talkTime.micShare,
+      smoothScore: metrics.smoothScore,
+      micMs: metrics.talkTime.micMs,
+      systemMs: metrics.talkTime.systemMs,
+    });
+    const archiveMetrics: MetricsData = {
+      talkRatioMic: metrics.talkTime.micShare,
+      smoothScore: metrics.smoothScore,
+    };
+
     const now = Date.now();
     if (this.writer) {
       try {
@@ -568,6 +662,7 @@ export class HostSession {
           title: finalSummary?.summary[0] ?? "",
           summary: finalSummary?.summary ?? [],
           board: finalSummary?.board ?? { decisions: [], actionItems: [], openQuestions: [] },
+          metrics: archiveMetrics,
           endClock: clockLabel(now),
           durationMin: Math.round((now - this.startedAtMs) / 60_000),
           costUsd: this.sessionCostUsd,
@@ -580,11 +675,15 @@ export class HostSession {
 
     this.accountant?.recordMeetingTime(now - this.startedAtMs);
 
-    try {
-      await this.engine?.stop();
-    } catch (error) {
-      this.emit({ type: "status", detail: `engine stop failed (${errorDetail(error)})` });
-    }
+    // NOTE (#82): the engine is intentionally NOT stopped here. The post-meeting
+    // review screen (which opens AFTER this `stopped` event) has a Coaching tab
+    // that round-trips through the live engine; tearing it down on stop is what
+    // made coaching hang forever (the host process used to exit, too). The engine
+    // is reaped instead on process teardown — `dispose()` (signal/exit) or when
+    // the Rust shell closes stdin and a fresh session starts. Captures and the
+    // pipeline are already gone (Rust side); only the cheap engine handle lingers.
+    // `stopping` stays latched (a second stop is a no-op); post-meeting `onCoach`
+    // doesn't gate on it, so coaching still runs after the session ends.
     this.emit({ type: "stopped" });
   }
 
@@ -598,6 +697,12 @@ export class HostSession {
   dispose(): void {
     this.stopping = true;
     for (const handle of this.intervals.splice(0)) clearInterval(handle);
+    // Reap the engine here (#82): since `stop()` now keeps the engine warm for
+    // post-meeting coaching, teardown is the one place the engine is torn down.
+    // `dispose()` is the synchronous force-kill (local llama-server child);
+    // `stop()` SIGTERMs and awaits it (best-effort, fire-and-forget — the CLI
+    // engine has no `dispose`, only `stop`, so this also kills its child).
     this.engine?.dispose?.();
+    void this.engine?.stop().catch(() => undefined);
   }
 }

@@ -8,11 +8,23 @@ import { listen } from "@tauri-apps/api/event";
 import { writeText } from "@tauri-apps/plugin-clipboard-manager";
 import { ask } from "@tauri-apps/plugin-dialog";
 
-import { applyCaptionSize, type AppSettings } from "./app-settings";
+import {
+  applyCaptionSize,
+  nextSettingsForSessionLanguage,
+  type AppSettings,
+} from "./app-settings";
 import { bootstrap } from "./bootstrap";
+import { LANGUAGES, languageByCode } from "./languages";
 import { FeedState, type CaptionBlock } from "./feed-state";
+import {
+  buildReview,
+  type CoachingCard,
+  type ReviewCallbacks,
+  type ReviewSurface,
+} from "./review";
 import { startOnboarding } from "./onboarding";
 import type {
+  BoardWire,
   Capabilities,
   CaptionBridgeEvent,
   HostInbound,
@@ -32,6 +44,10 @@ interface ChromePayload {
 
 const CHROME_HIDE_MS = 3000;
 const TOAST_MS = 4000;
+/** TTS voice language for the coaching playback (#82). The meeting language is
+ *  English (src/host/start-config.ts MEETING_LANGUAGE); the rewrite is in that
+ *  language, so the voice is English. */
+const MEETING_VOICE_LANG = "en-US";
 
 const ICONS = {
   play: '<svg viewBox="0 0 12 12" fill="currentColor" aria-hidden="true"><path d="M3.2 2.1a.8.8 0 0 1 1.2-.7l6 3.9a.8.8 0 0 1 0 1.4l-6 3.9a.8.8 0 0 1-1.2-.7z"/></svg>',
@@ -43,12 +59,13 @@ const ICONS = {
     '<svg viewBox="0 0 12 12" aria-hidden="true"><g fill="currentColor" opacity="0.55"><rect x="4.4" y="0.8" width="3.2" height="6" rx="1.6"/><path d="M2.7 5.4a.55.55 0 0 1 1.1 0 2.2 2.2 0 0 0 4.4 0 .55.55 0 0 1 1.1 0 3.3 3.3 0 0 1-2.75 3.25v1.25h1.05a.55.55 0 0 1 0 1.1H4.4a.55.55 0 0 1 0-1.1h1.05V8.65A3.3 3.3 0 0 1 2.7 5.4z"/></g><path d="M1.8 1.4l8.4 9.2" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" fill="none"/></svg>',
   clickThrough:
     '<svg viewBox="0 0 12 12" fill="currentColor" aria-hidden="true"><path d="M2 1l8 6.2-3.6.5L8.2 11l-1.6.7-1.7-3.2L2 11.2z"/></svg>',
+  pin: '<svg viewBox="0 0 12 12" fill="currentColor" aria-hidden="true"><path d="M7.3.9 11.1 4.7a.7.7 0 0 1-.46 1.19l-1.83.2-1.6 1.6.36 2.2a.7.7 0 0 1-1.19.6L4.2 8.16 1.6 10.75a.6.6 0 0 1-.85-.85L3.34 7.3 1.51 5.41a.7.7 0 0 1 .6-1.19l2.2.36 1.6-1.6.2-1.83A.7.7 0 0 1 7.3.9Z"/></svg>',
   mode: '<svg viewBox="0 0 12 12" fill="currentColor" aria-hidden="true"><rect x="1" y="1.5" width="10" height="3.2" rx="1.4"/><rect x="2.5" y="6.2" width="7" height="2.2" rx="1.1"/><rect x="4" y="9.8" width="4" height="1.6" rx="0.8"/></svg>',
   close:
     '<svg viewBox="0 0 12 12" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" fill="none" aria-hidden="true"><path d="M3 3l6 6M9 3l-6 6"/></svg>',
 };
 
-const state: ShellState = { mode: "panel", clickThrough: false, live: false };
+const state: ShellState = { mode: "panel", clickThrough: false, pinned: true, live: false };
 let capabilities: Capabilities = { captioning: false, settings: false };
 let phase: SessionStatus["phase"] = "idle";
 // #53: desired capture channels for the running session (both-on while idle).
@@ -56,6 +73,12 @@ let channels: SessionChannels = { system: true, mic: true };
 let statusDetail = "";
 let summaryLine = "";
 let requestCounter = 0;
+// Latest full summary/board (#81) — retained so the post-meeting review screen
+// can render them; the live strip only shows the first summary line.
+let latestSummary: string[] = [];
+let latestBoard: BoardWire = { decisions: [], actionItems: [], openQuestions: [] };
+// Latest archive path for the review screen's "open saved file" action.
+let latestArchivePath: string | null = null;
 
 const feed = new FeedState();
 
@@ -66,11 +89,25 @@ document.body.innerHTML = `
       <button id="btn-stop" class="btn" aria-label="Stop captioning">${ICONS.stop}</button>
       <button id="btn-mic" class="btn" aria-label="Microphone capture on/off">${ICONS.mic}</button>
       <span class="spacer"></span>
+      <button id="btn-pin" class="btn" aria-label="Pin LiveCap on top">${ICONS.pin}</button>
       <button id="btn-clickthrough" class="btn" aria-label="Toggle click-through">${ICONS.clickThrough}</button>
       <button id="btn-mode" class="btn" aria-label="Cycle window mode">${ICONS.mode}</button>
       <button id="btn-close" class="btn" aria-label="Hide LiveCap">${ICONS.close}</button>
     </div>
     <div id="panel-body">
+      <div id="start-panel">
+        <div class="sp-mark">LiveCap</div>
+        <div class="sp-sub">Live captions and translation for everything you hear — private, on this Mac.</div>
+        <div class="sp-guide">
+          <div class="sp-guide-row"><span class="sp-guide-ico">🔊</span><span>Captions what you hear <b>and</b> what you say, in real time.</span></div>
+          <div class="sp-guide-row"><span class="sp-guide-ico">🌐</span><span>Translates each line into your language, right underneath.</span></div>
+          <div class="sp-guide-row"><span class="sp-guide-ico">🔒</span><span>On-device &amp; private — hidden from screen sharing.</span></div>
+        </div>
+        <label class="sp-lang-label" for="sp-lang">Translate into</label>
+        <select id="sp-lang" class="sp-lang" aria-label="Target language for this session"></select>
+        <button id="sp-start" type="button" class="sp-start">Start captioning</button>
+        <div class="sp-hint t-meta">Nothing is captured until you start.</div>
+      </div>
       <div id="summary">
         <span class="live-dot" id="summary-dot"></span>
         <div class="txt"><span class="lbl" id="summary-label">LiveCap</span><span id="summary-line"></span></div>
@@ -82,6 +119,7 @@ document.body.innerHTML = `
       <button id="live-chip" type="button">↓ live</button>
       <div id="pinned"></div>
       <div id="cards"></div>
+      <div id="review-mount"></div>
       <div id="chips">
         <button class="chip" data-intent="suggest">✦ Suggest</button>
         <button class="chip" data-intent="agree">👍 Agree</button>
@@ -116,6 +154,7 @@ const chrome = $<HTMLDivElement>("chrome");
 const btnPause = $<HTMLButtonElement>("btn-pause");
 const btnStop = $<HTMLButtonElement>("btn-stop");
 const btnMic = $<HTMLButtonElement>("btn-mic");
+const btnPin = $<HTMLButtonElement>("btn-pin");
 const btnClickThrough = $<HTMLButtonElement>("btn-clickthrough");
 const btnMode = $<HTMLButtonElement>("btn-mode");
 const btnClose = $<HTMLButtonElement>("btn-close");
@@ -137,6 +176,9 @@ const stripSrc = document.querySelector<HTMLDivElement>("#strip-view .src") as H
 const stripTr = document.querySelector<HTMLDivElement>("#strip-view .tr") as HTMLDivElement;
 const capsuleTxt = document.querySelector<HTMLSpanElement>("#capsule-view .txt") as HTMLSpanElement;
 const onboardingEl = $<HTMLDivElement>("onboarding");
+const startPanel = $<HTMLDivElement>("start-panel");
+const startLangSelect = $<HTMLSelectElement>("sp-lang");
+const startBtn = $<HTMLButtonElement>("sp-start");
 
 /* ================= settings (#12) ================= */
 
@@ -190,8 +232,45 @@ async function sessionCommand(command: string): Promise<void> {
   }
 }
 
+/** Populate the start-panel picker and select the remembered default. */
+function renderStartPanel(): void {
+  if (startLangSelect.options.length === 0) {
+    startLangSelect.innerHTML = LANGUAGES.map(
+      (l) => `<option value="${l.code}">${l.native}</option>`,
+    ).join("");
+  }
+  // The last-used target (persisted) is the default for the next session (#2);
+  // a tag outside the curated list still resolves, so seed it as an option.
+  const current = languageByCode(appSettings.targetLanguage);
+  if (!LANGUAGES.some((l) => l.code === current.code)) {
+    const opt = document.createElement("option");
+    opt.value = current.code;
+    opt.textContent = current.native;
+    startLangSelect.appendChild(opt);
+  }
+  startLangSelect.value = current.code;
+}
+
+/** Start a session with the language chosen in the start panel (#1/#2). The
+ *  pick is persisted FIRST so (a) it becomes the next session's default and
+ *  (b) start_inner — which reads settings fresh — honors it. */
+async function startSession(): Promise<void> {
+  const next = nextSettingsForSessionLanguage(appSettings, startLangSelect.value);
+  if (next) {
+    try {
+      await persistSettings(next);
+    } catch (error) {
+      showToast(String(error));
+      return;
+    }
+  }
+  await sessionCommand("session_start");
+}
+
+startBtn.addEventListener("click", () => void startSession());
+
 btnPause.addEventListener("click", () => {
-  if (phase === "idle") void sessionCommand("session_start");
+  if (phase === "idle") void startSession();
   else if (phase === "live") void sessionCommand("session_pause");
   else if (phase === "paused") void sessionCommand("session_resume");
 });
@@ -213,6 +292,19 @@ function render(): void {
   document.body.dataset.mode = state.mode;
   document.body.dataset.phase = phase;
 
+  // #1: while idle, the Panel shows the Start/home screen — brand, a short
+  // guide, the per-session language pick and the "Start captioning" CTA. It
+  // never auto-runs; the session begins only when the user presses Start. The
+  // screen hides while onboarding or the post-meeting review owns the Panel.
+  const showStart =
+    phase === "idle" &&
+    capabilities.captioning &&
+    !onboardingEl.classList.contains("active") &&
+    !review.isOpen();
+  startPanel.classList.toggle("visible", showStart);
+  if (showStart) renderStartPanel();
+  startBtn.disabled = !capabilities.captioning;
+
   btnPause.disabled = !capabilities.captioning || phase === "starting" || phase === "stopping";
   btnStop.disabled = !capabilities.captioning || !sessionRunning();
   btnMic.disabled = !capabilities.captioning || !sessionRunning();
@@ -233,6 +325,11 @@ function render(): void {
           ? "Resume captions"
           : "Working…";
   btnStop.title = "Stop captioning and save the transcript";
+
+  btnPin.setAttribute("aria-pressed", String(state.pinned));
+  btnPin.title = state.pinned
+    ? "Pinned on top — floats over every Space; click to unpin"
+    : "Unpinned — behaves like a normal window; click to pin on top";
 
   const clickThroughAvailable = state.mode !== "panel";
   btnClickThrough.style.display = clickThroughAvailable ? "" : "none";
@@ -274,6 +371,7 @@ function blockEl(block: CaptionBlock): HTMLElement {
       <span class="src"></span>
       <span class="time t-meta"></span>
       <span class="ghost">
+        <button class="g g-analyze" title="Analyze + suggest a reply">✦</button>
         <button class="g g-pin" title="Pin">📌</button>
         <button class="g g-copy" title="Copy">⧉</button>
         <button class="g g-re" title="Retranslate">⟳</button>
@@ -281,6 +379,7 @@ function blockEl(block: CaptionBlock): HTMLElement {
     </div>
     <div class="tr"></div>
   `;
+  el.querySelector<HTMLButtonElement>(".g-analyze")?.addEventListener("click", () => analyzeBlock(block.key));
   el.querySelector<HTMLButtonElement>(".g-pin")?.addEventListener("click", () => togglePin(block.key));
   el.querySelector<HTMLButtonElement>(".g-copy")?.addEventListener("click", () => copyBlock(block.key));
   el.querySelector<HTMLButtonElement>(".g-re")?.addEventListener("click", () => retranslate(block.key));
@@ -407,15 +506,52 @@ function retranslate(key: string): void {
   void hostRequest({ type: "retranslate", id: block.id });
 }
 
+/* ---- #80 targeted analysis: click a caption → strategy + suggested reply ---- */
+
+function analyzeBlock(key: string): void {
+  const block = feed.blocks.find((b) => b.key === key);
+  if (!block || block.id === null || !sessionRunning()) return;
+  const captionId = block.id;
+  const card = newAnalysisCard(block.source, () => requestAnalysis(captionId, card.id));
+  requestAnalysis(captionId, card.id);
+}
+
+function requestAnalysis(captionId: number, cardId: number): void {
+  void hostRequest({ type: "analyze", cardId, captionId });
+}
+
 /* ---- strip / capsule: latest line(s) from the same stream (§8.1) ---- */
 
 function syncMiniViews(): void {
   const latest = feed.latest();
-  stripSrc.textContent = latest?.source ?? "";
-  stripSrc.classList.toggle("t-partial", latest?.state === "streaming");
-  stripSrc.classList.toggle("t-original", latest?.state !== "streaming");
-  stripTr.textContent = latest?.translation ?? "";
-  capsuleTxt.textContent = latest?.source ?? (sessionRunning() ? "Listening…" : "LiveCap");
+
+  // #6 Strip (TV-subtitle style, design/screens/03-strip-mode.png): the latest
+  // finalized line as SOURCE (caption) on top + TRANSLATION underneath, both
+  // filling the strip width. A still-streaming partial shows in the partial tone
+  // with no translation yet.
+  const streaming = latest?.state === "streaming";
+  stripSrc.textContent = latest?.source ?? (sessionRunning() ? "Listening…" : "LiveCap");
+  stripSrc.classList.toggle("t-partial", streaming);
+  stripSrc.classList.toggle("t-original", !streaming);
+  const stripTranslation = latest?.translation ?? "";
+  stripTr.textContent = stripTranslation;
+  stripTr.classList.toggle("empty", stripTranslation === "");
+
+  // #7 Capsule (one-line 44px pill, design/screens/04-capsule-mode.png): show the
+  // most useful single line — the latest TRANSLATION, since that is the value the
+  // user can't otherwise understand. Fall back to the source when no translation
+  // exists yet (still streaming, pending, or failed). The source rides along as a
+  // native tooltip; the live dot already marks the channel.
+  const capsuleLine =
+    latest === null
+      ? sessionRunning()
+        ? "Listening…"
+        : "LiveCap"
+      : latest.translation !== ""
+        ? latest.translation
+        : latest.source;
+  capsuleTxt.textContent = capsuleLine;
+  capsuleTxt.title = latest?.source ?? "";
 }
 
 /* ---- inline result cards (reply chips + quick translate, §8.5) ---- */
@@ -440,12 +576,12 @@ function newCard(label: string, intent?: ReplyIntentWire): number {
   const el = document.createElement("div");
   el.className = "card fading-in";
   el.innerHTML = `
+    <button class="card-x" title="Close" aria-label="Close">${ICONS.close}</button>
     <div class="card-label t-meta"></div>
     <div class="card-body"></div>
     <div class="card-actions">
-      <button class="c-copy">⧉ Copy</button>
-      ${intent !== undefined ? '<button class="c-again">⟳ Another</button>' : ""}
-      <button class="c-close">✕</button>
+      <button class="c-copy" title="Copy">⧉ Copy</button>
+      ${intent !== undefined ? '<button class="c-again" title="Generate another">⟳ Another</button>' : ""}
     </div>
   `;
   const labelEl = el.querySelector<HTMLDivElement>(".card-label");
@@ -458,7 +594,7 @@ function newCard(label: string, intent?: ReplyIntentWire): number {
       () => showToast("Copy failed"),
     );
   });
-  el.querySelector<HTMLButtonElement>(".c-close")?.addEventListener("click", () => {
+  el.querySelector<HTMLButtonElement>(".card-x")?.addEventListener("click", () => {
     pendingCards.forEach((card, key) => {
       if (card.el === el) pendingCards.delete(key);
     });
@@ -474,6 +610,165 @@ function newCard(label: string, intent?: ReplyIntentWire): number {
   cardsEl.appendChild(el);
   requestAnimationFrame(() => el.classList.remove("fading-in"));
   return registerCard(el, body);
+}
+
+/* ---- #80 analysis card: two sections (strategy + reply), copy/regenerate/dismiss ---- */
+
+interface AnalysisCard {
+  id: number;
+  setPending: () => void;
+  fill: (analysis: string, reply: string) => void;
+  fail: (detail: string) => void;
+}
+
+const analysisCards = new Map<number, AnalysisCard>();
+
+/** Build an inline analysis card (#80) under the feed: a strategy read +
+ *  suggested reply, with copy (the reply), regenerate, and dismiss. Mirrors the
+ *  reply-card chrome but renders two labelled sections. `onRegenerate` re-fires
+ *  the analyze request for the same caption. */
+function newAnalysisCard(targetSource: string, onRegenerate: () => void): AnalysisCard {
+  requestCounter += 1;
+  const id = requestCounter;
+  const el = document.createElement("div");
+  el.className = "card analysis-card fading-in";
+  el.innerHTML = `
+    <button class="card-x" title="Close" aria-label="Close">${ICONS.close}</button>
+    <div class="card-label t-meta">✦ Analysis</div>
+    <div class="card-target t-meta"></div>
+    <div class="analysis-section">
+      <div class="analysis-head t-meta">Strategy</div>
+      <div class="analysis-strategy card-body"></div>
+    </div>
+    <div class="analysis-section">
+      <div class="analysis-head t-meta">Suggested reply</div>
+      <div class="analysis-reply card-body"></div>
+    </div>
+    <div class="card-actions">
+      <button class="c-copy" title="Copy reply">⧉ Copy reply</button>
+      <button class="c-again" title="Regenerate analysis">⟳ Regenerate</button>
+    </div>
+  `;
+  const targetEl = el.querySelector<HTMLDivElement>(".card-target");
+  if (targetEl) targetEl.textContent = targetSource;
+  const strategyEl = el.querySelector<HTMLDivElement>(".analysis-strategy") as HTMLDivElement;
+  const replyEl = el.querySelector<HTMLDivElement>(".analysis-reply") as HTMLDivElement;
+
+  const card: AnalysisCard = {
+    id,
+    setPending: () => {
+      strategyEl.textContent = "…";
+      replyEl.textContent = "…";
+    },
+    fill: (analysis, reply) => {
+      strategyEl.textContent = analysis !== "" ? analysis : "—";
+      replyEl.textContent = reply !== "" ? reply : "—";
+    },
+    fail: (detail) => {
+      strategyEl.textContent = `unavailable (${detail})`;
+      replyEl.textContent = "";
+    },
+  };
+  card.setPending();
+
+  el.querySelector<HTMLButtonElement>(".c-copy")?.addEventListener("click", () => {
+    void writeText(replyEl.textContent ?? "").then(
+      () => showToast("Copied"),
+      () => showToast("Copy failed"),
+    );
+  });
+  el.querySelector<HTMLButtonElement>(".c-again")?.addEventListener("click", () => {
+    card.setPending();
+    onRegenerate();
+  });
+  el.querySelector<HTMLButtonElement>(".card-x")?.addEventListener("click", () => {
+    analysisCards.delete(id);
+    el.remove();
+  });
+
+  cardsEl.appendChild(el);
+  requestAnimationFrame(() => el.classList.remove("fading-in"));
+  analysisCards.set(id, card);
+  return card;
+}
+
+/* ---- #81 review screen + #82 coaching tab (src/review.ts) ---- */
+
+const reviewCallbacks: ReviewCallbacks = {
+  requestCoaching: (ids) => {
+    requestCounter += 1;
+    const cardId = requestCounter;
+    // Route a SYNCHRONOUS forward failure (e.g. the host request is rejected) to
+    // the coaching card so it shows an error + retry instead of spinning forever
+    // (#5). A successful forward resolves later via a "coaching"/"extrasFailed"
+    // host event, which the host://event handler routes to the same card.
+    void invoke("host_request", { message: { type: "coach", cardId, captionIds: ids } }).catch(
+      (error: unknown) => {
+        coachingCards.get(cardId)?.fail(String(error));
+      },
+    );
+    return cardId;
+  },
+  copy: (text) =>
+    void writeText(text).then(
+      () => showToast("Copied"),
+      () => showToast("Copy failed"),
+    ),
+  speak: speakBetter,
+  close: () => {
+    review.hide();
+    // Closing the review returns the idle Panel to the Start screen (#1).
+    render();
+  },
+};
+
+const review: ReviewSurface = buildReview(reviewCallbacks);
+$<HTMLDivElement>("review-mount").appendChild(review.el);
+
+/** Route a coaching result/failure to its card (owned by the review surface). */
+const coachingCards = {
+  get: (id: number): CoachingCard | undefined => review.coachingCard(id),
+};
+
+/** Speak the rewrite aloud via the webview Web Speech API (#82). The meeting
+ *  language is English (src/host/start-config.ts), so the voice is en-* — no
+ *  macOS `say`, no Rust command. Silently no-ops where speech synthesis is
+ *  unavailable. */
+function speakBetter(text: string): void {
+  if (text === "" || typeof window.speechSynthesis === "undefined") return;
+  const utterance = new SpeechSynthesisUtterance(text);
+  utterance.lang = MEETING_VOICE_LANG;
+  const voice = window.speechSynthesis
+    .getVoices()
+    .find((v) => v.lang.toLowerCase().startsWith("en"));
+  if (voice) utterance.voice = voice;
+  window.speechSynthesis.cancel();
+  window.speechSynthesis.speak(utterance);
+}
+
+// Metrics arrive (HostOutbound "metrics") just before the archive path
+// ("archived"); retain them so the review opens once the session has stopped.
+let pendingMetrics: { talkRatioMic: number; smoothScore: number; micMs: number; systemMs: number } | null =
+  null;
+
+/** Open the post-meeting review screen (#81) with the retained summary/board +
+ *  metrics + the session's own (mic) utterances. Called on session end. */
+function openReview(talkRatioMic: number, smoothScore: number, micMs: number, systemMs: number): void {
+  const utterances = feed.micUtterances().map((block) => ({
+    id: block.id,
+    source: block.source,
+    time: block.epochMs !== null ? clockLabel(block.epochMs) : "",
+  }));
+  review.show({
+    summary: latestSummary,
+    board: latestBoard,
+    talkRatioMic,
+    smoothScore,
+    micMs,
+    systemMs,
+    utterances,
+    archivePath: latestArchivePath,
+  });
 }
 
 const CHIP_LABELS: Record<ReplyIntentWire, string> = {
@@ -579,6 +874,8 @@ void listen<HostOutbound>("host://event", (event) => {
     }
     case "summary":
       summaryLine = message.summary[0] ?? "";
+      latestSummary = message.summary;
+      latestBoard = message.board;
       renderSummaryStrip();
       break;
     case "engineSwitch":
@@ -590,15 +887,36 @@ void listen<HostOutbound>("host://event", (event) => {
       if (card) card.body.textContent = message.text;
       break;
     }
+    case "analysis": {
+      analysisCards.get(message.cardId)?.fill(message.analysis, message.reply);
+      break;
+    }
+    case "metrics":
+      pendingMetrics = {
+        talkRatioMic: message.talkRatioMic,
+        smoothScore: message.smoothScore,
+        micMs: message.micMs,
+        systemMs: message.systemMs,
+      };
+      break;
+    case "coaching": {
+      coachingCards.get(message.cardId)?.fill(message.items);
+      break;
+    }
     case "extrasFailed": {
+      // The id namespace is shared (requestCounter) across all on-demand cards,
+      // so route the failure to whichever card kind owns it.
       const card = pendingCards.get(message.id);
       if (card) card.body.textContent = `unavailable (${message.detail})`;
+      analysisCards.get(message.id)?.fail(message.detail);
+      coachingCards.get(message.id)?.fail(message.detail);
       break;
     }
     case "silence":
       void promptSilenceStop(message.sinceMs);
       break;
     case "archived":
+      latestArchivePath = message.path;
       showToast(`Saved — ${message.path.split("/").pop() ?? message.path}`);
       break;
     case "status":
@@ -612,8 +930,20 @@ void listen<HostOutbound>("host://event", (event) => {
     case "gauge":
       settingsSheet.updateGauge(message.gauge);
       break;
-    case "ready":
     case "stopped":
+      // Session end (#81): show the review screen with the retained summary/board,
+      // the metrics that just arrived, and the session's own (mic) utterances.
+      if (pendingMetrics) {
+        openReview(
+          pendingMetrics.talkRatioMic,
+          pendingMetrics.smoothScore,
+          pendingMetrics.micMs,
+          pendingMetrics.systemMs,
+        );
+        pendingMetrics = null;
+      }
+      break;
+    case "ready":
       break;
   }
 });
@@ -635,6 +965,9 @@ async function promptSilenceStop(sinceMs: number): Promise<void> {
 void listen<SessionStatus>("session://status", (event) => {
   phase = event.payload.phase;
   statusDetail = event.payload.detail ?? "";
+  // A new session is starting — dismiss the previous review screen so it never
+  // overlaps the live feed.
+  if ((phase === "starting" || phase === "live") && review.isOpen()) review.hide();
   render();
   syncMiniViews();
 });
@@ -659,29 +992,57 @@ function showChrome(): void {
 document.addEventListener("pointermove", showChrome);
 document.addEventListener("pointerdown", showChrome);
 
-/* dragging: Rust follows the cursor and applies magnetic snapping. In Panel
-   mode the feed/cards/composer are interactive (scroll, type), so dragging
-   starts only from non-interactive surfaces. */
-let dragStart: { x: number; y: number; t: number } | null = null;
+/* dragging (#3): Rust follows the cursor and applies magnetic snapping. The
+   drag must start ONLY from non-interactive "title region" surfaces and must
+   never fight a control. The earlier guard only excluded `button, input`, so a
+   native `<select>` (the Start/Settings language picker) started a drag and the
+   `setPointerCapture` below stole the pointer stream from the OS — the native
+   popup then closed/glitched the moment the cursor moved (the #3 root cause).
+   Every form control + interactive container is excluded now, and the capture
+   is taken only once a real drag is confirmed (never on a plain control click). */
+
+/** Any native form control / editable / interactive container: never a drag
+ *  origin (so its own pointer + native popup behavior is left untouched). */
+const INTERACTIVE_SELECTOR =
+  "button, input, select, textarea, option, a, [contenteditable], " +
+  "#feed-wrap, #pinned, #cards, #chips, #composer, " +
+  "#settings-sheet, #onboarding, #start-panel, #review-mount";
+
+let dragStart: { x: number; y: number; t: number; pointerId: number; captured: boolean } | null = null;
 
 glass.addEventListener("pointerdown", (e: PointerEvent) => {
   if (e.button !== 0) return;
   const target = e.target as HTMLElement;
-  if (target.closest("button, input")) return;
-  if (state.mode === "panel" && target.closest("#feed-wrap, #pinned, #cards, #chips, #composer")) return;
-  glass.setPointerCapture(e.pointerId);
-  dragStart = { x: e.screenX, y: e.screenY, t: Date.now() };
+  // Controls/interactive containers are interactive in EVERY mode — a native
+  // popup (e.g. <select>) must keep the OS pointer stream, so never capture.
+  if (target.closest(INTERACTIVE_SELECTOR)) return;
+  dragStart = { x: e.screenX, y: e.screenY, t: Date.now(), pointerId: e.pointerId, captured: false };
+});
+
+// Capture + begin the Rust drag only once the pointer actually moves past a
+// small threshold — a plain click on a non-control surface never captures, so
+// it can't swallow events meant for anything that opened underneath.
+const DRAG_THRESHOLD = 4;
+glass.addEventListener("pointermove", (e: PointerEvent) => {
+  if (!dragStart || dragStart.captured || e.pointerId !== dragStart.pointerId) return;
+  if (Math.hypot(e.screenX - dragStart.x, e.screenY - dragStart.y) < DRAG_THRESHOLD) return;
+  dragStart.captured = true;
+  glass.setPointerCapture(dragStart.pointerId);
   void invoke("begin_drag");
 });
 
 function finishDrag(e: PointerEvent): void {
   if (!dragStart) return;
-  void invoke("end_drag");
-  const moved = Math.hypot(e.screenX - dragStart.x, e.screenY - dragStart.y);
-  const quick = Date.now() - dragStart.t < 300;
+  const { x, y, t, pointerId, captured } = dragStart;
   dragStart = null;
+  if (captured) {
+    if (glass.hasPointerCapture(pointerId)) glass.releasePointerCapture(pointerId);
+    void invoke("end_drag");
+  }
+  const moved = Math.hypot(e.screenX - x, e.screenY - y);
+  const quick = Date.now() - t < 300;
   // §8.1: a click (not a drag) on the Capsule opens the Panel.
-  if (state.mode === "capsule" && moved < 4 && quick) {
+  if (state.mode === "capsule" && moved < DRAG_THRESHOLD && quick) {
     void invoke("set_mode", { mode: "panel" });
   }
 }
@@ -689,6 +1050,9 @@ function finishDrag(e: PointerEvent): void {
 glass.addEventListener("pointerup", finishDrag);
 glass.addEventListener("pointercancel", finishDrag);
 
+btnPin.addEventListener("click", () => {
+  void invoke("set_pinned", { pinned: !state.pinned });
+});
 btnClickThrough.addEventListener("click", () => {
   void invoke("set_click_through", { enabled: !state.clickThrough });
 });
@@ -742,13 +1106,20 @@ function maybeStartOnboarding(): void {
       host: onboardingEl,
       settings: appSettings,
       onDone: ({ targetLanguage, engine }) => {
+        // #1: onboarding seeds the first language default (#2) and lands on the
+        // idle Start screen — it no longer auto-starts a session. The user
+        // presses Start (here or the tray) when ready.
+        // The app boots unpinned during onboarding so the overlay can't cover
+        // the macOS permission sheets; now that setup is done, restore the saved
+        // pin preference.
+        void invoke("reapply_pin").catch(() => undefined);
         void persistSettings({
           ...appSettings,
           targetLanguage,
           engine,
           onboardingComplete: true,
         }).then(
-          () => sessionCommand("session_start"),
+          () => render(),
           (error: unknown) => showToast(String(error)),
         );
       },

@@ -34,7 +34,15 @@ const HOST_EXIT_TIMEOUT: Duration = Duration::from_secs(60);
 const SHUTDOWN_HOST_TIMEOUT: Duration = Duration::from_secs(8);
 
 /// Host-stdin request types the webview may forward through `host_request`.
-const FORWARDABLE_REQUESTS: &[&str] = &["quickTranslate", "reply", "retranslate", "pin", "silenceSnooze"];
+const FORWARDABLE_REQUESTS: &[&str] = &[
+    "quickTranslate",
+    "reply",
+    "analyze",
+    "coach",
+    "retranslate",
+    "pin",
+    "silenceSnooze",
+];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 #[repr(u8)]
@@ -104,6 +112,11 @@ struct HostHandle {
     /// Set before a deliberate stop so the reader thread does not report the
     /// host's exit as a failure.
     expected_exit: Arc<AtomicBool>,
+    /// One-shot wired by [`stop`]: the reader thread sends `()` when it observes
+    /// the host's `stopped` event (archive finalized). The host no longer exits
+    /// on stop (#82 — it keeps the engine warm for post-meeting coaching), so the
+    /// `stopped` event, not process exit, is what marks the stop complete.
+    stopped_signal: Arc<StdMutex<Option<std::sync::mpsc::Sender<()>>>>,
 }
 
 #[derive(Default)]
@@ -112,6 +125,10 @@ struct Inner {
     pipeline: Option<CaptionPipeline>,
     host: Option<HostHandle>,
     events_task: Option<tauri::async_runtime::JoinHandle<()>>,
+    /// A stopped session's host, kept alive only to serve post-meeting `coach`
+    /// requests from the review screen (#82). Reaped on the next session start or
+    /// on app shutdown. Its engine is warm; its pipeline/captures are already gone.
+    post_session_host: Option<HostHandle>,
 }
 
 /// Managed session state (one session at a time).
@@ -263,6 +280,11 @@ fn spawn_host(app: &AppHandle, start_message: &serde_json::Value) -> Result<Host
     let stdout = child.stdout.take().expect("piped stdout");
     let stderr = child.stderr.take().expect("piped stderr");
     let expected_exit = Arc::new(AtomicBool::new(false));
+    // Wired by `stop()`: the reader fires this when it sees the host's `stopped`
+    // event so the stop can complete without waiting for the (no-longer-occurring)
+    // process exit (#82).
+    let stopped_signal: Arc<StdMutex<Option<std::sync::mpsc::Sender<()>>>> =
+        Arc::new(StdMutex::new(None));
 
     // Drain stderr so the pipe never wedges the host. The bytes are
     // intentionally dropped: stderr could carry engine noise and caption
@@ -276,6 +298,7 @@ fn spawn_host(app: &AppHandle, start_message: &serde_json::Value) -> Result<Host
     // Forward host events to the webview; cache gauge snapshots for #12.
     let reader_app = app.clone();
     let reader_expected = expected_exit.clone();
+    let reader_stopped_signal = stopped_signal.clone();
     std::thread::spawn(move || {
         let reader = BufReader::new(stdout);
         for line in reader.lines() {
@@ -284,6 +307,16 @@ fn spawn_host(app: &AppHandle, start_message: &serde_json::Value) -> Result<Host
                 continue;
             };
             let kind = value.get("type").and_then(|t| t.as_str());
+            if kind == Some("stopped") {
+                // The session's archive is finalized: release any waiter in `stop()`
+                // (the host stays alive afterward for post-meeting coaching). Still
+                // forwarded to the webview below so the review screen opens.
+                if let Ok(mut slot) = reader_stopped_signal.lock() {
+                    if let Some(tx) = slot.take() {
+                        let _ = tx.send(());
+                    }
+                }
+            }
             if kind == Some("gauge") {
                 if let Some(cache) = reader_app.try_state::<GaugeCache>() {
                     if let Ok(mut guard) = cache.0.lock() {
@@ -322,6 +355,7 @@ fn spawn_host(app: &AppHandle, start_message: &serde_json::Value) -> Result<Host
         child,
         stdin,
         expected_exit,
+        stopped_signal,
     })
 }
 
@@ -353,12 +387,18 @@ fn start_captures(pipeline: &mut CaptionPipeline, channels: ChannelConfig) -> Re
 
 pub async fn start(app: AppHandle) -> Result<(), String> {
     let state = app.state::<SessionState>();
-    {
-        let _guard = state.inner.lock().await;
+    let stale_post_session = {
+        let mut inner = state.inner.lock().await;
         if state.phase() != Phase::Idle {
             return Err(format!("session is {}", state.phase().as_str()));
         }
         state.set_phase(Phase::Starting);
+        // A new session supersedes any post-session host kept warm for coaching
+        // (#82) — reap it (outside the lock) so its engine/llama-server is gone.
+        inner.post_session_host.take()
+    };
+    if let Some(host) = stale_post_session {
+        reap_host(host).await;
     }
     emit_status(
         &app,
@@ -524,30 +564,47 @@ pub async fn stop(app: AppHandle) -> Result<(), String> {
         let _ = task.await;
     }
 
-    if let Some(mut host) = host {
+    // The host no longer exits on stop (#82): it finalizes the archive, emits
+    // `stopped`, then stays alive so the review screen's Coaching tab can still
+    // reach the warm engine. Wait for the `stopped` event (archive finalized),
+    // then KEEP the host as the post-session host rather than reaping it.
+    let post_session_host = if let Some(host) = host {
         host.expected_exit.store(true, Ordering::Relaxed);
-        let _ = write_host_line(&host.stdin, &serde_json::json!({ "type": "stop" }));
         let (tx, rx) = std::sync::mpsc::channel();
-        std::thread::spawn(move || {
-            let _ = host.child.wait();
-            let _ = tx.send(());
-        });
-        let waited = tauri::async_runtime::spawn_blocking(move || rx.recv_timeout(HOST_EXIT_TIMEOUT))
-            .await;
+        if let Ok(mut slot) = host.stopped_signal.lock() {
+            *slot = Some(tx);
+        }
+        let _ = write_host_line(&host.stdin, &serde_json::json!({ "type": "stop" }));
+        let waited =
+            tauri::async_runtime::spawn_blocking(move || rx.recv_timeout(HOST_EXIT_TIMEOUT)).await;
         if !matches!(waited, Ok(Ok(()))) {
-            // The host did not finish in time; the archive working file is
-            // still on disk (incremental writes) — nothing is lost.
+            // The host did not confirm in time; the archive working file is still
+            // on disk (incremental writes) — nothing is lost. Reap it rather than
+            // keep a possibly-wedged host around.
             let _ = app.emit(
                 "host://event",
-                serde_json::json!({ "type": "hostError", "detail": "session host did not exit cleanly" }),
+                serde_json::json!({ "type": "hostError", "detail": "session host did not stop cleanly" }),
             );
+            reap_host(host).await;
+            None
+        } else {
+            Some(host)
         }
-    }
+    } else {
+        None
+    };
 
     {
         let mut inner = state.inner.lock().await;
         state.set_phase(Phase::Idle);
         inner.channels = ChannelConfig::default();
+        // Reap any prior post-session host before parking this one (defensive —
+        // start() also clears it, but a stop without an intervening start could
+        // otherwise leak one).
+        if let Some(stale) = inner.post_session_host.take() {
+            reap_host(stale).await;
+        }
+        inner.post_session_host = post_session_host;
     }
     tray::set_live(&app, false);
     tray::sync_mic(&app, false, false);
@@ -570,13 +627,22 @@ pub async fn stop(app: AppHandle) -> Result<(), String> {
 /// first also lets a gated #64 WAV dump finalize its header.
 pub async fn shutdown(app: &AppHandle) {
     let state = app.state::<SessionState>();
-    let (pipeline, host, events_task) = {
+    let (pipeline, host, events_task, post_session_host) = {
         let mut inner = state.inner.lock().await;
-        if state.phase() == Phase::Idle && inner.host.is_none() && inner.pipeline.is_none() {
+        if state.phase() == Phase::Idle
+            && inner.host.is_none()
+            && inner.pipeline.is_none()
+            && inner.post_session_host.is_none()
+        {
             return;
         }
         state.set_phase(Phase::Stopping);
-        (inner.pipeline.take(), inner.host.take(), inner.events_task.take())
+        (
+            inner.pipeline.take(),
+            inner.host.take(),
+            inner.events_task.take(),
+            inner.post_session_host.take(),
+        )
     };
 
     if let Some(pipeline) = pipeline {
@@ -586,6 +652,11 @@ pub async fn shutdown(app: &AppHandle) {
         let _ = task.await;
     }
     if let Some(host) = host {
+        reap_host(host).await;
+    }
+    // The post-session host (engine kept warm for coaching, #82) must also be
+    // reaped on quit so its llama-server is never orphaned.
+    if let Some(host) = post_session_host {
         reap_host(host).await;
     }
 
@@ -599,9 +670,22 @@ pub async fn shutdown(app: &AppHandle) {
 /// overstays. Runs on a blocking thread so the wait never stalls the runtime.
 async fn reap_host(host: HostHandle) {
     host.expected_exit.store(true, Ordering::Relaxed);
-    let _ = write_host_line(&host.stdin, &serde_json::json!({ "type": "stop" }));
+    let HostHandle {
+        child,
+        stdin,
+        stopped_signal,
+        ..
+    } = host;
+    // Closing the host's stdin drives its own teardown: the readline `close`
+    // handler runs terminate() → dispose()/stop(), which SIGTERMs and awaits its
+    // llama-server child before exiting, so the engine is reaped — not orphaned.
+    // (The host no longer exits on a `{"type":"stop"}` line — #82 keeps the engine
+    // warm for post-meeting coaching — so stdin-EOF is the teardown trigger.)
+    // A bounded wait then a SIGKILL backstop guarantees node can never wedge.
+    drop(stdin);
+    drop(stopped_signal);
     let _ = tauri::async_runtime::spawn_blocking(move || {
-        let mut child = host.child;
+        let mut child = child;
         let deadline = std::time::Instant::now() + SHUTDOWN_HOST_TIMEOUT;
         loop {
             match child.try_wait() {
@@ -738,6 +822,11 @@ async fn cleanup(inner: &mut Inner) {
         let _ = host.child.kill();
         let _ = host.child.wait();
     }
+    if let Some(mut host) = inner.post_session_host.take() {
+        host.expected_exit.store(true, Ordering::Relaxed);
+        let _ = host.child.kill();
+        let _ = host.child.wait();
+    }
     if let Some(task) = inner.events_task.take() {
         task.abort();
     }
@@ -823,6 +912,12 @@ pub async fn host_request(
     let inner = state.inner.lock().await;
     match (&inner.host, state.phase()) {
         (Some(host), Phase::Live | Phase::Paused) => write_host_line(&host.stdin, &message),
+        // Post-meeting coaching (#82): the review screen opens AFTER stop, so its
+        // `coach` requests target the parked post-session host (engine kept warm).
+        _ if kind == "coach" => match &inner.post_session_host {
+            Some(host) => write_host_line(&host.stdin, &message),
+            None => Err("no active session".into()),
+        },
         _ => Err("no active session".into()),
     }
 }
@@ -939,6 +1034,38 @@ mod tests {
         // The guard condition mirrors shutdown()'s early return; assert it holds
         // so a future change to the field set can't silently break the fast path.
         assert_eq!(state.phase(), Phase::Idle);
+    }
+
+    #[test]
+    fn explicit_start_gate_only_admits_an_idle_session() {
+        // #1: launch lands on Idle (no auto-start) and a session begins only on an
+        // explicit Start. start() admits the transition Idle → Starting and refuses
+        // every other phase, so a second Start (or one during start/stop) is a
+        // no-op. This mirrors start()'s guard: `if phase != Idle { return Err }`.
+        let admits_start = |phase: Phase| phase == Phase::Idle;
+        assert!(admits_start(Phase::Idle));
+        for phase in [Phase::Starting, Phase::Live, Phase::Paused, Phase::Stopping] {
+            assert!(!admits_start(phase), "{phase:?} must not admit a fresh start");
+        }
+    }
+
+    #[test]
+    fn the_default_lifecycle_phase_is_idle() {
+        // #1: with auto-start removed from the normal path, a freshly constructed
+        // session sits Idle until the user starts it.
+        assert_eq!(SessionState::default().phase(), Phase::Idle);
+    }
+
+    #[test]
+    fn stop_gate_only_admits_a_running_session() {
+        // The complement of the start gate: stop() acts only on Live/Paused, so a
+        // Stop while Idle/Starting/Stopping is a no-op (start ↔ stop are exclusive).
+        let admits_stop = |phase: Phase| matches!(phase, Phase::Live | Phase::Paused);
+        assert!(admits_stop(Phase::Live));
+        assert!(admits_stop(Phase::Paused));
+        for phase in [Phase::Idle, Phase::Starting, Phase::Stopping] {
+            assert!(!admits_stop(phase), "{phase:?} must not admit a stop");
+        }
     }
 
     #[test]

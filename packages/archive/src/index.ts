@@ -17,6 +17,7 @@ export type {
   Speaker,
   CaptionEntry,
   BoardData,
+  MetricsData,
   SessionMeta,
   BriefUpdate,
   FinalBrief,

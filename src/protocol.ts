@@ -26,6 +26,10 @@ export type CaptionBridgeEvent =
       lang: string;
       lowConfidence: boolean;
       epochMs: number;
+      /** Spoken duration in ms (`end_ms - start_ms`), for post-meeting metrics
+       *  (#81/#78). NOT wall-clock `epochMs` — this is how long the utterance
+       *  took to say. */
+      durationMs: number;
     };
 
 export type SessionPhase = "idle" | "starting" | "live" | "paused" | "stopping";
@@ -37,6 +41,9 @@ export type Mode = "panel" | "strip" | "capsule";
 export interface ShellState {
   mode: Mode;
   clickThrough: boolean;
+  /** Pin-on-top: when true the overlay is always-on-top and joins every Space;
+   *  when false it is a normal window. Defaults to true. */
+  pinned: boolean;
   live: boolean;
 }
 
@@ -92,9 +99,27 @@ export type HostInbound =
       captureSystem: boolean;
       captureMic: boolean;
     }
-  | { type: "caption"; id: number; channel: Channel; text: string; lowConfidence: boolean; epochMs: number }
+  | {
+      type: "caption";
+      id: number;
+      channel: Channel;
+      text: string;
+      lowConfidence: boolean;
+      epochMs: number;
+      /** Spoken duration in ms; the host keeps it per-id to build the
+       *  FinalizedRecord[] for the post-meeting metrics (#81/#78). */
+      durationMs: number;
+    }
   | { type: "quickTranslate"; id: number; text: string }
   | { type: "reply"; id: number; intent: ReplyIntentWire }
+  /** Targeted analysis of ONE caption block (#80): the host resolves the target
+   *  text by `captionId` and returns a strategy read + a suggested reply. The
+   *  card the result renders into is identified by `cardId` (on-demand only). */
+  | { type: "analyze"; cardId: number; captionId: number }
+  /** Speech coaching for the user's own (mic) utterances (#82): the host
+   *  resolves each id's text and returns a native rewrite + edits + explanation.
+   *  Batched; `cardId` ties the result back to the card that requested it. */
+  | { type: "coach"; cardId: number; captionIds: number[] }
   | { type: "retranslate"; id: number }
   | { type: "pin"; id: number; pinned: boolean }
   | { type: "silenceSnooze" }
@@ -109,6 +134,15 @@ export interface BoardWire {
   decisions: string[];
   actionItems: string[];
   openQuestions: string[];
+}
+
+/** One coaching result (#82), mirroring the engine's CoachResult plus the
+ *  caption id it was computed for (so the UI lines it back up to its block). */
+export interface CoachingItemWire {
+  id: number;
+  better: string;
+  changes: { from: string; to: string }[];
+  explanation: string;
 }
 
 /** Mirror of the engine package's GaugeState (kept structural so the webview
@@ -137,6 +171,21 @@ export type HostOutbound =
   | { type: "translation"; items: TranslationItem[]; done: boolean }
   | { type: "translationFailed"; ids: number[]; detail: string }
   | { type: "summary"; summary: string[]; board: BoardWire }
+  /** Targeted-analysis result (#80): `analysis` in the user's target language,
+   *  `reply` in the meeting language; routed back to the requesting card. */
+  | { type: "analysis"; cardId: number; analysis: string; reply: string }
+  /** Post-meeting metrics (#81/#78), emitted at session end alongside the final
+   *  summary. `talkRatioMic` is the mic share of spoken time in [0,1]. */
+  | {
+      type: "metrics";
+      talkRatioMic: number;
+      smoothScore: number;
+      micMs: number;
+      systemMs: number;
+    }
+  /** Speech-coaching results (#82): one item per requested utterance, aligned by
+   *  `id`; routed back to the requesting card. */
+  | { type: "coaching"; cardId: number; items: CoachingItemWire[] }
   | { type: "gauge"; gauge: GaugeWire }
   | { type: "engineSwitch"; engine: string }
   | { type: "quickTranslateResult"; id: number; text: string }

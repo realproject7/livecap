@@ -10,6 +10,88 @@ glass Panel; the LiveCap glyph appears in the menu bar; no Dock icon).
 
 ---
 
+# Pin-on-top toggle (this round)
+
+The overlay is no longer hardwired always-on-top. A 📌 pin button in the chrome
+row (and a "Pin on top" tray check item) toggles it live; the choice persists.
+Default is **ON** (pinned), matching the historical behavior.
+
+## 1. The pin button is discoverable
+
+1. Hover the glass → the chrome row fades in (auto-hides ~3 s after the cursor
+   stops). Buttons are the enlarged 26 px size with a hover fill and a `title`
+   tooltip on each (pin, click-through, mode, hide ✕).
+2. The 📌 pin button sits just left of the click-through/mode/✕ cluster. Default
+   state is **pressed/amber** (tinted fill + amber glyph), tooltip "Pinned on
+   top — floats over every Space; click to unpin". The ✕ (hide) button is in the
+   same row — no traffic-lights (frameless by design, unchanged).
+
+## 2. Pinned (default ON) — floats over everything
+
+1. Confirm the pin button is amber/pressed. Put Safari (or any app) fullscreen →
+   the overlay floats above it. Switch Spaces (ctrl-←/→) → the overlay follows
+   to every Space.
+2. Devtools console (dev build: right-click glass → Inspect Element):
+   ```js
+   const { invoke } = window.__TAURI_INTERNALS__;
+   await invoke("get_shell_state")     // → { ..., pinned: true }
+   await invoke("shell_diagnostics")   // → { ..., joinsAllSpacesAndFullscreen: true, pinned: true }
+   ```
+
+## 3. Unpinned — normal window
+
+1. Click the 📌 button (or tray → uncheck "Pin on top"). It dims to the normal
+   (un-pressed) state; tooltip becomes "Unpinned — behaves like a normal
+   window…". **No relaunch.**
+2. Click another app (e.g. Finder) so it comes forward → the overlay now goes
+   **behind** it (it did not before). Switch to another Space → the overlay does
+   **not** follow (single-Space).
+3. Console:
+   ```js
+   await invoke("get_shell_state")     // → { ..., pinned: false }
+   await invoke("shell_diagnostics")   // → { ..., joinsAllSpacesAndFullscreen: false, pinned: false }
+   ```
+4. It is still frameless glass, still movable by dragging the body, still
+   hideable (✕ / ⌥Space).
+
+## 4. Live toggle both ways + tray mirror
+
+- Toggle pin from the 📌 button → the tray "Pin on top" check mark updates to
+  match (and vice-versa: toggling from the tray updates the button). Each flip
+  takes effect immediately, no relaunch.
+
+## 5. Persistence across restart
+
+- Unpin, quit (menu bar → Quit LiveCap), relaunch → the overlay comes back
+  **unpinned** (normal window, not on all Spaces; button un-pressed; tray
+  unchecked). Re-pin, restart → comes back pinned. State lives in
+  `~/Library/Application Support/app.livecap.desktop/shell-state.json`
+  (`"pinned": true|false`); a state file written before this field existed
+  defaults to pinned.
+
+## 6. No regressions
+
+- Capture exclusion is independent of pin: `await invoke("capture_excluded")`
+  stays `true` in both pin states (prod). `LIVECAP_CAPTURE_VISIBLE=1` is still
+  the only dev escape hatch.
+- Click-through, modes, edge snapping, drag threshold, and per-session language
+  are unchanged by toggling pin.
+
+### Headless self-check (no live rig)
+
+```
+pnpm build && pnpm tauri build --debug --bundles app
+rm -f ~/Library/Application\ Support/app.livecap.desktop/{ui-heartbeat.json,shell-state.json}
+LIVECAP_CAPTURE_VISIBLE=1 ./target/debug/bundle/macos/LiveCap.app/Contents/MacOS/livecap-app &
+sleep 5; cat ~/Library/Application\ Support/app.livecap.desktop/ui-heartbeat.json   # bootError:null, mode:panel
+pkill -TERM -f livecap-app; sleep 2
+grep pinned ~/Library/Application\ Support/app.livecap.desktop/shell-state.json     # → "pinned": true
+```
+The pin/unpin window behavior itself (floats-over vs. goes-behind, all-Spaces vs.
+single-Space) needs the **live rig** — sections 2–4 above.
+
+---
+
 # #11 Caption feed + live pipeline E2E
 
 Prerequisites on the test Mac:
@@ -279,8 +361,10 @@ Checks while the sheet is open:
    participant → overlay NOT visible on the receiving end (screenshot the
    receiver for the PR matrix). Overlay still visible locally.
 
-## 2. Always-on-top + Spaces/fullscreen
+## 2. Always-on-top + Spaces/fullscreen (now pin-gated)
 
+This behavior is now controlled by the pin toggle (see "Pin-on-top toggle"
+above) and applies **while pinned** (the default):
 - Put Safari (or any app) fullscreen → press ⌥Space twice (hide/show) →
   overlay floats above the fullscreen app.
 - Switch Spaces (ctrl-←/→) → overlay follows to every Space.
@@ -398,3 +482,214 @@ synthetic captions (`pnpm test:app` — feed-state.test.ts, FEED_WINDOW=200).
 - `cargo run -p livecap-app` (debug) loads **devUrl (http://localhost:1420)** — it requires `pnpm dev` running from THE SAME checkout. A dead or different-checkout vite on 1420 = blank webview. This was #54's entire mystery.
 - Headless verification: prefer the bundled app (`pnpm tauri build --debug --bundles app`, run the binary inside) — it embeds `dist/` and needs no server.
 - UI render state is externally observable: `~/Library/Application Support/app.livecap.desktop/ui-heartbeat.json` (1 Hz from the webview; `bootError` carries any module-evaluation failure). `LIVECAP_UI_PROBE=1` adds a Rust-side eval probe that reports page state even if the app module never ran. `LIVECAP_CAPTURE_VISIBLE=1` disables capture exclusion (dev only) for screenshot-based checks.
+
+---
+
+# v1.1 Meeting intelligence UI (#80 targeted analysis · #81 review screen · #82 coaching)
+
+Automated coverage (already green, run from this checkout):
+- Rust bridge duration plumbing — `cargo test -p livecap-app bridge`
+  (durationMs = end_ms − start_ms, saturating on an inverted span; carried on
+  both the `caption://event` finalized variant and the host `caption` message).
+- Host → metrics record mapping — `pnpm exec vitest run test/metrics-records`
+  ("me"→"mic"/"them"→"system", durationMs/text/lowConfidence carried; fed
+  through `computeMeetingMetrics` so the talk ratio reflects the mic/system
+  split).
+- Mic-utterance list — `pnpm exec vitest run test/feed-state` (the
+  `micUtterances (#82)` block: only finalized "me" blocks, oldest first; never
+  "them" lines; live partials excluded).
+- Archive metrics rendering — `pnpm --filter @livecap/archive test`
+  (golden file now carries the `## Metrics` section: Talk ratio + Smooth Score).
+
+Headless smoke (no audio): build + run the bundled app and confirm the webview
+module evaluated with all the new top-level wiring (review surface, analysis
+cards, host-event routing):
+```sh
+pnpm build && pnpm tauri build --debug --bundles app
+rm -f ~/Library/Application\ Support/app.livecap.desktop/ui-heartbeat.json
+LIVECAP_UI_PROBE=1 ./target/debug/bundle/macos/LiveCap.app/Contents/MacOS/livecap-app &
+sleep 3; cat ~/Library/Application\ Support/app.livecap.desktop/ui-heartbeat.json
+```
+Expect a ticking heartbeat with `"bootError": null` (a parse/eval error in any of
+src/main.ts, src/review.ts would surface here). Then `pkill -f livecap-app`.
+
+The live E2E below needs a real video with audio and the operator's mic.
+
+## #80 — targeted analysis (click a caption → strategy + reply)
+
+1. Start a session; play a video where someone asks a question. Wait for that
+   caption to finalize in the feed.
+2. Hover the caption block → a **✦** ghost button appears beside the existing
+   📌 / ⧉ / ⟳ actions (mic-side `Me` blocks too). Click it.
+3. An inline card appears under the feed: the clicked line (italic), a
+   **Strategy** section (in your target language, e.g. Korean) and a
+   **Suggested reply** section (in the meeting language, English), each "…"
+   until the model responds (~1–3 s).
+4. **⧉ Copy reply** copies only the reply text; **⟳ Regenerate** re-fires for
+   the same caption; **✕** dismisses the card.
+5. No auto-fire: watch the credit gauge (`invoke("gauge_state")`) — it stays
+   flat until you click ✦, then moves once per analysis. The reply is never
+   auto-sent anywhere (copy-to-clipboard only).
+
+## #81 — post-meeting review screen (+ metrics)
+
+1. Run a session where BOTH sides speak (you on the mic, the video as system),
+   long enough for at least one summary to generate (~60 s). Stop (⏹) — or let
+   the 10-min silence dialog finalize it (same trigger).
+2. On stop the Panel shows the **review surface** (over the live feed): a
+   **Review** tab with two big numbers — **Talk ratio (me)** (a %) and
+   **Smooth Score** (0–100) — plus a talk-ratio bar, the **Summary** list and
+   the **Board** (Decisions / Action items / Open questions) already generated
+   live. The talk ratio should match the actual mic-vs-system speaking split.
+3. **⧉ Copy summary** copies the summary lines; **Open saved file** copies the
+   archive path (open it in Finder/editor).
+4. Confirm the saved `.md` carries the same metrics: it now has a `## Metrics`
+   section with `**Talk ratio (me)** — N%` and `**Smooth Score** — N` between
+   the Board and the Transcript:
+   `cat ~/Documents/LiveCap/"<YYYY-MM-DD HHMM> — <title>.md"`.
+5. Starting a new session dismisses the review surface (back to the live feed).
+
+## #82 — speech-coaching tab (+ TTS)
+
+1. After the session above (where YOU spoke), the review surface's **Coaching**
+   tab lists your OWN utterances only — each row a clock time + the line. The
+   count reads "N of your utterances" (or "You didn't speak in this session").
+   Verify NO system ("them") lines ever appear here (privacy + correctness).
+2. Click one disfluent row (e.g. one with "um"/restarts) → a coaching card
+   appears: the original (struck through), a **Better** native rewrite with the
+   changed spans highlighted green, and an explanation in your target language.
+3. **▶** on the card speaks the `better` sentence aloud via the webview Web
+   Speech API (English voice, by meeting language) — no macOS `say`, no audio
+   files. (If no English voice is installed the call no-ops silently.)
+4. **Review all** coaches every listed utterance in one batch (progress line
+   "Coaching N utterances…", then all items); the gauge moves once for the
+   batch. Degenerate one-word lines (e.g. "Yeah") return unchanged with no
+   model spend (engine #79 short-circuit).
+5. On-demand only: the gauge stays flat until you click a row or Review all.
+
+## Known limits for the reviewer (#80/#81/#82)
+- The coaching list and the analysis target are sourced from the live windowed
+  feed (#57, newest ~200 blocks). Utterances evicted from the window during a
+  very long meeting are not individually clickable for analysis/coaching,
+  though they remain in the archive. The metrics (#81) are computed by the host
+  over the FULL session (all finalized captions), not the windowed feed.
+- TTS uses whatever WKWebView/system voices are installed for the meeting
+  language; an unavailable voice degrades to the default voice or no-ops.
+
+---
+
+# v1.1.x UX fixes (explicit start · per-session language · windowing · credit copy)
+
+Automated coverage (already green, run from this checkout):
+- Session lifecycle state machine — `cargo test -p livecap-app session`
+  (`the_default_lifecycle_phase_is_idle`, `explicit_start_gate_only_admits_an_idle_session`,
+  `stop_gate_only_admits_a_running_session`, plus the existing `try_begin_live`
+  / phase round-trip tests).
+- Per-session language persistence — `pnpm exec vitest run test/session-language`
+  (`nextSettingsForSessionLanguage`: a new pick is persisted as the next
+  default, an unchanged pick is a no-op, tags are normalized like the Rust
+  sanitizer, empty picks are ignored, arbitrary BCP-47 rides through).
+- Settings round-trip incl. `targetLanguage` — `cargo test -p livecap-app settings`.
+
+Headless smoke (no audio), confirms idle-on-launch + clean module eval:
+```sh
+pnpm build && pnpm tauri build --debug --bundles app
+rm -f ~/Library/Application\ Support/app.livecap.desktop/ui-heartbeat.json
+LIVECAP_CAPTURE_VISIBLE=1 ./target/debug/bundle/macos/LiveCap.app/Contents/MacOS/livecap-app &
+sleep 4
+cat ~/Library/Application\ Support/app.livecap.desktop/ui-heartbeat.json   # bootError:null, mode:panel
+pgrep -f dist-host/main.mjs || echo "idle: NO session host spawned"        # must print the idle line
+pkill -f livecap-app
+```
+Expect a ticking heartbeat with `"bootError": null` AND **no** session host
+process — i.e. the app launched idle and did not auto-start a session.
+
+The live items below need the real rig (screen, mouse, mic).
+
+## 1. Explicit session start (no auto-start)
+
+1. Launch (onboarding already done) → the Panel opens on the **Start screen**:
+   a `LiveCap` mark, a "Translate into" picker, a prominent amber **Start
+   captioning** button, and "Nothing is captured until you start." The live
+   feed / chips / composer are NOT shown; the menu-bar glyph is monochrome (not
+   amber); the tray item reads **Start Captioning**.
+2. Confirm NO captions and NO mic/system prompts appear before you press Start
+   (and the headless check above shows no session host running).
+3. Press **Start captioning** (or the tray **Start Captioning**, or ▶ in the
+   chrome) → the session starts exactly as before (status walks
+   "preparing…" → "starting…" → live; glyph turns amber; tray flips to **Stop
+   Captioning**).
+4. **Stop** (⏹ / tray) → returns to the Start screen (idle), glyph reverts.
+   The post-meeting review still appears first; closing it lands on the Start
+   screen.
+5. Dev aid only: `LIVECAP_AUTOSTART=1 pnpm tauri dev` still auto-starts (it is
+   the headless-E2E shortcut, never the normal path).
+
+## 2. Per-session target language
+
+1. On the Start screen the picker defaults to the **last-used** target (the one
+   onboarding seeded on first run; afterwards, whatever you last started with).
+2. Change it (e.g. 한국어 → 日本語) and press Start → the session translates into
+   the new language (captions + summary); the archive header reads e.g.
+   `EN → JA`. You did NOT open Settings to do this.
+3. Stop, then start again → the picker now defaults to **日本語** (the last pick
+   was remembered). Confirm `settings.json` `targetLanguage` updated to `ja`.
+4. Settings → "Translate into" still exposes a default and stays in sync, but
+   the per-session picker at Start is the authoritative choice for that session
+   (it is not a global the session ignores).
+
+## 3. Windowing: native dropdowns, moving, hiding
+
+1. **Dropdown on mouse-move (the regression):** on the Start screen click the
+   "Translate into" picker → the native macOS popup opens. **Move the cursor
+   over the options and to a different option** → the popup stays open and
+   tracks the cursor normally; pick one → it commits. Repeat inside Settings →
+   the "Translate into" / Plan / Retention selects all behave the same. (Before:
+   the popup closed/glitched the instant the cursor moved.)
+2. **Move:** press-drag from a non-control area (the top chrome/title region, or
+   the summary strip while live) → the window follows the cursor and still
+   magnet-snaps at edges. A press-drag that *starts* on a button/select/input/
+   feed never moves the window (those controls work normally); a plain click on
+   a control never begins a drag.
+3. **Hide/show:** ⌥Space hides the overlay and ⌥Space shows it again; the ✕
+   chrome button hides it too. No glitching, and capture exclusion is unchanged.
+4. **Always-on-top intact:** with the overlay visible,
+   `await invoke("shell_diagnostics")` → `{ captureExcluded: true,
+   joinsAllSpacesAndFullscreen: true }` (production, i.e. WITHOUT
+   `LIVECAP_CAPTURE_VISIBLE=1`); the overlay still floats over a fullscreen app
+   and follows across Spaces (#10 §2 still passes). `LIVECAP_CAPTURE_VISIBLE=1`
+   remains dev-only and disables exclusion for screenshot checks.
+
+Root cause (for the reviewer): the drag handler started a Rust drag + took
+`setPointerCapture` on `pointerdown` for any target not matching
+`button, input` — which **excluded `<select>`**. Clicking the language picker
+therefore captured the OS pointer stream and ran the cursor-following drag loop,
+so the native popup (a separate NSWindow) lost its pointer events and closed the
+moment the cursor moved. Fix: the drag now excludes every form control +
+interactive container and only captures the pointer *after* movement passes a
+threshold (a plain control click never captures). `NSStatusWindowLevel` (25) is
+below `NSPopUpMenuWindowLevel`, so popups already render above the overlay — the
+level was not the cause and is unchanged.
+
+## 4. Calmer credit messaging
+
+1. Onboarding card 3 with `claude` on PATH now reads "✓ Claude CLI found ·
+   Signed in on your plan — covered by your Claude subscription. If Anthropic's
+   policy changes, LiveCap falls back to the free local model automatically." —
+   NO "uses your plan's SDK credits / ~N hrs/month".
+2. Settings → Engine: a calm note ("…currently covered by your Claude
+   subscription…fall back to the free local model automatically"), the gauge is
+   labeled **Usage this month** with meta "Tracked in case credits ever apply ·
+   would reset <day>" (not "≈ N meeting-hours left"), and the auto-switch
+   checkbox reads "Fall back to Local if credits ever start to apply".
+3. The local-fallback safety message is retained throughout; README + PROPOSAL
+   §4/§6/§8.7 carry the same reframing (factual policy note kept, app no longer
+   presents active charging).
+
+## Known limits for the reviewer (UX fixes)
+- The Start screen owns the Panel only while idle; in Strip/Capsule modes the
+  idle status line ("Start captioning from the menu bar, or press ▶ above.")
+  carries the same explicit-start cue.
+- The per-session picker writes the chosen language to `settings.json` before
+  starting, so it doubles as the persisted default; a session already running
+  keeps its language (engine/language changes apply from the next start, per #12).
