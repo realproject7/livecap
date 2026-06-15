@@ -51,6 +51,16 @@ pub struct SuppressionConfig {
     /// Token-overlap (Jaccard) at or above which two normalized texts are
     /// considered the same utterance.
     pub dedup_similarity: f32,
+    /// Token *coverage* at or above which a mic finalization is treated as bleed:
+    /// the fraction of the mic line's tokens that also appear in a recent system
+    /// final. Catches a mic line that is a FRAGMENT of (or a re-hearing of part
+    /// of) a longer system line — where symmetric Jaccard stays low but nearly
+    /// every mic token came from the system audio. Only applied to mic lines of
+    /// at least [`Self::dedup_coverage_min_tokens`] tokens, so a one-word echo
+    /// can't trip it on coincidental overlap.
+    pub dedup_coverage: f32,
+    /// Minimum mic-line token count for the coverage check to apply.
+    pub dedup_coverage_min_tokens: usize,
 }
 
 impl Default for SuppressionConfig {
@@ -73,12 +83,20 @@ impl Default for SuppressionConfig {
     /// fixture-specific dial-in; final acceptance is operator E2E verified.
     fn default() -> Self {
         Self {
+            // More aggressive than the prior #64 tune: the operator's v1.1 live
+            // test still saw clean system lines escape onto the mic side
+            // ("And Justin's talk", "어떻게 합격할까요?"). The bleed is loud and
+            // clean enough to pass the energy gate, so the text check must do the
+            // work: a wider dedup window, a lower similarity threshold, and a new
+            // token-coverage rule for fragment re-hearings.
             speech_floor_rms: 0.008,
-            atten_ratio: 0.8,
-            energy_window_ms: 2_500,
+            atten_ratio: 0.85,
+            energy_window_ms: 3_000,
             energy_retain_ms: 30_000,
-            dedup_window_ms: 20_000,
-            dedup_similarity: 0.5,
+            dedup_window_ms: 30_000,
+            dedup_similarity: 0.4,
+            dedup_coverage: 0.7,
+            dedup_coverage_min_tokens: 3,
         }
     }
 }
@@ -120,12 +138,19 @@ impl SuppressionConfig {
         if let Some(v) = env_override::<f32>(&get, "LIVECAP_BLEED_DEDUP_SIMILARITY").filter(|v| v.is_finite()) {
             self.dedup_similarity = v;
         }
+        if let Some(v) = env_override::<f32>(&get, "LIVECAP_BLEED_DEDUP_COVERAGE").filter(|v| v.is_finite()) {
+            self.dedup_coverage = v;
+        }
+        if let Some(v) = env_override::<usize>(&get, "LIVECAP_BLEED_DEDUP_COVERAGE_MIN_TOKENS") {
+            self.dedup_coverage_min_tokens = v;
+        }
         // Clamp the fractional overrides into their valid domains (#64 / RE2) so a
         // typo can't wedge suppression — e.g. a stray DEDUP_SIMILARITY > 1 (never
         // a match → no dedup) or < 0 (every match → drops all concurrent mic).
         self.speech_floor_rms = self.speech_floor_rms.clamp(0.0, 1.0);
         self.atten_ratio = self.atten_ratio.clamp(0.0, 4.0);
         self.dedup_similarity = self.dedup_similarity.clamp(0.0, 1.0);
+        self.dedup_coverage = self.dedup_coverage.clamp(0.0, 1.0);
         self
     }
 }
@@ -237,11 +262,19 @@ impl CrossChannelSuppressor {
         }
         let mut inner = self.inner.lock().expect("suppressor mutex poisoned");
         inner.prune_finals(now_ms, self.cfg.dedup_window_ms);
-        let threshold = self.cfg.dedup_similarity;
-        inner
-            .finals
-            .iter()
-            .any(|f| f.norm == norm || token_jaccard(&f.norm, &norm) >= threshold)
+        let similarity = self.cfg.dedup_similarity;
+        let coverage = self.cfg.dedup_coverage;
+        // The mic line is long enough that a high token-coverage isn't coincidence.
+        let mic_tokens = norm.split_whitespace().count();
+        let coverage_eligible = mic_tokens >= self.cfg.dedup_coverage_min_tokens;
+        inner.finals.iter().any(|f| {
+            // 1) exact normalized match, 2) symmetric Jaccard (full re-hearing),
+            // 3) one-directional coverage: nearly all the mic tokens came from a
+            //    recent system line (a fragment / partial re-hearing of it).
+            f.norm == norm
+                || token_jaccard(&f.norm, &norm) >= similarity
+                || (coverage_eligible && token_coverage(&norm, &f.norm) >= coverage)
+        })
     }
 }
 
@@ -291,6 +324,21 @@ fn token_jaccard(a: &str, b: &str) -> f32 {
     inter as f32 / union as f32
 }
 
+/// Fraction of `query`'s distinct tokens that also appear in `corpus` (directional
+/// coverage). Unlike symmetric Jaccard this stays high when `query` is a short
+/// FRAGMENT of a much longer `corpus` line — the speaker-bleed case where the mic
+/// re-hears only part of a long system utterance. Returns 0.0 for an empty query.
+fn token_coverage(query: &str, corpus: &str) -> f32 {
+    use std::collections::HashSet;
+    let sq: HashSet<&str> = query.split_whitespace().collect();
+    if sq.is_empty() {
+        return 0.0;
+    }
+    let sc: HashSet<&str> = corpus.split_whitespace().collect();
+    let present = sq.iter().filter(|t| sc.contains(*t)).count();
+    present as f32 / sq.len() as f32
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -305,6 +353,8 @@ mod tests {
             energy_retain_ms: 12_000,
             dedup_window_ms: 8_000,
             dedup_similarity: 0.6,
+            dedup_coverage: 0.7,
+            dedup_coverage_min_tokens: 3,
         })
     }
 
@@ -318,8 +368,10 @@ mod tests {
         let base = SuppressionConfig::default();
         let env: HashMap<&str, &str> = [
             ("LIVECAP_BLEED_ATTEN_RATIO", "0.9"),
-            ("LIVECAP_BLEED_DEDUP_WINDOW_MS", "30000"),
-            ("LIVECAP_BLEED_DEDUP_SIMILARITY", "0.4"),
+            ("LIVECAP_BLEED_DEDUP_WINDOW_MS", "45000"),
+            ("LIVECAP_BLEED_DEDUP_SIMILARITY", "0.35"),
+            ("LIVECAP_BLEED_DEDUP_COVERAGE", "0.6"),
+            ("LIVECAP_BLEED_DEDUP_COVERAGE_MIN_TOKENS", "4"),
             ("LIVECAP_BLEED_ENERGY_WINDOW_MS", "not-a-number"),
         ]
         .into_iter()
@@ -328,8 +380,10 @@ mod tests {
             .with_overrides(|name| env.get(name).map(|s| (*s).to_string()));
 
         assert!(approx(cfg.atten_ratio, 0.9));
-        assert_eq!(cfg.dedup_window_ms, 30_000);
-        assert!(approx(cfg.dedup_similarity, 0.4));
+        assert_eq!(cfg.dedup_window_ms, 45_000);
+        assert!(approx(cfg.dedup_similarity, 0.35));
+        assert!(approx(cfg.dedup_coverage, 0.6));
+        assert_eq!(cfg.dedup_coverage_min_tokens, 4);
         // A malformed value is ignored — the field keeps its default.
         assert_eq!(cfg.energy_window_ms, base.energy_window_ms);
         // An unset field keeps its default.
@@ -436,6 +490,46 @@ mod tests {
         s.record_system_final(2_000, "The quick brown fox.");
         assert!(!s.mic_text_is_duplicate(2_300, "let us discuss the budget"));
         assert!(!s.mic_text_is_duplicate(2_300, ""));
+    }
+
+    #[test]
+    fn dedup_drops_mic_fragment_of_a_longer_system_line() {
+        // #2: clean speaker bleed where the mic re-hears only PART of a long
+        // system utterance. Symmetric Jaccard is low (the system line is much
+        // longer), but every mic token came from the system line → coverage
+        // catches it. Mirrors the operator's "And Justin's talk" report.
+        let s = suppressor();
+        s.record_system_final(
+            2_000,
+            "And Justin's talk really set the tone for the whole panel today",
+        );
+        // 3 tokens, all present in the system line, but Jaccard ≈ 3/11 < 0.6.
+        assert!(token_jaccard("and justins talk", &normalize_text("And Justin's talk really set the tone for the whole panel today")) < 0.6);
+        assert!(s.mic_text_is_duplicate(2_400, "And Justin's talk"));
+    }
+
+    #[test]
+    fn dedup_coverage_ignores_too_short_a_mic_line() {
+        // A one/two-word mic line must NOT be coverage-suppressed on coincidental
+        // overlap — genuine short interjections ("Right.", "I agree") survive even
+        // if their words happen to appear in a recent system line.
+        let s = suppressor();
+        s.record_system_final(2_000, "I agree we should ship it this week for sure");
+        // "I agree" — only 2 tokens (< dedup_coverage_min_tokens = 3) → kept,
+        // even though both tokens are in the system line.
+        assert!(!s.mic_text_is_duplicate(2_300, "I agree"));
+    }
+
+    #[test]
+    fn dedup_keeps_distinct_long_mic_line_over_active_system() {
+        // A genuinely distinct mic utterance with only incidental shared words is
+        // below both the Jaccard and the coverage thresholds → preserved.
+        let s = suppressor();
+        s.record_system_final(2_000, "the budget review is scheduled for next quarter");
+        assert!(!s.mic_text_is_duplicate(
+            2_300,
+            "can we revisit the hiring plan instead"
+        ));
     }
 
     #[test]
