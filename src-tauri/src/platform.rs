@@ -14,9 +14,13 @@ mod imp {
     use tauri::WebviewWindow;
     use window_vibrancy::{apply_vibrancy, clear_vibrancy, NSVisualEffectMaterial, NSVisualEffectState};
 
-    /// NSStatusWindowLevel — above normal and floating windows so a pinned
-    /// overlay stays visible over fullscreen apps.
-    const STATUS_WINDOW_LEVEL: isize = 25;
+    /// NSFloatingWindowLevel — a pinned overlay floats above ordinary app
+    /// windows (and, with FullScreenAuxiliary, over fullscreen apps) but stays
+    /// BELOW system UI such as the TCC permission sheets and the menu bar.
+    /// NSStatusWindowLevel (25) sat above those and hid the mic-permission
+    /// prompt behind the overlay; floating (3) is high enough to be an overlay
+    /// without fighting system dialogs.
+    const PINNED_WINDOW_LEVEL: isize = 3;
     /// NSNormalWindowLevel — an unpinned overlay sits with ordinary app
     /// windows and can be covered by them.
     const NORMAL_WINDOW_LEVEL: isize = 0;
@@ -38,7 +42,7 @@ mod imp {
     /// testable without an NSWindow.
     pub(super) fn level_for(pinned: bool) -> isize {
         if pinned {
-            STATUS_WINDOW_LEVEL
+            PINNED_WINDOW_LEVEL
         } else {
             NORMAL_WINDOW_LEVEL
         }
@@ -60,7 +64,7 @@ mod imp {
     }
 
     /// Window level + Spaces/fullscreen collection behavior for the pin state.
-    /// Pinned: status level + join-all-Spaces|fullscreen-auxiliary (floats over
+    /// Pinned: floating level + join-all-Spaces|fullscreen-auxiliary (floats over
     /// every Space). Unpinned: normal level, those bits cleared (ordinary
     /// single-Space window). Tauri's `set_always_on_top` is flipped by the
     /// caller alongside this.
@@ -71,12 +75,12 @@ mod imp {
         }
     }
 
-    /// Read back whether the window is pinned: status-level AND carrying the
+    /// Read back whether the window is pinned: floating-level AND carrying the
     /// all-Spaces/fullscreen bits.
     pub fn pinned(window: &WebviewWindow) -> bool {
         ns_window(window)
             .map(|ns| {
-                ns.level() == STATUS_WINDOW_LEVEL
+                ns.level() == PINNED_WINDOW_LEVEL
                     && ns.collectionBehavior().contains(PINNED_BEHAVIOR)
             })
             .unwrap_or(false)
@@ -130,8 +134,8 @@ mod imp {
         use super::*;
 
         #[test]
-        fn level_maps_pinned_to_status_unpinned_to_normal() {
-            assert_eq!(level_for(true), STATUS_WINDOW_LEVEL);
+        fn level_maps_pinned_to_floating_unpinned_to_normal() {
+            assert_eq!(level_for(true), PINNED_WINDOW_LEVEL);
             assert_eq!(level_for(false), NORMAL_WINDOW_LEVEL);
         }
 

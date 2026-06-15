@@ -176,6 +176,7 @@ body[data-mode="capsule"] #panel-body {
 }
 
 /* ---- #1 idle Start screen (explicit session start, no auto-run) ---- */
+#welcome-panel,
 #start-panel {
   display: none;
   flex-direction: column;
@@ -187,8 +188,37 @@ body[data-mode="capsule"] #panel-body {
   padding: 24px 28px;
   text-align: center;
 }
+#welcome-panel.visible,
 #start-panel.visible {
   display: flex;
+}
+#welcome-panel {
+  gap: 14px;
+}
+.wp-mark {
+  color: var(--accent-live);
+  font-size: 22px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+.wp-tagline {
+  color: var(--text-translation);
+  font-size: 13px;
+  line-height: 1.55;
+  max-width: 280px;
+}
+/* While the Welcome screen owns the Panel, every other surface stays hidden. */
+#welcome-panel.visible ~ #start-panel,
+#welcome-panel.visible ~ #summary,
+#welcome-panel.visible ~ .hairline,
+#welcome-panel.visible ~ #feed-wrap,
+#welcome-panel.visible ~ #live-chip,
+#welcome-panel.visible ~ #pinned,
+#welcome-panel.visible ~ #cards,
+#welcome-panel.visible ~ #chips,
+#welcome-panel.visible ~ #composer {
+  display: none;
 }
 /* When the Start screen owns the Panel, the live surfaces stay hidden. */
 #start-panel.visible ~ #summary,
