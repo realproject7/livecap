@@ -34,6 +34,7 @@ function defaultStartMessage(overrides: Partial<StartMessage> = {}): StartMessag
     appDataDir: "/tmp/livecap-data",
     archiveDir: "/tmp/livecap-archives",
     targetLanguageCode: "ko",
+    sourceLanguageCode: "auto",
     enginePref: "cli",
     poolUsd: 20,
     resetDay: 1,

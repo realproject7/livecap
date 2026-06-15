@@ -68,6 +68,20 @@ impl PipelineConfig {
             max_utterance_ms: 30_000,
         }
     }
+
+    /// Set the spoken/source transcription language (#94). A BCP-47 / ISO-639-1
+    /// code forces whisper to that language; `"auto"` (or empty) keeps the
+    /// current per-utterance auto-detection (`language = None`). Whisper only
+    /// understands a primary subtag, so a tag like `"pt-br"` is reduced to its
+    /// primary subtag (`"pt"`) before being handed to the engine.
+    pub fn with_source_language(mut self, code: &str) -> Self {
+        let normalized = code.trim().to_lowercase();
+        self.language = match normalized.as_str() {
+            "" | "auto" => None,
+            other => Some(other.split('-').next().unwrap_or(other).to_string()),
+        };
+        self
+    }
 }
 
 /// A request handed to the shared transcription worker.
@@ -556,5 +570,38 @@ async fn transcribe_worker(
             // Event receiver dropped — nobody is listening anymore.
             break;
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn source_language_auto_maps_to_none() {
+        // #94: "auto" (and empty) keep per-utterance auto-detection.
+        let dir = std::path::PathBuf::from("/tmp/livecap-models");
+        assert_eq!(PipelineConfig::new(&dir).with_source_language("auto").language, None);
+        assert_eq!(PipelineConfig::new(&dir).with_source_language("").language, None);
+        assert_eq!(PipelineConfig::new(&dir).with_source_language("  AUTO ").language, None);
+    }
+
+    #[test]
+    fn source_language_forces_primary_subtag() {
+        // #94: a real code forces whisper; a BCP-47 region tag is reduced to its
+        // primary subtag (whisper only understands the primary language).
+        let dir = std::path::PathBuf::from("/tmp/livecap-models");
+        assert_eq!(
+            PipelineConfig::new(&dir).with_source_language("en").language,
+            Some("en".to_string())
+        );
+        assert_eq!(
+            PipelineConfig::new(&dir).with_source_language("PT-BR").language,
+            Some("pt".to_string())
+        );
+        assert_eq!(
+            PipelineConfig::new(&dir).with_source_language(" zh-hans ").language,
+            Some("zh".to_string())
+        );
     }
 }

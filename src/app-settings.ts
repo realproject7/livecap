@@ -10,6 +10,9 @@ export interface AppSettings {
   onboardingComplete: boolean;
   engine: EnginePref;
   targetLanguage: string;
+  /** Spoken/source language for transcription (#94): a BCP-47 / ISO-639-1 tag
+   *  forces whisper to that language; "auto" keeps per-utterance detection. */
+  sourceLanguage: string;
   poolUsd: number;
   resetDay: number;
   autoSwitch: boolean;
@@ -76,4 +79,21 @@ export function nextSettingsForSessionLanguage(
   const normalized = pickedCode.trim().toLowerCase();
   if (normalized === "" || normalized === current.targetLanguage) return null;
   return { ...current, targetLanguage: normalized };
+}
+
+/**
+ * Per-session source (spoken) language (#94): mirror of
+ * {@link nextSettingsForSessionLanguage} for the "Spoken language" picker. The
+ * pick is remembered as the default for the next session. Returns the settings
+ * to persist when it differs from the stored default, or `null` when unchanged
+ * (so the caller skips a redundant write). Normalizes the tag the same way the
+ * Rust sanitizer does (trim + lowercase); an empty pick clamps to "auto".
+ */
+export function nextSettingsForSessionSourceLanguage(
+  current: AppSettings,
+  pickedCode: string,
+): AppSettings | null {
+  const normalized = pickedCode.trim().toLowerCase() || "auto";
+  if (normalized === current.sourceLanguage) return null;
+  return { ...current, sourceLanguage: normalized };
 }

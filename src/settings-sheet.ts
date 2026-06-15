@@ -16,7 +16,7 @@ import {
   type CapsuleContent,
   type EnginePref,
 } from "./app-settings";
-import { LANGUAGES, languageByCode } from "./languages";
+import { LANGUAGES, SOURCE_LANGUAGES, languageByCode } from "./languages";
 import type { GaugeWire, ProbeResult } from "./protocol";
 
 export interface SettingsSheetOptions {
@@ -47,6 +47,9 @@ export function createSettingsSheet(options: SettingsSheetOptions): SettingsShee
   let lastGauge: GaugeWire | null = null;
 
   const languageChoices = LANGUAGES.map((l) => `<option value="${l.code}">${l.native}</option>`).join("");
+  const sourceChoices = SOURCE_LANGUAGES.map(
+    (l) => `<option value="${l.code}">${l.native}</option>`,
+  ).join("");
   const presetChoices =
     POOL_PRESETS.map((p) => `<option value="${p.id}">${p.label}</option>`).join("") +
     '<option value="custom">Custom…</option>';
@@ -83,6 +86,10 @@ export function createSettingsSheet(options: SettingsSheetOptions): SettingsShee
       </div>
 
       <div class="sh-section">Language</div>
+      <div class="sh-row">
+        <span class="sh-row-label">Spoken</span>
+        <select class="sh-select" id="sh-source" aria-label="Spoken (source) language">${sourceChoices}</select>
+      </div>
       <div class="sh-row">
         <span class="sh-row-label">Translate into</span>
         <select class="sh-select" id="sh-lang" aria-label="Target language">${languageChoices}</select>
@@ -147,6 +154,7 @@ export function createSettingsSheet(options: SettingsSheetOptions): SettingsShee
   const poolInput = el<HTMLInputElement>(host, "#sh-pool");
   const resetDayInput = el<HTMLInputElement>(host, "#sh-resetday");
   const langSelect = el<HTMLSelectElement>(host, "#sh-lang");
+  const sourceSelect = el<HTMLSelectElement>(host, "#sh-source");
   const clickThrough = el<HTMLInputElement>(host, "#sh-clickthrough");
   const captureSystem = el<HTMLInputElement>(host, "#sh-cap-system");
   const captureMic = el<HTMLInputElement>(host, "#sh-cap-mic");
@@ -174,6 +182,10 @@ export function createSettingsSheet(options: SettingsSheetOptions): SettingsShee
     resetDayInput.value = String(s.resetDay);
     const lang = languageByCode(s.targetLanguage);
     if (LANGUAGES.some((l) => l.code === lang.code)) langSelect.value = lang.code;
+    // #94: spoken/source language ("auto" or a curated code).
+    if (SOURCE_LANGUAGES.some((l) => l.code === s.sourceLanguage)) {
+      sourceSelect.value = s.sourceLanguage;
+    }
     for (const btn of sizeButtons) {
       btn.setAttribute("aria-pressed", String(btn.dataset.size === s.captionSize));
     }
@@ -238,6 +250,8 @@ export function createSettingsSheet(options: SettingsSheetOptions): SettingsShee
     if (Number.isFinite(day)) save({ resetDay: Math.min(28, Math.max(1, Math.floor(day))) });
   });
   langSelect.addEventListener("change", () => save({ targetLanguage: langSelect.value }));
+  // #94: spoken/source language; applies at the next session start.
+  sourceSelect.addEventListener("change", () => save({ sourceLanguage: sourceSelect.value }));
   for (const btn of sizeButtons) {
     btn.addEventListener("click", () => {
       const size = btn.dataset.size as CaptionSize;

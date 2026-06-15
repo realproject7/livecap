@@ -24,6 +24,9 @@ fn default_engine() -> String {
 fn default_language() -> String {
     "ko".into()
 }
+fn default_source_language() -> String {
+    "auto".into()
+}
 fn default_pool() -> f64 {
     20.0
 }
@@ -51,6 +54,10 @@ pub struct AppSettings {
     pub engine_pref: String,
     /// Translate-into target, BCP-47 tag (§8.6 screen 2). KO default.
     pub target_language: String,
+    /// Spoken/source language for transcription (#94): a BCP-47 / ISO-639-1 tag
+    /// forces whisper to that language; "auto" keeps per-utterance detection.
+    #[serde(default = "default_source_language")]
+    pub source_language: String,
     /// Agent SDK monthly pool in USD (PROPOSAL §6; presets 20/100/200).
     pub pool_usd: f64,
     /// Billing reset day of month, 1–28.
@@ -79,6 +86,7 @@ impl Default for AppSettings {
             onboarding_complete: false,
             engine_pref: default_engine(),
             target_language: default_language(),
+            source_language: default_source_language(),
             pool_usd: default_pool(),
             reset_day: default_reset_day(),
             auto_switch: default_true(),
@@ -102,6 +110,9 @@ impl AppSettings {
         }
         let lang = self.target_language.trim().to_lowercase();
         self.target_language = if lang.is_empty() { default_language() } else { lang };
+        // #94: source language is a lowercased non-empty tag, else "auto".
+        let source = self.source_language.trim().to_lowercase();
+        self.source_language = if source.is_empty() { default_source_language() } else { source };
         if !self.pool_usd.is_finite() || self.pool_usd <= 0.0 {
             self.pool_usd = default_pool();
         }
@@ -221,6 +232,7 @@ mod tests {
             onboarding_complete: true,
             engine_pref: "local".into(),
             target_language: "ja".into(),
+            source_language: "en".into(),
             pool_usd: 100.0,
             reset_day: 15,
             auto_switch: false,
@@ -254,6 +266,7 @@ mod tests {
         assert!(!d.onboarding_complete);
         assert_eq!(d.engine_pref, "cli");
         assert_eq!(d.target_language, "ko"); // KO default (§8.6)
+        assert_eq!(d.source_language, "auto"); // #94: per-utterance auto-detect
         assert_eq!(d.pool_usd, 20.0); // Pro preset
         assert_eq!(d.reset_day, 1);
         assert!(d.auto_switch);
@@ -270,6 +283,7 @@ mod tests {
         let raw = AppSettings {
             engine_pref: "cloud".into(),
             target_language: "  PT-BR ".into(),
+            source_language: "  EN ".into(),
             pool_usd: f64::NAN,
             reset_day: 31,
             caption_size: "xxl".into(),
@@ -279,6 +293,7 @@ mod tests {
         let clean = raw.sanitized();
         assert_eq!(clean.engine_pref, "cli");
         assert_eq!(clean.target_language, "pt-br");
+        assert_eq!(clean.source_language, "en");
         assert_eq!(clean.pool_usd, 20.0);
         assert_eq!(clean.reset_day, 28);
         assert_eq!(clean.caption_size, "m");
@@ -310,7 +325,18 @@ mod tests {
             serde_json::from_str(r#"{ "onboardingComplete": true, "targetLanguage": "en" }"#).unwrap();
         assert!(parsed.onboarding_complete);
         assert_eq!(parsed.target_language, "en");
+        assert_eq!(parsed.source_language, "auto"); // #94: missing → default
         assert_eq!(parsed.engine_pref, "cli");
         assert_eq!(parsed.pool_usd, 20.0);
+    }
+
+    #[test]
+    fn sanitize_blank_source_language_falls_back_to_auto() {
+        let cleaned = AppSettings {
+            source_language: "   ".into(),
+            ..AppSettings::default()
+        }
+        .sanitized();
+        assert_eq!(cleaned.source_language, "auto"); // #94
     }
 }
