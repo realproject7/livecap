@@ -162,6 +162,87 @@ body[data-mode="capsule"] #panel-body {
   flex-shrink: 0;
 }
 
+/* ---- #1 idle Start screen (explicit session start, no auto-run) ---- */
+#start-panel {
+  display: none;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  flex: 1;
+  min-height: 0;
+  gap: 10px;
+  padding: 24px 28px;
+  text-align: center;
+}
+#start-panel.visible {
+  display: flex;
+}
+/* When the Start screen owns the Panel, the live surfaces stay hidden. */
+#start-panel.visible ~ #summary,
+#start-panel.visible ~ .hairline,
+#start-panel.visible ~ #feed-wrap,
+#start-panel.visible ~ #live-chip,
+#start-panel.visible ~ #pinned,
+#start-panel.visible ~ #cards,
+#start-panel.visible ~ #chips,
+#start-panel.visible ~ #composer {
+  display: none;
+}
+.sp-mark {
+  color: var(--accent-live);
+  font-size: 13px;
+  font-weight: 600;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+}
+.sp-sub {
+  color: var(--text-translation);
+  font-size: 13px;
+  line-height: 1.4;
+  margin-bottom: 6px;
+}
+.sp-lang-label {
+  color: var(--text-meta);
+  font-size: 10.5px;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  align-self: center;
+}
+.sp-lang {
+  width: 200px;
+  padding: 8px 10px;
+  border: none;
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.08);
+  color: var(--text-original);
+  font-size: 13.5px;
+  font-family: var(--font);
+}
+.sp-start {
+  margin-top: 6px;
+  border: none;
+  border-radius: 10px;
+  padding: 11px 28px;
+  background: var(--accent-live);
+  color: #1a1205;
+  font-size: 14px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: opacity var(--fade) ease;
+}
+.sp-start:hover:not(:disabled) {
+  opacity: 0.9;
+}
+.sp-start:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+.sp-hint {
+  font-size: 11.5px;
+  margin-top: 2px;
+}
+
 /* ---- live summary strip (amber dot + one line) ---- */
 #summary {
   display: flex;
@@ -675,7 +756,8 @@ body[data-capsize="l"] #capsule-view .txt { font-size: 15.5px; }
   position: absolute;
   inset: 0;
   z-index: 6;
-  background: var(--glass-bg);
+  /* Near-opaque so the live feed/chips never bleed through the first-run flow. */
+  background: #0d0f12;
   border-radius: var(--radius-panel);
   align-items: center;
   justify-content: center;
@@ -692,6 +774,10 @@ body[data-capsize="l"] #capsule-view .txt { font-size: 15.5px; }
   background: rgba(255, 255, 255, 0.04);
   border-radius: 14px;
   padding: 22px 20px 18px;
+}
+/* One card at a time — a bare [hidden] is overridden by .ob-card's display. */
+.ob-card[hidden] {
+  display: none;
 }
 .ob-step {
   color: var(--text-meta);
@@ -923,6 +1009,12 @@ body[data-capsize="l"] #capsule-view .txt { font-size: 15.5px; }
 .sh-gauge-meta {
   margin-bottom: 8px;
   font-variant-numeric: tabular-nums;
+}
+/* #4: calm, accurate framing above the optional usage gauge. */
+.sh-engine-note {
+  font-size: 11.5px;
+  line-height: 1.5;
+  margin: 4px 0 10px;
 }
 .sh-check {
   display: flex;

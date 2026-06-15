@@ -8,8 +8,13 @@ import { listen } from "@tauri-apps/api/event";
 import { writeText } from "@tauri-apps/plugin-clipboard-manager";
 import { ask } from "@tauri-apps/plugin-dialog";
 
-import { applyCaptionSize, type AppSettings } from "./app-settings";
+import {
+  applyCaptionSize,
+  nextSettingsForSessionLanguage,
+  type AppSettings,
+} from "./app-settings";
 import { bootstrap } from "./bootstrap";
+import { LANGUAGES, languageByCode } from "./languages";
 import { FeedState, type CaptionBlock } from "./feed-state";
 import {
   buildReview,
@@ -88,6 +93,14 @@ document.body.innerHTML = `
       <button id="btn-close" class="btn" aria-label="Hide LiveCap">${ICONS.close}</button>
     </div>
     <div id="panel-body">
+      <div id="start-panel">
+        <div class="sp-mark">LiveCap</div>
+        <div class="sp-sub">Live captions and translation, on this Mac.</div>
+        <label class="sp-lang-label" for="sp-lang">Translate into</label>
+        <select id="sp-lang" class="sp-lang" aria-label="Target language for this session"></select>
+        <button id="sp-start" type="button" class="sp-start">Start captioning</button>
+        <div class="sp-hint t-meta">Nothing is captured until you start.</div>
+      </div>
       <div id="summary">
         <span class="live-dot" id="summary-dot"></span>
         <div class="txt"><span class="lbl" id="summary-label">LiveCap</span><span id="summary-line"></span></div>
@@ -155,6 +168,9 @@ const stripSrc = document.querySelector<HTMLDivElement>("#strip-view .src") as H
 const stripTr = document.querySelector<HTMLDivElement>("#strip-view .tr") as HTMLDivElement;
 const capsuleTxt = document.querySelector<HTMLSpanElement>("#capsule-view .txt") as HTMLSpanElement;
 const onboardingEl = $<HTMLDivElement>("onboarding");
+const startPanel = $<HTMLDivElement>("start-panel");
+const startLangSelect = $<HTMLSelectElement>("sp-lang");
+const startBtn = $<HTMLButtonElement>("sp-start");
 
 /* ================= settings (#12) ================= */
 
@@ -208,8 +224,45 @@ async function sessionCommand(command: string): Promise<void> {
   }
 }
 
+/** Populate the start-panel picker and select the remembered default. */
+function renderStartPanel(): void {
+  if (startLangSelect.options.length === 0) {
+    startLangSelect.innerHTML = LANGUAGES.map(
+      (l) => `<option value="${l.code}">${l.native}</option>`,
+    ).join("");
+  }
+  // The last-used target (persisted) is the default for the next session (#2);
+  // a tag outside the curated list still resolves, so seed it as an option.
+  const current = languageByCode(appSettings.targetLanguage);
+  if (!LANGUAGES.some((l) => l.code === current.code)) {
+    const opt = document.createElement("option");
+    opt.value = current.code;
+    opt.textContent = current.native;
+    startLangSelect.appendChild(opt);
+  }
+  startLangSelect.value = current.code;
+}
+
+/** Start a session with the language chosen in the start panel (#1/#2). The
+ *  pick is persisted FIRST so (a) it becomes the next session's default and
+ *  (b) start_inner — which reads settings fresh — honors it. */
+async function startSession(): Promise<void> {
+  const next = nextSettingsForSessionLanguage(appSettings, startLangSelect.value);
+  if (next) {
+    try {
+      await persistSettings(next);
+    } catch (error) {
+      showToast(String(error));
+      return;
+    }
+  }
+  await sessionCommand("session_start");
+}
+
+startBtn.addEventListener("click", () => void startSession());
+
 btnPause.addEventListener("click", () => {
-  if (phase === "idle") void sessionCommand("session_start");
+  if (phase === "idle") void startSession();
   else if (phase === "live") void sessionCommand("session_pause");
   else if (phase === "paused") void sessionCommand("session_resume");
 });
@@ -230,6 +283,17 @@ btnMic.addEventListener("click", () => {
 function render(): void {
   document.body.dataset.mode = state.mode;
   document.body.dataset.phase = phase;
+
+  // #1: the idle Panel sits on the Start screen (explicit start, no auto-run).
+  // It hides while onboarding or the post-meeting review owns the Panel.
+  const showStart =
+    phase === "idle" &&
+    capabilities.captioning &&
+    !onboardingEl.classList.contains("active") &&
+    !review.isOpen();
+  startPanel.classList.toggle("visible", showStart);
+  if (showStart) renderStartPanel();
+  startBtn.disabled = !capabilities.captioning;
 
   btnPause.disabled = !capabilities.captioning || phase === "starting" || phase === "stopping";
   btnStop.disabled = !capabilities.captioning || !sessionRunning();
@@ -636,7 +700,11 @@ const reviewCallbacks: ReviewCallbacks = {
       () => showToast("Copy failed"),
     ),
   speak: speakBetter,
-  close: () => review.hide(),
+  close: () => {
+    review.hide();
+    // Closing the review returns the idle Panel to the Start screen (#1).
+    render();
+  },
 };
 
 const review: ReviewSurface = buildReview(reviewCallbacks);
@@ -909,29 +977,57 @@ function showChrome(): void {
 document.addEventListener("pointermove", showChrome);
 document.addEventListener("pointerdown", showChrome);
 
-/* dragging: Rust follows the cursor and applies magnetic snapping. In Panel
-   mode the feed/cards/composer are interactive (scroll, type), so dragging
-   starts only from non-interactive surfaces. */
-let dragStart: { x: number; y: number; t: number } | null = null;
+/* dragging (#3): Rust follows the cursor and applies magnetic snapping. The
+   drag must start ONLY from non-interactive "title region" surfaces and must
+   never fight a control. The earlier guard only excluded `button, input`, so a
+   native `<select>` (the Start/Settings language picker) started a drag and the
+   `setPointerCapture` below stole the pointer stream from the OS — the native
+   popup then closed/glitched the moment the cursor moved (the #3 root cause).
+   Every form control + interactive container is excluded now, and the capture
+   is taken only once a real drag is confirmed (never on a plain control click). */
+
+/** Any native form control / editable / interactive container: never a drag
+ *  origin (so its own pointer + native popup behavior is left untouched). */
+const INTERACTIVE_SELECTOR =
+  "button, input, select, textarea, option, a, [contenteditable], " +
+  "#feed-wrap, #pinned, #cards, #chips, #composer, " +
+  "#settings-sheet, #onboarding, #start-panel, #review-mount";
+
+let dragStart: { x: number; y: number; t: number; pointerId: number; captured: boolean } | null = null;
 
 glass.addEventListener("pointerdown", (e: PointerEvent) => {
   if (e.button !== 0) return;
   const target = e.target as HTMLElement;
-  if (target.closest("button, input")) return;
-  if (state.mode === "panel" && target.closest("#feed-wrap, #pinned, #cards, #chips, #composer")) return;
-  glass.setPointerCapture(e.pointerId);
-  dragStart = { x: e.screenX, y: e.screenY, t: Date.now() };
+  // Controls/interactive containers are interactive in EVERY mode — a native
+  // popup (e.g. <select>) must keep the OS pointer stream, so never capture.
+  if (target.closest(INTERACTIVE_SELECTOR)) return;
+  dragStart = { x: e.screenX, y: e.screenY, t: Date.now(), pointerId: e.pointerId, captured: false };
+});
+
+// Capture + begin the Rust drag only once the pointer actually moves past a
+// small threshold — a plain click on a non-control surface never captures, so
+// it can't swallow events meant for anything that opened underneath.
+const DRAG_THRESHOLD = 4;
+glass.addEventListener("pointermove", (e: PointerEvent) => {
+  if (!dragStart || dragStart.captured || e.pointerId !== dragStart.pointerId) return;
+  if (Math.hypot(e.screenX - dragStart.x, e.screenY - dragStart.y) < DRAG_THRESHOLD) return;
+  dragStart.captured = true;
+  glass.setPointerCapture(dragStart.pointerId);
   void invoke("begin_drag");
 });
 
 function finishDrag(e: PointerEvent): void {
   if (!dragStart) return;
-  void invoke("end_drag");
-  const moved = Math.hypot(e.screenX - dragStart.x, e.screenY - dragStart.y);
-  const quick = Date.now() - dragStart.t < 300;
+  const { x, y, t, pointerId, captured } = dragStart;
   dragStart = null;
+  if (captured) {
+    if (glass.hasPointerCapture(pointerId)) glass.releasePointerCapture(pointerId);
+    void invoke("end_drag");
+  }
+  const moved = Math.hypot(e.screenX - x, e.screenY - y);
+  const quick = Date.now() - t < 300;
   // §8.1: a click (not a drag) on the Capsule opens the Panel.
-  if (state.mode === "capsule" && moved < 4 && quick) {
+  if (state.mode === "capsule" && moved < DRAG_THRESHOLD && quick) {
     void invoke("set_mode", { mode: "panel" });
   }
 }
@@ -992,13 +1088,16 @@ function maybeStartOnboarding(): void {
       host: onboardingEl,
       settings: appSettings,
       onDone: ({ targetLanguage, engine }) => {
+        // #1: onboarding seeds the first language default (#2) and lands on the
+        // idle Start screen — it no longer auto-starts a session. The user
+        // presses Start (here or the tray) when ready.
         void persistSettings({
           ...appSettings,
           targetLanguage,
           engine,
           onboardingComplete: true,
         }).then(
-          () => sessionCommand("session_start"),
+          () => render(),
           (error: unknown) => showToast(String(error)),
         );
       },

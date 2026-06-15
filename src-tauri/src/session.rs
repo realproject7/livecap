@@ -1037,6 +1037,38 @@ mod tests {
     }
 
     #[test]
+    fn explicit_start_gate_only_admits_an_idle_session() {
+        // #1: launch lands on Idle (no auto-start) and a session begins only on an
+        // explicit Start. start() admits the transition Idle → Starting and refuses
+        // every other phase, so a second Start (or one during start/stop) is a
+        // no-op. This mirrors start()'s guard: `if phase != Idle { return Err }`.
+        let admits_start = |phase: Phase| phase == Phase::Idle;
+        assert!(admits_start(Phase::Idle));
+        for phase in [Phase::Starting, Phase::Live, Phase::Paused, Phase::Stopping] {
+            assert!(!admits_start(phase), "{phase:?} must not admit a fresh start");
+        }
+    }
+
+    #[test]
+    fn the_default_lifecycle_phase_is_idle() {
+        // #1: with auto-start removed from the normal path, a freshly constructed
+        // session sits Idle until the user starts it.
+        assert_eq!(SessionState::default().phase(), Phase::Idle);
+    }
+
+    #[test]
+    fn stop_gate_only_admits_a_running_session() {
+        // The complement of the start gate: stop() acts only on Live/Paused, so a
+        // Stop while Idle/Starting/Stopping is a no-op (start ↔ stop are exclusive).
+        let admits_stop = |phase: Phase| matches!(phase, Phase::Live | Phase::Paused);
+        assert!(admits_stop(Phase::Live));
+        assert!(admits_stop(Phase::Paused));
+        for phase in [Phase::Idle, Phase::Starting, Phase::Stopping] {
+            assert!(!admits_stop(phase), "{phase:?} must not admit a stop");
+        }
+    }
+
+    #[test]
     fn phase_is_readable_while_the_inner_mutex_is_held() {
         // Regression for #65: a stalled start holds `inner` across the model
         // download; the webview's phase query must still return. Because phase

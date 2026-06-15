@@ -21,21 +21,12 @@ export interface AppSettings {
   captureMic: boolean;
 }
 
-/** Engine-package default $/meeting-hour until real usage is metered
- *  (PROPOSAL §6 — keep in sync with CreditAccountant.defaultDollarsPerHour). */
-export const DEFAULT_DOLLARS_PER_HOUR = 0.4;
-
 /** Pool presets (PROPOSAL §6); mirrors the engine's POOL_PRESETS. */
 export const POOL_PRESETS: { id: string; label: string; usd: number }[] = [
   { id: "pro", label: "Pro · $20", usd: 20 },
   { id: "max5x", label: "Max 5x · $100", usd: 100 },
   { id: "max20x", label: "Max 20x · $200", usd: 200 },
 ];
-
-/** "≈ N hrs/month" for a pool, using the pre-metering default rate. */
-export function estimatedHoursPerMonth(poolUsd: number): number {
-  return Math.round(poolUsd / DEFAULT_DOLLARS_PER_HOUR);
-}
 
 const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
 
@@ -64,4 +55,21 @@ export function applyCaptionSize(size: CaptionSize): void {
 /** Monospaced-digit gauge amount, e.g. "$7.40 / $20.00". */
 export function gaugeAmountLabel(spentUsd: number, poolUsd: number): string {
   return `$${spentUsd.toFixed(2)} / $${poolUsd.toFixed(2)}`;
+}
+
+/**
+ * Per-session target language (#2): the user confirms/changes the target at
+ * Start each time. The pick is remembered as the DEFAULT for the next session
+ * by persisting it into settings. Returns the settings object to persist when
+ * the pick differs from the stored default, or `null` when it is unchanged (so
+ * the caller skips a redundant write). Normalizes the tag the same way the Rust
+ * sanitizer does (trim + lowercase) so an unchanged pick is detected reliably.
+ */
+export function nextSettingsForSessionLanguage(
+  current: AppSettings,
+  pickedCode: string,
+): AppSettings | null {
+  const normalized = pickedCode.trim().toLowerCase();
+  if (normalized === "" || normalized === current.targetLanguage) return null;
+  return { ...current, targetLanguage: normalized };
 }

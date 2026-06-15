@@ -1,12 +1,13 @@
 // First-run onboarding (#12, PROPOSAL §8.6, design/screens/06-onboarding.png):
 // three cards, under a minute — audio access (real TCC prompts), target
 // language, engine. Shown when settings.onboardingComplete is false; ends by
-// persisting the choices and starting a session. Never a dead end: every step
-// can continue regardless of what was granted or detected.
+// persisting the choices and landing on the idle Start screen (#1 — the user
+// presses Start when ready; onboarding no longer auto-starts a session). Never
+// a dead end: every step can continue regardless of what was granted/detected.
 
 import { invoke } from "@tauri-apps/api/core";
 
-import { estimatedHoursPerMonth, type AppSettings, type EnginePref } from "./app-settings";
+import type { AppSettings, EnginePref } from "./app-settings";
 import { DEFAULT_LANGUAGE_CODE, LANGUAGES } from "./languages";
 import type { ProbeResult } from "./protocol";
 
@@ -70,7 +71,7 @@ export function startOnboarding(options: OnboardingOptions): void {
       <p class="ob-note" id="ob-engine-body"></p>
       <p class="ob-note ob-alt" id="ob-engine-alt"></p>
       <div class="ob-actions">
-        <button class="ob-primary" id="ob-start" disabled>Start captioning</button>
+        <button class="ob-primary" id="ob-start" disabled>Finish setup</button>
         <button class="ob-link" id="ob-engine-toggle" hidden></button>
       </div>
     </div>
@@ -176,10 +177,14 @@ export function startOnboarding(options: OnboardingOptions): void {
   const startBtn = el<HTMLButtonElement>(host, "#ob-start");
 
   function renderEngine(): void {
-    const hours = estimatedHoursPerMonth(settings.poolUsd);
     if (cliFound && engine === "cli") {
       engineTitle.textContent = "✓ Claude CLI found";
-      engineBody.innerHTML = `Signed in on your plan. Meetings use your plan's SDK credits — about <b>${hours} hrs/month</b>.`;
+      // #4: no "uses your plan's SDK credits / N hrs" — in real use the
+      // subscription covers CLI usage today; LiveCap only watches for a policy
+      // change and falls back to the free local model if usage ever starts to
+      // draw on Agent SDK credits.
+      engineBody.textContent =
+        "Signed in on your plan — covered by your Claude subscription. If Anthropic's policy changes, LiveCap falls back to the free local model automatically.";
       engineAlt.textContent = "";
       engineToggle.hidden = false;
       engineToggle.textContent = "Use the local model instead — free, 2.4 GB download";
@@ -188,11 +193,11 @@ export function startOnboarding(options: OnboardingOptions): void {
       engineBody.textContent = "Local model (Qwen3 4B, 2.4 GB) — free, downloads on first use. Everything stays on this Mac.";
       engineAlt.textContent = "";
       engineToggle.hidden = false;
-      engineToggle.textContent = `Use the Claude CLI instead — your plan's credits, ≈ ${hours} hrs/month`;
+      engineToggle.textContent = "Use the Claude CLI instead — covered by your plan";
     } else {
       engineTitle.textContent = "Use the local model";
       engineBody.textContent = "Local model (Qwen3 4B, 2.4 GB) — free, downloads on first use. Everything stays on this Mac.";
-      engineAlt.textContent = "No Claude CLI found — install and sign in to `claude` to use your plan's SDK credits instead.";
+      engineAlt.textContent = "No Claude CLI found — install and sign in to `claude` to translate with your Claude plan instead.";
       engineToggle.hidden = true;
     }
     startBtn.disabled = false;
