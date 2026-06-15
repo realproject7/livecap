@@ -71,11 +71,11 @@ LiveCap doesn't ship a cloud backend. Translation, summaries, and suggestions ru
 
 | Engine | Cost to you | How |
 |---|---|---|
-| **Claude / Codex CLI** (auto-detected) | Uses your existing plan's [Agent SDK credits](https://support.claude.com/en/articles/15036540-use-the-claude-agent-sdk-with-your-claude-plan) — a typical meeting-hour is ~cents | LiveCap drives the CLI you've already signed into, the way [open-design](https://github.com/nexu-io/open-design) does for design tools |
+| **Claude / Codex CLI** (auto-detected) | Currently covered by your existing Claude/Codex subscription | LiveCap drives the CLI you've already signed into, the way [open-design](https://github.com/nexu-io/open-design) does for design tools |
 | **Local model** (bundled download) | Free | llama.cpp + a small instruct model, fully offline |
 | **Your own API key** (planned) | Pay-per-use | For heavy users |
 
-LiveCap shows a **credit gauge** so you always know where you stand, and auto-falls back to the local model if your pool runs low — captions never stop mid-meeting.
+CLI usage is covered by your subscription today. If Anthropic's [policy](https://support.claude.com/en/articles/15036540-use-the-claude-agent-sdk-with-your-claude-plan) changes so that programmatic use starts drawing on [Agent SDK credits](https://support.claude.com/en/articles/15036540-use-the-claude-agent-sdk-with-your-claude-plan), LiveCap watches for it and **auto-falls back to the free local model** — captions never stop mid-meeting. An optional usage indicator in Settings shows where you'd stand *if* credits ever start to apply.
 
 ## ─ Quick Start
 

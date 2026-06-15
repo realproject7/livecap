@@ -79,8 +79,8 @@ One interface (`sentence + rolling context + glossary in → translation out`), 
 
 | Tier | Engine | Cost | Role |
 |---|---|---|---|
-| **1. CLI mode** (default when detected) | Claude Code / Codex CLI, persistent stream-json session, model pinned to Haiku | Agent SDK credit pool (§6) | Best quality: cleans up disfluencies, keeps terminology consistent via rolling context + glossary. Also powers summary/board/suggestions. |
-| **2. Local LLM fallback** | llama.cpp + Qwen3 4B Instruct (Apache 2.0), bundled/auto-downloaded | $0 | Auto-engaged when no CLI is found or the credit pool nears exhaustion. Product survives any Anthropic policy change. |
+| **1. CLI mode** (default when detected) | Claude Code / Codex CLI, persistent stream-json session, model pinned to Haiku | Covered by the user's subscription today; would draw on the Agent SDK credit pool (§6) only if policy changes | Best quality: cleans up disfluencies, keeps terminology consistent via rolling context + glossary. Also powers summary/board/suggestions. |
+| **2. Local LLM fallback** | llama.cpp + Qwen3 4B Instruct (Apache 2.0), bundled/auto-downloaded | $0 | Auto-engaged when no CLI is found, or if CLI usage ever starts drawing on the credit pool. Product survives any Anthropic policy change. |
 | **3. BYO API key** (post-MVP) | Anthropic/OpenAI API | User-paid | Heavy users who outgrow the pool. |
 
 Why an LLM and not an NMT model (M2M100 etc.): live STT output is full of disfluencies ("and and… hard to… somebody's one"). NMT translates the fragments literally; an LLM tidies them into natural target-language sentences and uses conversation context. NLLB is ruled out regardless (CC-BY-NC). A 4B-class model at Q4 on Apple Silicon emits 50–100+ tok/s → sub-second per sentence; RAM footprint ~3 GB alongside Whisper's ~1 GB.
@@ -128,9 +128,9 @@ Verified against the [official policy](https://support.claude.com/en/articles/15
 | Live summary (60 s cadence, cached system prompt) | ~$0.10 |
 | **Total** | **~$0.40/hr → Pro pool ≈ 50 hrs/mo, Max 5x ≈ 250 hrs/mo** |
 
-- **Product features that make the policy livable:**
-  - **Credit gauge** in-app: accumulate `total_cost_usd` per response → "$7.40 of $20 pool used (~32 hrs)".
-  - **Graceful degradation:** as the pool nears empty, auto-switch to the local LLM tier with a toast — the captions never stop.
+- **What the app actually presents:** In real use no charge has occurred — CLI usage is currently covered by the user's Claude/Codex subscription, so LiveCap does **not** present captioning as active charging. The factual policy above is the *contingency* the product is built to survive, not a meter the user watches tick:
+  - **Optional usage indicator** in-app: it accumulates `total_cost_usd` per response so a number is ready *if* credits ever start to apply, but it is framed as a contingency indicator — not a "$X of pool spent" charge gauge led with cost.
+  - **Graceful degradation:** LiveCap watches for usage starting to draw on the Agent SDK credit pool and, before it bites, auto-switches to the local LLM tier with a calm notice — the captions never stop. This is the same safety net whether the trigger is "no CLI found" or "policy changed."
 
 > ⚠️ The $0.40/hr figure is an estimate. **PoC #1 exists to measure it** before anything else is built.
 
@@ -337,9 +337,11 @@ If no CLI is found, screen 3 leads with the local model and mentions CLI support
 │                                              │
 │ ENGINE                                       │
 │  ◉ Claude CLI (Haiku)      ○ Local (Qwen 4B) │
-│  This month  ▓▓▓▓▓▓░░░░  $7.40 / $20.00      │ ← monospaced digits
-│  ≈ 32 meeting-hours left · resets Jul 1      │
-│  ▢ Auto-switch to Local when pool runs low ✓ │
+│  Covered by your subscription. Falls back to │
+│  the free local model if policy ever changes.│
+│  Usage this month  ▓▓▓▓▓▓░░░░  $7.40 / $20.00│ ← optional indicator, monospaced
+│  Tracked in case credits ever apply          │
+│  ▢ Fall back to Local if credits ever apply ✓│
 │                                              │
 │ LANGUAGE     translate into [한국어 ▾]        │
 │ CAPTIONS     size [Aa Aa Aa]  ▢ click-through│

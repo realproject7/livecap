@@ -61,13 +61,18 @@ export function createSettingsSheet(options: SettingsSheetOptions): SettingsShee
         <button class="sh-seg-btn" data-engine="cli">Claude CLI · Haiku</button>
         <button class="sh-seg-btn" data-engine="local">Local · Qwen 4B</button>
       </div>
+      <div class="sh-engine-note t-meta">
+        Claude CLI usage is currently covered by your Claude subscription. If
+        Anthropic's policy changes so it draws on Agent SDK credits, LiveCap
+        falls back to the free local model automatically.
+      </div>
       <div class="sh-gauge">
-        <span class="sh-gauge-label t-meta">This month</span>
+        <span class="sh-gauge-label t-meta">Usage this month</span>
         <div class="sh-gauge-bar"><div class="sh-gauge-fill" id="sh-gauge-fill"></div></div>
         <span class="sh-gauge-amount" id="sh-gauge-amount">—</span>
       </div>
       <div class="sh-gauge-meta t-meta" id="sh-gauge-meta"></div>
-      <label class="sh-check"><input type="checkbox" id="sh-autoswitch" /> Auto-switch to Local when pool runs low</label>
+      <label class="sh-check"><input type="checkbox" id="sh-autoswitch" /> Fall back to Local if credits ever start to apply</label>
       <div class="sh-row">
         <span class="sh-row-label">Plan</span>
         <select class="sh-select" id="sh-plan" aria-label="Credit pool size">${presetChoices}</select>
@@ -180,10 +185,13 @@ export function createSettingsSheet(options: SettingsSheetOptions): SettingsShee
     const pool = lastGauge?.poolUsd ?? s.poolUsd;
     gaugeAmount.textContent = gaugeAmountLabel(spent, pool);
     gaugeFill.style.width = `${Math.round(Math.min(1, pool > 0 ? spent / pool : 1) * 100)}%`;
-    const hours = lastGauge
-      ? Math.round(lastGauge.estimatedHoursRemaining)
-      : Math.round(Math.max(0, pool - spent) / 0.4);
-    gaugeMeta.textContent = `≈ ${hours} meeting-hours left · resets ${nextResetLabel(s.resetDay, new Date())}`;
+    // #4: the gauge is an OPTIONAL usage indicator that is only meaningful IF
+    // Agent SDK credits ever start applying — it is not a live charge meter
+    // today, so don't lead with cost/"hours left". State the conditional plainly.
+    gaugeMeta.textContent = `Tracked in case credits ever apply · would reset ${nextResetLabel(
+      s.resetDay,
+      new Date(),
+    )}`;
   }
 
   /* ---- persistence ---- */
