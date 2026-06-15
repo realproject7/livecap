@@ -3,6 +3,8 @@
 
 export type EnginePref = "cli" | "local";
 export type CaptionSize = "s" | "m" | "l";
+/** What the one-line Capsule shows (#97). */
+export type CapsuleContent = "caption" | "translation" | "both";
 
 export interface AppSettings {
   onboardingComplete: boolean;
@@ -12,6 +14,8 @@ export interface AppSettings {
   resetDay: number;
   autoSwitch: boolean;
   captionSize: CaptionSize;
+  /** Capsule (one-line pill) content choice (#97). */
+  capsuleContent: CapsuleContent;
   archiveAutoSave: boolean;
   archiveFolder: string | null;
   archiveRetentionDays: number;

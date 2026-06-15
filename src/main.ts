@@ -190,6 +190,7 @@ let appSettings: AppSettings = {
   resetDay: 1,
   autoSwitch: true,
   captionSize: "m",
+  capsuleContent: "translation",
   archiveAutoSave: true,
   archiveFolder: null,
   archiveRetentionDays: 0,
@@ -537,19 +538,24 @@ function syncMiniViews(): void {
   stripTr.textContent = stripTranslation;
   stripTr.classList.toggle("empty", stripTranslation === "");
 
-  // #7 Capsule (one-line 44px pill, design/screens/04-capsule-mode.png): show the
-  // most useful single line — the latest TRANSLATION, since that is the value the
-  // user can't otherwise understand. Fall back to the source when no translation
-  // exists yet (still streaming, pending, or failed). The source rides along as a
-  // native tooltip; the live dot already marks the channel.
-  const capsuleLine =
-    latest === null
-      ? sessionRunning()
-        ? "Listening…"
-        : "LiveCap"
-      : latest.translation !== ""
-        ? latest.translation
-        : latest.source;
+  // #7 Capsule (one-line 44px pill, design/screens/04-capsule-mode.png): what it
+  // shows is operator-configurable (#97) — caption (source), translation, or both.
+  // Translation is the default (the value the user can't otherwise understand);
+  // each mode falls back to the source when no translation exists yet (streaming,
+  // pending, failed). The source rides along as a native tooltip.
+  const capsuleLine = ((): string => {
+    if (latest === null) return sessionRunning() ? "Listening…" : "LiveCap";
+    const tr = latest.translation;
+    switch (appSettings.capsuleContent) {
+      case "caption":
+        return latest.source;
+      case "both":
+        return tr !== "" ? `${latest.source} — ${tr}` : latest.source;
+      case "translation":
+      default:
+        return tr !== "" ? tr : latest.source;
+    }
+  })();
   capsuleTxt.textContent = capsuleLine;
   capsuleTxt.title = latest?.source ?? "";
 }

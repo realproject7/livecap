@@ -941,7 +941,9 @@ body[data-capsize="l"] #capsule-view .txt { font-size: 15.5px; }
   inset: 0;
   z-index: 5;
   flex-direction: column;
-  background: var(--glass-bg);
+  /* Opaque (not the translucent --glass-bg): the sheet fully covers the panel
+     behind it, so the home/feed never bleeds through (#96). */
+  background: #0d0f12;
   border-radius: var(--radius-panel);
 }
 #settings-sheet.open {
@@ -1105,7 +1107,8 @@ body[data-capsize="l"] #capsule-view .txt { font-size: 15.5px; }
   display: inline-flex;
   gap: 4px;
 }
-.sh-size {
+.sh-size,
+.sh-capsule {
   border: none;
   border-radius: 6px;
   background: rgba(255, 255, 255, 0.06);
@@ -1114,7 +1117,11 @@ body[data-capsize="l"] #capsule-view .txt { font-size: 15.5px; }
   cursor: pointer;
   font-family: var(--font);
 }
-.sh-size[aria-pressed="true"] {
+.sh-capsule {
+  font-size: 12px;
+}
+.sh-size[aria-pressed="true"],
+.sh-capsule[aria-pressed="true"] {
   background: rgba(255, 255, 255, 0.14);
   color: var(--text-original);
 }
