@@ -202,7 +202,7 @@ fn clean_repetitive_text(text: &str) -> String {
     }
 
     if is_meaningless_output(text) {
-        log::debug!("Detected meaningless output, returning empty: '{}'", text);
+        log::debug!("Detected meaningless output ({} chars), returning empty", text.chars().count());
         return String::new();
     }
 
@@ -216,7 +216,7 @@ fn clean_repetitive_text(text: &str) -> String {
 
     let final_text = cleaned_words.join(" ");
     if calculate_repetition_ratio(&final_text) > 0.7 {
-        log::debug!("High repetition ratio, filtering out: '{}'", final_text);
+        log::debug!("High repetition ratio, filtering out ({} chars)", final_text.chars().count());
         return String::new();
     }
 
