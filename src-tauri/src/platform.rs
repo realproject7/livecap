@@ -10,6 +10,8 @@ use crate::modes::Mode;
 
 #[cfg(target_os = "macos")]
 mod imp {
+    use objc2::msg_send;
+    use objc2::runtime::{AnyClass, AnyObject};
     use objc2_app_kit::{NSWindow, NSWindowCollectionBehavior, NSWindowSharingType};
     use tauri::WebviewWindow;
     use window_vibrancy::{apply_vibrancy, clear_vibrancy, NSVisualEffectMaterial, NSVisualEffectState};
@@ -101,6 +103,27 @@ mod imp {
         }
     }
 
+    /// Bring the overlay to the front and activate the app, so a tray/dock
+    /// click reliably surfaces LiveCap even from another app or Space.
+    /// `orderFrontRegardless` raises the window without requiring the app to be
+    /// active first; `activateIgnoringOtherApps` then pulls LiveCap to the
+    /// foreground so the window can take key focus.
+    pub fn bring_to_front(window: &WebviewWindow) {
+        if let Some(ns) = ns_window(window) {
+            ns.orderFrontRegardless();
+        }
+        if let Some(cls) = AnyClass::get(c"NSApplication") {
+            // SAFETY: called on the main thread (run_on_main_thread); the
+            // shared NSApplication is always live for a running app.
+            unsafe {
+                let app: *mut AnyObject = msg_send![cls, sharedApplication];
+                if !app.is_null() {
+                    let _: () = msg_send![app, activateIgnoringOtherApps: true];
+                }
+            }
+        }
+    }
+
     pub fn capture_excluded(window: &WebviewWindow) -> bool {
         ns_window(window)
             .map(|ns| ns.sharingType() == NSWindowSharingType::None)
@@ -185,6 +208,8 @@ mod imp {
     }
 
     pub fn apply_glass(_window: &WebviewWindow, _corner_radius: f64) {}
+
+    pub fn bring_to_front(_window: &WebviewWindow) {}
 }
 
 /// One-time overlay window setup: applies the initial pin state (window level
@@ -222,4 +247,10 @@ pub fn joins_all_spaces_and_fullscreen(window: &WebviewWindow) -> bool {
 /// (Re)apply the glass material behind the webview with the mode's radius.
 pub fn apply_glass(window: &WebviewWindow, mode: Mode) {
     imp::apply_glass(window, mode.corner_radius());
+}
+
+/// Raise the overlay and activate the app so a tray/dock click surfaces it.
+/// Main-thread only.
+pub fn bring_to_front(window: &WebviewWindow) {
+    imp::bring_to_front(window);
 }

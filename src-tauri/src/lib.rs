@@ -463,14 +463,9 @@ pub fn run() {
         .expect("error while building tauri application")
         .run(|app, event| match event {
             RunEvent::Exit => app.state::<Shell>().save_now(),
-            // Dock icon clicked (macOS): re-show the overlay if it was hidden.
+            // Dock icon clicked (macOS): bring the overlay to the front (#101).
             #[cfg(target_os = "macos")]
-            RunEvent::Reopen { .. } => {
-                if let Some(window) = overlay::overlay_window(app) {
-                    let _ = window.show();
-                    let _ = window.set_focus();
-                }
-            }
+            RunEvent::Reopen { .. } => overlay::surface(app),
             _ => {}
         });
 }

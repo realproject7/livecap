@@ -271,12 +271,30 @@ pub fn cycle_mode(app: &AppHandle) {
     apply_mode(app, next);
 }
 
+/// Show the overlay and pull it to the front: visible, unminimized, focused,
+/// app activated, on the current Space (#101). Used by the tray, the dock
+/// reopen, and Settings so a click reliably surfaces LiveCap.
+pub fn surface(app: &AppHandle) {
+    if let Some(window) = overlay_window(app) {
+        let _ = window.show();
+        let _ = window.unminimize();
+        let _ = window.set_focus();
+        let win = window.clone();
+        let _ = window.run_on_main_thread(move || platform::bring_to_front(&win));
+    }
+}
+
 pub fn toggle_visibility(app: &AppHandle) {
     if let Some(window) = overlay_window(app) {
-        if window.is_visible().unwrap_or(false) {
+        // Hide only when it is already the visible, focused front window;
+        // otherwise a tray click should BRING IT FORWARD (#101) rather than
+        // toggle it away or leave it behind another app/Space.
+        let visible = window.is_visible().unwrap_or(false);
+        let focused = window.is_focused().unwrap_or(false);
+        if visible && focused {
             let _ = window.hide();
         } else {
-            let _ = window.show();
+            surface(app);
         }
     }
 }
@@ -287,8 +305,8 @@ pub fn open_settings(app: &AppHandle) {
     if app.state::<Shell>().mode() != Mode::Panel {
         apply_mode(app, Mode::Panel);
     }
+    surface(app);
     if let Some(window) = overlay_window(app) {
-        let _ = window.show();
         let _ = window.emit(EVENT_SETTINGS, ());
     }
 }
