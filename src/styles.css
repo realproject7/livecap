@@ -278,6 +278,19 @@ body[data-mode="capsule"] #panel-body {
   opacity: 0.4;
   cursor: default;
 }
+/* #90: secondary affordance to the saved-session dashboard, under the CTA. */
+.sp-dashboard {
+  border: none;
+  background: none;
+  color: var(--text-translation);
+  font-size: 12.5px;
+  padding: 4px 8px;
+  cursor: pointer;
+  transition: color var(--fade) ease;
+}
+.sp-dashboard:hover {
+  color: var(--text-original);
+}
 .sp-hint {
   font-size: 11.5px;
   margin-top: 2px;
@@ -1476,4 +1489,265 @@ body[data-mode="capsule"] #review {
   font-size: 12px;
   line-height: 1.4;
   margin-top: 4px;
+}
+
+/* ===================== #90: session dashboard ===================== */
+#dashboard {
+  display: none;
+  position: absolute;
+  inset: 0;
+  z-index: 7;
+  flex-direction: column;
+  /* Opaque (not the translucent --glass-bg): the dashboard fully covers the
+     panel behind it, so the home/feed never bleeds through (#96). */
+  background: #0d0f12;
+  border-radius: var(--radius-panel);
+}
+#dashboard.open {
+  display: flex;
+}
+/* The dashboard is a Panel-only surface (like Settings/Review). */
+body[data-mode="strip"] #dashboard,
+body[data-mode="capsule"] #dashboard {
+  display: none;
+}
+.dash-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 14px 16px 10px;
+  flex-shrink: 0;
+}
+.dash-title {
+  color: var(--text-translation);
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.dash-back,
+.dash-close {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  flex-shrink: 0;
+  border: none;
+  border-radius: 8px;
+  background: none;
+  color: var(--text-meta);
+  cursor: pointer;
+  transition:
+    color var(--fade) ease,
+    background var(--fade) ease;
+}
+.dash-back svg,
+.dash-close svg {
+  width: 14px;
+  height: 14px;
+}
+.dash-back:hover,
+.dash-close:hover {
+  color: var(--text-original);
+  background: rgba(255, 255, 255, 0.1);
+}
+.dash-back[hidden] {
+  display: none;
+}
+.dash-body {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 4px 18px 20px;
+}
+.dash-body::-webkit-scrollbar {
+  width: 0;
+}
+.dash-note {
+  font-size: 12px;
+  margin: 6px 0;
+}
+.dash-detail-meta {
+  font-variant-numeric: tabular-nums;
+  margin-bottom: 10px;
+}
+
+/* ---- empty state ---- */
+.dash-empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  text-align: center;
+  height: 100%;
+  gap: 6px;
+  padding: 0 24px;
+}
+.dash-empty-h {
+  color: var(--text-original);
+  font-size: 15px;
+  font-weight: 600;
+}
+.dash-empty-p {
+  font-size: 12.5px;
+  line-height: 1.45;
+  max-width: 280px;
+}
+
+/* ---- overview stats ---- */
+.dash-stats {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: 8px;
+  margin: 4px 0 16px;
+}
+.dash-stat {
+  background: rgba(255, 255, 255, 0.04);
+  border-radius: 10px;
+  padding: 10px 12px;
+}
+.dash-stat-value {
+  color: var(--accent-live);
+  font-size: 22px;
+  font-weight: 600;
+  line-height: 1.1;
+  font-variant-numeric: tabular-nums;
+}
+.dash-stat-label {
+  font-size: 11px;
+  margin-top: 2px;
+}
+
+/* ---- history list ---- */
+.dash-h {
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--text-meta);
+  margin: 14px 0 6px;
+  font-weight: 600;
+}
+.dash-row {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  width: 100%;
+  text-align: left;
+  border: none;
+  background: rgba(255, 255, 255, 0.04);
+  color: var(--text-original);
+  padding: 10px 12px;
+  border-radius: 9px;
+  margin-bottom: 6px;
+  cursor: pointer;
+  transition: background var(--fade) ease;
+}
+.dash-row:hover {
+  background: rgba(255, 255, 255, 0.08);
+}
+.dash-row-title {
+  font-size: 13.5px;
+  font-weight: 600;
+  line-height: 1.35;
+}
+.dash-row-meta {
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+}
+
+/* ---- detail: metrics + summary + board (mirrors #review) ---- */
+.dash-metrics {
+  display: flex;
+  gap: 28px;
+  margin-bottom: 10px;
+}
+.dash-summary {
+  margin: 0;
+  padding-left: 18px;
+  color: var(--text-original);
+  font-size: 13.5px;
+  line-height: 1.5;
+}
+.dash-board .board-row {
+  margin-bottom: 8px;
+}
+.dash-board .board-head {
+  color: var(--accent-live);
+  font-size: 12px;
+  font-weight: 600;
+}
+.dash-board ul {
+  margin: 2px 0 0;
+  padding-left: 18px;
+  color: var(--text-translation);
+  font-size: 13px;
+  line-height: 1.45;
+}
+
+/* ---- detail: coaching (the user's own utterances) ---- */
+.dash-coach-list {
+  margin-top: 6px;
+}
+.dash-coach-row {
+  display: flex;
+  gap: 10px;
+  background: rgba(255, 255, 255, 0.04);
+  color: var(--text-original);
+  font-size: 13px;
+  line-height: 1.4;
+  padding: 7px 10px;
+  border-radius: 8px;
+  margin-bottom: 5px;
+}
+.dash-coach-time {
+  flex-shrink: 0;
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+}
+
+/* ---- detail: full transcript ---- */
+.dash-transcript {
+  margin-top: 4px;
+}
+.dash-line {
+  padding: 8px 0;
+  border-top: 1px solid var(--hairline);
+}
+.dash-line:first-child {
+  border-top: none;
+}
+.dash-line-head {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  margin-bottom: 2px;
+}
+.dash-line-who {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--accent-live);
+}
+.dash-line.them .dash-line-who {
+  color: var(--text-meta);
+}
+.dash-line-time {
+  font-size: 10.5px;
+  font-variant-numeric: tabular-nums;
+}
+.dash-line-src {
+  color: var(--text-original);
+  font-size: 13.5px;
+  line-height: 1.45;
+}
+.dash-line-tr {
+  color: var(--text-translation);
+  font-size: 13px;
+  line-height: 1.45;
+  margin-top: 2px;
 }

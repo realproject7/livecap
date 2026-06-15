@@ -73,6 +73,9 @@ pub fn create(app: &AppHandle, initial_mode: Mode, initial_pinned: bool) -> taur
     )?;
     // #53: mirrors the panel's mic toggle — enabled only during a session.
     let mic = CheckMenuItem::with_id(app, "mic", "Microphone", false, false, None::<&str>)?;
+    // #90: the dashboard reads saved sessions from disk — always available,
+    // independent of the live captioning capability.
+    let dashboard = MenuItem::with_id(app, "dashboard", "Dashboard…", true, None::<&str>)?;
     let settings = MenuItem::with_id(app, "settings", "Settings…", caps.settings, None::<&str>)?;
     let quit = MenuItem::with_id(app, "quit", "Quit LiveCap", true, Some("Cmd+Q"))?;
 
@@ -87,6 +90,7 @@ pub fn create(app: &AppHandle, initial_mode: Mode, initial_pinned: bool) -> taur
             &captioning,
             &mic,
             &PredefinedMenuItem::separator(app)?,
+            &dashboard,
             &settings,
             &quit,
         ],
@@ -126,6 +130,7 @@ pub fn create(app: &AppHandle, initial_mode: Mode, initial_pinned: bool) -> taur
                     overlay::set_pinned(app, want);
                 }
             }
+            "dashboard" => overlay::open_dashboard(app),
             "settings" => overlay::open_settings(app),
             "quit" => {
                 // Full clean teardown (#66): stop the session (reaping the host

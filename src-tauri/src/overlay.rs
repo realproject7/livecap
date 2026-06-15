@@ -20,6 +20,7 @@ pub const WINDOW_LABEL: &str = "main";
 pub const EVENT_MODE: &str = "shell://mode";
 pub const EVENT_CHROME: &str = "shell://chrome";
 pub const EVENT_SETTINGS: &str = "shell://settings";
+pub const EVENT_DASHBOARD: &str = "shell://dashboard";
 
 /// Magnetic capture distance and snapped edge gap (logical px).
 const SNAP_THRESHOLD: f64 = 18.0;
@@ -308,6 +309,19 @@ pub fn open_settings(app: &AppHandle) {
     surface(app);
     if let Some(window) = overlay_window(app) {
         let _ = window.emit(EVENT_SETTINGS, ());
+    }
+}
+
+/// Tray "Dashboard…" (#90): the dashboard renders inside the Panel window (no
+/// separate window), mirroring Settings — surface the Panel, then tell the
+/// webview to open it.
+pub fn open_dashboard(app: &AppHandle) {
+    if app.state::<Shell>().mode() != Mode::Panel {
+        apply_mode(app, Mode::Panel);
+    }
+    surface(app);
+    if let Some(window) = overlay_window(app) {
+        let _ = window.emit(EVENT_DASHBOARD, ());
     }
 }
 
