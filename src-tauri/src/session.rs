@@ -443,7 +443,7 @@ pub async fn start(app: AppHandle) -> Result<(), String> {
 
 /// Archive destination: the Settings folder pick when set, otherwise
 /// ~/Documents/LiveCap (PROPOSAL §8.9).
-fn archive_dir(app: &AppHandle, settings: &crate::settings::AppSettings) -> PathBuf {
+pub(crate) fn archive_dir(app: &AppHandle, settings: &crate::settings::AppSettings) -> PathBuf {
     if let Some(folder) = settings.archive_folder.as_deref() {
         return PathBuf::from(folder);
     }

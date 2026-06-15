@@ -3,6 +3,7 @@
 
 mod bridge;
 mod config;
+mod dashboard;
 mod glyph;
 mod modes;
 mod overlay;
@@ -304,6 +305,7 @@ pub fn run() {
             ui_state::ui_beat,
             ui_state::ui_snapshot,
             session::host_probe,
+            dashboard::list_archived_sessions,
             settings::get_settings,
             settings::set_settings,
             permissions::mic_permission_status,

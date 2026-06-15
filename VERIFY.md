@@ -10,6 +10,51 @@ glass Panel; the LiveCap glyph appears in the menu bar; no Dock icon).
 
 ---
 
+# Session dashboard (#90, this round)
+
+A dashboard browses past sessions saved in `~/Documents/LiveCap` (or the
+Settings archive folder). It opens as an opaque overlay inside the Panel (like
+Settings), with an overview + history list and a per-session detail view.
+There are saved sessions on this Mac from prior test runs, so it renders with
+real data.
+
+## 1. Both entry points open the dashboard
+
+1. On the idle **Start** screen, a "View past sessions" button sits under the
+   "Start captioning" CTA. Click it → the dashboard overlay covers the Panel.
+2. Close it (✕ top-right) → back to the Start screen.
+3. Menu-bar tray → **Dashboard…** (just above "Settings…"). It surfaces the
+   Panel and opens the same overlay — works even with no active session and
+   from Strip/Capsule mode (it switches to Panel first).
+
+## 2. Overview: stats + history
+
+1. The top shows stat cards: **Sessions**, **Captioned time**, **Avg talk
+   ratio**, **Avg Smooth Score**, **Total cost**. Values are non-empty and
+   finite (no `NaN`); cost shows "—" if no cost was recorded.
+2. Below, a **History** list: one row per saved session, newest first, each
+   with the title and a "date · duration · EN → KO" subtitle. The in-progress
+   "(recording)" working file is excluded.
+
+## 3. Detail: transcript + review + coaching
+
+1. Click a history row → the header swaps to the session title with a back (‹)
+   button. Click back → returns to the overview.
+2. The detail shows: a meta line; **Talk ratio / Smooth Score** metrics + bar
+   (only if that session recorded metrics); **Summary** bullets; **Board**
+   (Decisions / Action items / Open questions, or "—"); **Coaching** — the
+   list of your own ("Me") utterances; and the full **Transcript** (every line:
+   speaker + time + source, with the translation underneath, "(?)" on
+   low-confidence lines).
+3. Pick a long session → the body scrolls; the header stays fixed.
+
+## 4. Empty state
+
+If you point the archive folder (Settings) at an empty directory and reopen the
+dashboard, it shows "No sessions yet" instead of stats/list.
+
+---
+
 # Pin-on-top toggle (this round)
 
 The overlay is no longer hardwired always-on-top. A 📌 pin button in the chrome

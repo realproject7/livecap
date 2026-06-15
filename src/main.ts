@@ -15,6 +15,7 @@ import {
   type AppSettings,
 } from "./app-settings";
 import { bootstrap } from "./bootstrap";
+import { buildDashboard, loadArchivedSessions, type DashboardSurface } from "./dashboard";
 import { LANGUAGES, SOURCE_AUTO_CODE, SOURCE_LANGUAGES, languageByCode } from "./languages";
 import { FeedState, type CaptionBlock } from "./feed-state";
 import {
@@ -109,6 +110,7 @@ document.body.innerHTML = `
         <label class="sp-lang-label" for="sp-lang">Translate into</label>
         <select id="sp-lang" class="sp-lang" aria-label="Target language for this session"></select>
         <button id="sp-start" type="button" class="sp-start">Start captioning</button>
+        <button id="sp-dashboard" type="button" class="sp-dashboard">View past sessions</button>
         <div class="sp-hint t-meta">Nothing is captured until you start.</div>
       </div>
       <div id="summary">
@@ -146,6 +148,7 @@ document.body.innerHTML = `
       <span class="txt"></span>
     </div>
     <div id="settings-sheet"></div>
+    <div id="dashboard-mount"></div>
     <div id="onboarding"></div>
     <div id="toast"></div>
   </div>
@@ -183,6 +186,7 @@ const startPanel = $<HTMLDivElement>("start-panel");
 const startSourceSelect = $<HTMLSelectElement>("sp-source");
 const startLangSelect = $<HTMLSelectElement>("sp-lang");
 const startBtn = $<HTMLButtonElement>("sp-start");
+const dashboardBtn = $<HTMLButtonElement>("sp-dashboard");
 
 /* ================= settings (#12) ================= */
 
@@ -762,6 +766,26 @@ const reviewCallbacks: ReviewCallbacks = {
 const review: ReviewSurface = buildReview(reviewCallbacks);
 $<HTMLDivElement>("review-mount").appendChild(review.el);
 
+/* ---- #90 session dashboard (src/dashboard.ts) ---- */
+
+const dashboard: DashboardSurface = buildDashboard({
+  load: loadArchivedSessions,
+  onClose: () => {
+    dashboard.close();
+    // Closing returns the idle Panel to whatever it was showing (Start screen).
+    render();
+  },
+});
+$<HTMLDivElement>("dashboard-mount").appendChild(dashboard.el);
+
+/** Open the dashboard inside the Panel (start-screen button + tray item). */
+function openDashboard(): void {
+  if (onboardingEl.classList.contains("active")) return;
+  dashboard.open();
+}
+
+dashboardBtn.addEventListener("click", openDashboard);
+
 /** Route a coaching result/failure to its card (owned by the review surface). */
 const coachingCards = {
   get: (id: number): CoachingCard | undefined => review.coachingCard(id),
@@ -1043,7 +1067,7 @@ document.addEventListener("pointerdown", showChrome);
 const INTERACTIVE_SELECTOR =
   "button, input, select, textarea, option, a, [contenteditable], " +
   "#feed-wrap, #pinned, #cards, #chips, #composer, " +
-  "#settings-sheet, #onboarding, #start-panel, #review-mount";
+  "#settings-sheet, #dashboard-mount, #onboarding, #start-panel, #review-mount";
 
 let dragStart: { x: number; y: number; t: number; pointerId: number; captured: boolean } | null = null;
 
@@ -1110,6 +1134,11 @@ void listen<ShellState>("shell://mode", (event) => {
 /* tray "Settings…" → the sheet opens inside the Panel (#12) */
 void listen("shell://settings", () => {
   if (!onboardingEl.classList.contains("active")) settingsSheet.open();
+});
+
+/* tray "Dashboard…" → the dashboard opens inside the Panel (#90) */
+void listen("shell://dashboard", () => {
+  openDashboard();
 });
 
 /* settings changed elsewhere (sanitized echo): keep the cache + feed live */
