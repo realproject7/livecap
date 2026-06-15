@@ -24,12 +24,13 @@ pub struct AudioAccess {
 
 #[cfg(target_os = "macos")]
 mod macos {
+    use std::sync::mpsc;
     use std::time::Duration;
 
-    use livecap_core::audio::mic::MicCapture;
+    use block2::RcBlock;
     use livecap_core::audio::system::SystemAudioCapture;
     use objc2::msg_send;
-    use objc2::runtime::AnyClass;
+    use objc2::runtime::{AnyClass, Bool};
     use objc2_foundation::NSString;
 
     // AVCaptureDevice lives in AVFoundation; link it so the class resolves.
@@ -54,18 +55,41 @@ mod macos {
         }
     }
 
-    /// Start a transient mic capture (triggers the real TCC sheet on first
-    /// use) and drop it immediately.
-    pub fn probe_mic() -> bool {
-        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
-        match MicCapture::start(None, tx) {
-            Ok(capture) => {
-                std::thread::sleep(Duration::from_millis(150));
-                drop(capture);
-                true
-            }
-            Err(_) => false,
+    /// Request microphone access the canonical way:
+    /// `+[AVCaptureDevice requestAccessForMediaType:completionHandler:]`.
+    ///
+    /// This is the ONLY reliable way to raise the mic TCC sheet. The previous
+    /// approach (open a cpal stream for 150 ms to "trigger" the sheet) raced:
+    /// dropping the stream before the user answered tore the sheet down, and
+    /// macOS shows the mic sheet only ONCE per launch — so a missed first sheet
+    /// left the button doing nothing forever. requestAccess keeps the sheet up
+    /// until the user answers and calls back with the result.
+    ///
+    /// Returns the resulting status string. Blocking — call off the main
+    /// thread; it waits (bounded) for the user to answer the sheet.
+    pub fn request_mic_access() -> &'static str {
+        // Already decided (granted/denied/restricted) ⇒ no sheet, return as-is.
+        let current = mic_status();
+        if current != "undetermined" {
+            return current;
         }
+        let Some(class) = AnyClass::get(c"AVCaptureDevice") else {
+            return "unknown";
+        };
+        let media = NSString::from_str("soun");
+        let (tx, rx) = mpsc::channel::<bool>();
+        // completionHandler is `void (^)(BOOL granted)`, invoked on an arbitrary
+        // queue once the user answers; hand the result back over the channel.
+        let handler = RcBlock::new(move |granted: Bool| {
+            let _ = tx.send(granted.as_bool());
+        });
+        let _: () = unsafe {
+            msg_send![class, requestAccessForMediaType: &*media, completionHandler: &*handler]
+        };
+        // Wait for the answer, but never hang the command forever if the user
+        // walks away from the sheet.
+        let _ = rx.recv_timeout(Duration::from_secs(120));
+        mic_status()
     }
 
     /// Create (and immediately drop) a system-audio process tap. On the first
@@ -109,8 +133,8 @@ mod other {
     pub fn mic_status() -> &'static str {
         "unknown"
     }
-    pub fn probe_mic() -> bool {
-        false
+    pub fn request_mic_access() -> &'static str {
+        "unknown"
     }
     pub fn probe_system_audio() -> bool {
         false
@@ -131,17 +155,16 @@ pub fn mic_permission_status() -> &'static str {
     platform_impl::mic_status()
 }
 
-/// Trigger the REAL permission prompts by starting transient captures on both
-/// channels, then report what landed. Runs off the main thread.
+/// Raise the REAL permission prompts and report what landed. The mic uses the
+/// canonical AVCaptureDevice.requestAccess (keeps the sheet up until answered);
+/// system audio has no such API, so it's probed by attempting a tap. Runs off
+/// the main thread and may block while the user answers the mic sheet.
 #[tauri::command]
 pub async fn request_audio_access() -> Result<AudioAccess, String> {
     tauri::async_runtime::spawn_blocking(|| {
-        platform_impl::probe_mic();
+        let mic = platform_impl::request_mic_access();
         let system_audio = platform_impl::probe_system_audio();
-        AudioAccess {
-            mic: platform_impl::mic_status(),
-            system_audio,
-        }
+        AudioAccess { mic, system_audio }
     })
     .await
     .map_err(|e| e.to_string())

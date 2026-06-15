@@ -26,6 +26,7 @@ livecap-core = { path = "../crates/livecap-core" }
 
 [target."cfg(target_os = \"macos\")".dependencies]
 objc2 = "0.6"
+block2 = "0.6"
 objc2-foundation = "0.3"
 objc2-app-kit = { version = "0.3", features = [
   "NSWindow",
