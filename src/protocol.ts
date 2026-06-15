@@ -41,6 +41,9 @@ export type Mode = "panel" | "strip" | "capsule";
 export interface ShellState {
   mode: Mode;
   clickThrough: boolean;
+  /** Pin-on-top: when true the overlay is always-on-top and joins every Space;
+   *  when false it is a normal window. Defaults to true. */
+  pinned: boolean;
   live: boolean;
 }
 

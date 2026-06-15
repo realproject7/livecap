@@ -84,6 +84,7 @@ fn capture_excluded(window: WebviewWindow) -> Result<bool, String> {
 struct ShellDiagnostics {
     capture_excluded: bool,
     joins_all_spaces_and_fullscreen: bool,
+    pinned: bool,
 }
 
 /// Read back the overlay's NSWindow flags for manual verification.
@@ -92,6 +93,7 @@ fn shell_diagnostics(window: WebviewWindow) -> Result<ShellDiagnostics, String> 
     on_main_thread(&window, |w| ShellDiagnostics {
         capture_excluded: platform::capture_excluded(w),
         joins_all_spaces_and_fullscreen: platform::joins_all_spaces_and_fullscreen(w),
+        pinned: platform::pinned(w),
     })
 }
 
@@ -110,6 +112,15 @@ fn cycle_mode(app: AppHandle) {
 #[tauri::command]
 fn set_click_through(app: AppHandle, enabled: bool) {
     overlay::set_click_through(&app, enabled);
+}
+
+/// Toggle pin-on-top at runtime (no relaunch): flips the NSWindow level +
+/// Spaces/fullscreen behavior and Tauri's always-on-top, persists the choice,
+/// and mirrors it to the tray. Pinned floats over every Space; unpinned is a
+/// normal window.
+#[tauri::command]
+fn set_pinned(app: AppHandle, pinned: bool) {
+    overlay::set_pinned(&app, pinned);
 }
 
 #[tauri::command]
@@ -259,6 +270,7 @@ pub fn run() {
             set_mode,
             cycle_mode,
             set_click_through,
+            set_pinned,
             begin_drag,
             end_drag,
             hide_overlay,
@@ -302,6 +314,11 @@ pub fn run() {
             let config_path = app.path().app_data_dir()?.join(config::FILE_NAME);
             let cfg = config::load(&config_path);
             let initial_mode = overlay::initial_mode(&window, &cfg);
+            // Pin-on-top preference restored from disk (default true). The
+            // window's tauri.conf.json declares alwaysOnTop/visibleOnAllWorkspaces
+            // = true; if the operator left it unpinned last run we flip both
+            // off below so the restored state matches.
+            let initial_pinned = cfg.pinned;
             app.manage(Shell::new(config_path, cfg, initial_mode));
 
             // Screen-capture exclusion (EPIC launch gate) + Spaces/fullscreen
@@ -312,9 +329,14 @@ pub fn run() {
             if std::env::var("LIVECAP_CAPTURE_VISIBLE").as_deref() != Ok("1") {
                 window.set_content_protected(true)?;
             }
-            platform::configure_overlay(&window);
+            platform::configure_overlay(&window, initial_pinned);
+            // Keep Tauri's own always-on-top flag in sync with the restored pin
+            // state (the conf default is true; flip it off if unpinned).
+            if !initial_pinned {
+                let _ = window.set_always_on_top(false);
+            }
 
-            tray::create(app.handle(), initial_mode)?;
+            tray::create(app.handle(), initial_mode, initial_pinned)?;
             overlay::apply_mode(app.handle(), initial_mode);
             window.show()?;
 

@@ -85,8 +85,8 @@ body[data-mode="capsule"] #chrome {
 }
 
 .btn {
-  width: 22px;
-  height: 22px;
+  width: 26px;
+  height: 26px;
   flex-shrink: 0;
   border: none;
   border-radius: var(--radius-control);
@@ -97,15 +97,19 @@ body[data-mode="capsule"] #chrome {
   justify-content: center;
   padding: 0;
   cursor: pointer;
-  transition: opacity var(--fade) ease;
+  transition:
+    opacity var(--fade) ease,
+    color var(--fade) ease,
+    background var(--fade) ease;
 }
 .btn svg {
-  width: 12px;
-  height: 12px;
+  width: 14px;
+  height: 14px;
   display: block;
 }
 .btn:hover:not(:disabled) {
   color: var(--text-original);
+  background: rgba(255, 255, 255, 0.12);
 }
 .btn:disabled {
   opacity: 0.35;
@@ -113,6 +117,15 @@ body[data-mode="capsule"] #chrome {
 }
 .btn[aria-pressed="true"] {
   color: var(--accent-live);
+}
+/* Pinned: clear amber active state (color + tinted fill) so the operator can
+   tell at a glance whether the overlay is floating on top. */
+#btn-pin[aria-pressed="true"] {
+  color: var(--accent-live);
+  background: rgba(232, 184, 75, 0.18);
+}
+#btn-pin[aria-pressed="true"]:hover {
+  background: rgba(232, 184, 75, 0.26);
 }
 
 /* ===================== #11: live panel ===================== */

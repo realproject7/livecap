@@ -14,9 +14,18 @@ mod imp {
     use tauri::WebviewWindow;
     use window_vibrancy::{apply_vibrancy, clear_vibrancy, NSVisualEffectMaterial, NSVisualEffectState};
 
-    /// NSStatusWindowLevel — above normal and floating windows so the overlay
-    /// stays visible over fullscreen apps.
+    /// NSStatusWindowLevel — above normal and floating windows so a pinned
+    /// overlay stays visible over fullscreen apps.
     const STATUS_WINDOW_LEVEL: isize = 25;
+    /// NSNormalWindowLevel — an unpinned overlay sits with ordinary app
+    /// windows and can be covered by them.
+    const NORMAL_WINDOW_LEVEL: isize = 0;
+    /// The Spaces/fullscreen bits a pinned overlay carries; cleared when
+    /// unpinned so the window lives on a single Space like a normal one.
+    const PINNED_BEHAVIOR: NSWindowCollectionBehavior = NSWindowCollectionBehavior(
+        NSWindowCollectionBehavior::CanJoinAllSpaces.0
+            | NSWindowCollectionBehavior::FullScreenAuxiliary.0,
+    );
 
     fn ns_window(window: &WebviewWindow) -> Option<&NSWindow> {
         let ptr = window.ns_window().ok()?;
@@ -25,13 +34,57 @@ mod imp {
         Some(unsafe { &*(ptr as *const NSWindow) })
     }
 
-    pub fn configure_overlay(window: &WebviewWindow) {
+    /// Window level for the pin state — pure, so the level mapping is unit
+    /// testable without an NSWindow.
+    pub(super) fn level_for(pinned: bool) -> isize {
+        if pinned {
+            STATUS_WINDOW_LEVEL
+        } else {
+            NORMAL_WINDOW_LEVEL
+        }
+    }
+
+    /// Apply the pin state to a base collection behavior: set the
+    /// all-Spaces/fullscreen bits when pinned, clear them when unpinned, leaving
+    /// every other bit untouched. Pure, so the bit math is unit testable.
+    pub(super) fn behavior_for(
+        base: NSWindowCollectionBehavior,
+        pinned: bool,
+    ) -> NSWindowCollectionBehavior {
+        let cleared = base & !PINNED_BEHAVIOR;
+        if pinned {
+            cleared | PINNED_BEHAVIOR
+        } else {
+            cleared
+        }
+    }
+
+    /// Window level + Spaces/fullscreen collection behavior for the pin state.
+    /// Pinned: status level + join-all-Spaces|fullscreen-auxiliary (floats over
+    /// every Space). Unpinned: normal level, those bits cleared (ordinary
+    /// single-Space window). Tauri's `set_always_on_top` is flipped by the
+    /// caller alongside this.
+    pub fn set_pinned(window: &WebviewWindow, pinned: bool) {
         if let Some(ns) = ns_window(window) {
-            let behavior = ns.collectionBehavior()
-                | NSWindowCollectionBehavior::CanJoinAllSpaces
-                | NSWindowCollectionBehavior::FullScreenAuxiliary;
-            ns.setCollectionBehavior(behavior);
-            ns.setLevel(STATUS_WINDOW_LEVEL);
+            ns.setCollectionBehavior(behavior_for(ns.collectionBehavior(), pinned));
+            ns.setLevel(level_for(pinned));
+        }
+    }
+
+    /// Read back whether the window is pinned: status-level AND carrying the
+    /// all-Spaces/fullscreen bits.
+    pub fn pinned(window: &WebviewWindow) -> bool {
+        ns_window(window)
+            .map(|ns| {
+                ns.level() == STATUS_WINDOW_LEVEL
+                    && ns.collectionBehavior().contains(PINNED_BEHAVIOR)
+            })
+            .unwrap_or(false)
+    }
+
+    pub fn configure_overlay(window: &WebviewWindow, pinned: bool) {
+        set_pinned(window, pinned);
+        if let Some(ns) = ns_window(window) {
             // LIVECAP_CAPTURE_VISIBLE=1 keeps the overlay visible to screen
             // capture — DEV/VERIFICATION ONLY (the operator's screenshot-based
             // checks can't see an excluded window, #54). Production default is
@@ -71,13 +124,53 @@ mod imp {
             Some(corner_radius),
         );
     }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[test]
+        fn level_maps_pinned_to_status_unpinned_to_normal() {
+            assert_eq!(level_for(true), STATUS_WINDOW_LEVEL);
+            assert_eq!(level_for(false), NORMAL_WINDOW_LEVEL);
+        }
+
+        #[test]
+        fn pinned_behavior_sets_both_bits_and_unpinned_clears_them() {
+            let empty = NSWindowCollectionBehavior::Default;
+            let pinned = behavior_for(empty, true);
+            assert!(pinned.contains(NSWindowCollectionBehavior::CanJoinAllSpaces));
+            assert!(pinned.contains(NSWindowCollectionBehavior::FullScreenAuxiliary));
+
+            let unpinned = behavior_for(pinned, false);
+            assert!(!unpinned.contains(NSWindowCollectionBehavior::CanJoinAllSpaces));
+            assert!(!unpinned.contains(NSWindowCollectionBehavior::FullScreenAuxiliary));
+        }
+
+        #[test]
+        fn toggling_pin_preserves_unrelated_collection_bits() {
+            // A bit LiveCap never touches (Managed) must survive a pin/unpin.
+            let base = NSWindowCollectionBehavior::Managed;
+            let pinned = behavior_for(base, true);
+            assert!(pinned.contains(NSWindowCollectionBehavior::Managed));
+            let unpinned = behavior_for(pinned, false);
+            assert!(unpinned.contains(NSWindowCollectionBehavior::Managed));
+            assert!(!unpinned.contains(NSWindowCollectionBehavior::CanJoinAllSpaces));
+        }
+    }
 }
 
 #[cfg(not(target_os = "macos"))]
 mod imp {
     use tauri::WebviewWindow;
 
-    pub fn configure_overlay(_window: &WebviewWindow) {}
+    pub fn configure_overlay(_window: &WebviewWindow, _pinned: bool) {}
+
+    pub fn set_pinned(_window: &WebviewWindow, _pinned: bool) {}
+
+    pub fn pinned(_window: &WebviewWindow) -> bool {
+        false
+    }
 
     pub fn capture_excluded(_window: &WebviewWindow) -> bool {
         false
@@ -90,10 +183,25 @@ mod imp {
     pub fn apply_glass(_window: &WebviewWindow, _corner_radius: f64) {}
 }
 
-/// One-time overlay window setup: all-Spaces + fullscreen-auxiliary
-/// collection behavior, status window level, and sharingType = none.
-pub fn configure_overlay(window: &WebviewWindow) {
-    imp::configure_overlay(window);
+/// One-time overlay window setup: applies the initial pin state (window level
+/// plus Spaces/fullscreen collection behavior) and sharingType = none (capture
+/// exclusion). `pinned` comes from the persisted shell state.
+pub fn configure_overlay(window: &WebviewWindow, pinned: bool) {
+    imp::configure_overlay(window, pinned);
+}
+
+/// Flip the overlay's pin state at runtime: status vs. normal window level and
+/// the all-Spaces/fullscreen collection bits. Does NOT touch sharingType, so
+/// capture exclusion is unaffected. Tauri's `set_always_on_top` is flipped by
+/// the caller alongside this. Main-thread only.
+pub fn set_pinned(window: &WebviewWindow, pinned: bool) {
+    imp::set_pinned(window, pinned);
+}
+
+/// Read back the ACTUAL pin state from the NSWindow (status level + the
+/// all-Spaces/fullscreen bits), for verification.
+pub fn pinned(window: &WebviewWindow) -> bool {
+    imp::pinned(window)
 }
 
 /// Read back the ACTUAL NSWindow sharingType (not a cached flag) so capture

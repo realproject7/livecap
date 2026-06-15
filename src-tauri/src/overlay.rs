@@ -41,6 +41,7 @@ pub struct Shell {
     pub mode: Mutex<Mode>,
     pub live: AtomicBool,
     pub click_through: AtomicBool,
+    pub pinned: AtomicBool,
     drag_generation: AtomicU64,
     dirty: AtomicBool,
     transitioning: AtomicBool,
@@ -50,12 +51,14 @@ pub struct Shell {
 impl Shell {
     pub fn new(config_path: PathBuf, config: ShellConfig, mode: Mode) -> Self {
         let click_through = config.click_through;
+        let pinned = config.pinned;
         Shell {
             config_path,
             config: Mutex::new(config),
             mode: Mutex::new(mode),
             live: AtomicBool::new(false),
             click_through: AtomicBool::new(click_through),
+            pinned: AtomicBool::new(pinned),
             drag_generation: AtomicU64::new(0),
             dirty: AtomicBool::new(false),
             // Starts true so window-creation Moved/Resized events cannot
@@ -87,6 +90,7 @@ impl Shell {
 pub struct ShellState {
     pub mode: &'static str,
     pub click_through: bool,
+    pub pinned: bool,
     pub live: bool,
 }
 
@@ -94,6 +98,7 @@ pub fn shell_state(shell: &Shell) -> ShellState {
     ShellState {
         mode: shell.mode().id(),
         click_through: shell.click_through.load(Ordering::Relaxed),
+        pinned: shell.pinned.load(Ordering::Relaxed),
         live: shell.live.load(Ordering::Relaxed),
     }
 }
@@ -300,6 +305,26 @@ pub fn set_click_through(app: &AppHandle, enabled: bool) {
         }
         let _ = window.emit(EVENT_MODE, shell_state(shell));
     }
+}
+
+/// Flip the overlay's pin state live (no relaunch): NSWindow level +
+/// Spaces/fullscreen collection behavior (main-thread only) plus Tauri's
+/// `set_always_on_top`. Persisted to the shell state and mirrored to the
+/// webview chrome + the tray check item. Pinned floats over every Space;
+/// unpinned is an ordinary window that can go behind other apps.
+pub fn set_pinned(app: &AppHandle, pinned: bool) {
+    let shell = app.state::<Shell>();
+    let shell = shell.inner();
+    shell.pinned.store(pinned, Ordering::Relaxed);
+    shell.config.lock().expect("config lock").pinned = pinned;
+    shell.mark_dirty();
+    if let Some(window) = overlay_window(app) {
+        let _ = window.set_always_on_top(pinned);
+        let win = window.clone();
+        let _ = window.run_on_main_thread(move || platform::set_pinned(&win, pinned));
+        let _ = window.emit(EVENT_MODE, shell_state(shell));
+    }
+    crate::tray::sync_pinned(app, pinned);
 }
 
 fn set_cursor_ignored(window: &WebviewWindow, shell: &Shell, ignored: bool) {

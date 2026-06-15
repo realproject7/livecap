@@ -59,12 +59,13 @@ const ICONS = {
     '<svg viewBox="0 0 12 12" aria-hidden="true"><g fill="currentColor" opacity="0.55"><rect x="4.4" y="0.8" width="3.2" height="6" rx="1.6"/><path d="M2.7 5.4a.55.55 0 0 1 1.1 0 2.2 2.2 0 0 0 4.4 0 .55.55 0 0 1 1.1 0 3.3 3.3 0 0 1-2.75 3.25v1.25h1.05a.55.55 0 0 1 0 1.1H4.4a.55.55 0 0 1 0-1.1h1.05V8.65A3.3 3.3 0 0 1 2.7 5.4z"/></g><path d="M1.8 1.4l8.4 9.2" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" fill="none"/></svg>',
   clickThrough:
     '<svg viewBox="0 0 12 12" fill="currentColor" aria-hidden="true"><path d="M2 1l8 6.2-3.6.5L8.2 11l-1.6.7-1.7-3.2L2 11.2z"/></svg>',
+  pin: '<svg viewBox="0 0 12 12" fill="currentColor" aria-hidden="true"><path d="M7.3.9 11.1 4.7a.7.7 0 0 1-.46 1.19l-1.83.2-1.6 1.6.36 2.2a.7.7 0 0 1-1.19.6L4.2 8.16 1.6 10.75a.6.6 0 0 1-.85-.85L3.34 7.3 1.51 5.41a.7.7 0 0 1 .6-1.19l2.2.36 1.6-1.6.2-1.83A.7.7 0 0 1 7.3.9Z"/></svg>',
   mode: '<svg viewBox="0 0 12 12" fill="currentColor" aria-hidden="true"><rect x="1" y="1.5" width="10" height="3.2" rx="1.4"/><rect x="2.5" y="6.2" width="7" height="2.2" rx="1.1"/><rect x="4" y="9.8" width="4" height="1.6" rx="0.8"/></svg>',
   close:
     '<svg viewBox="0 0 12 12" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" fill="none" aria-hidden="true"><path d="M3 3l6 6M9 3l-6 6"/></svg>',
 };
 
-const state: ShellState = { mode: "panel", clickThrough: false, live: false };
+const state: ShellState = { mode: "panel", clickThrough: false, pinned: true, live: false };
 let capabilities: Capabilities = { captioning: false, settings: false };
 let phase: SessionStatus["phase"] = "idle";
 // #53: desired capture channels for the running session (both-on while idle).
@@ -88,6 +89,7 @@ document.body.innerHTML = `
       <button id="btn-stop" class="btn" aria-label="Stop captioning">${ICONS.stop}</button>
       <button id="btn-mic" class="btn" aria-label="Microphone capture on/off">${ICONS.mic}</button>
       <span class="spacer"></span>
+      <button id="btn-pin" class="btn" aria-label="Pin LiveCap on top">${ICONS.pin}</button>
       <button id="btn-clickthrough" class="btn" aria-label="Toggle click-through">${ICONS.clickThrough}</button>
       <button id="btn-mode" class="btn" aria-label="Cycle window mode">${ICONS.mode}</button>
       <button id="btn-close" class="btn" aria-label="Hide LiveCap">${ICONS.close}</button>
@@ -147,6 +149,7 @@ const chrome = $<HTMLDivElement>("chrome");
 const btnPause = $<HTMLButtonElement>("btn-pause");
 const btnStop = $<HTMLButtonElement>("btn-stop");
 const btnMic = $<HTMLButtonElement>("btn-mic");
+const btnPin = $<HTMLButtonElement>("btn-pin");
 const btnClickThrough = $<HTMLButtonElement>("btn-clickthrough");
 const btnMode = $<HTMLButtonElement>("btn-mode");
 const btnClose = $<HTMLButtonElement>("btn-close");
@@ -315,6 +318,11 @@ function render(): void {
           ? "Resume captions"
           : "Working…";
   btnStop.title = "Stop captioning and save the transcript";
+
+  btnPin.setAttribute("aria-pressed", String(state.pinned));
+  btnPin.title = state.pinned
+    ? "Pinned on top — floats over every Space; click to unpin"
+    : "Unpinned — behaves like a normal window; click to pin on top";
 
   const clickThroughAvailable = state.mode !== "panel";
   btnClickThrough.style.display = clickThroughAvailable ? "" : "none";
@@ -1035,6 +1043,9 @@ function finishDrag(e: PointerEvent): void {
 glass.addEventListener("pointerup", finishDrag);
 glass.addEventListener("pointercancel", finishDrag);
 
+btnPin.addEventListener("click", () => {
+  void invoke("set_pinned", { pinned: !state.pinned });
+});
 btnClickThrough.addEventListener("click", () => {
   void invoke("set_click_through", { enabled: !state.clickThrough });
 });

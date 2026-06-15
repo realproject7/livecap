@@ -10,6 +10,88 @@ glass Panel; the LiveCap glyph appears in the menu bar; no Dock icon).
 
 ---
 
+# Pin-on-top toggle (this round)
+
+The overlay is no longer hardwired always-on-top. A 📌 pin button in the chrome
+row (and a "Pin on top" tray check item) toggles it live; the choice persists.
+Default is **ON** (pinned), matching the historical behavior.
+
+## 1. The pin button is discoverable
+
+1. Hover the glass → the chrome row fades in (auto-hides ~3 s after the cursor
+   stops). Buttons are the enlarged 26 px size with a hover fill and a `title`
+   tooltip on each (pin, click-through, mode, hide ✕).
+2. The 📌 pin button sits just left of the click-through/mode/✕ cluster. Default
+   state is **pressed/amber** (tinted fill + amber glyph), tooltip "Pinned on
+   top — floats over every Space; click to unpin". The ✕ (hide) button is in the
+   same row — no traffic-lights (frameless by design, unchanged).
+
+## 2. Pinned (default ON) — floats over everything
+
+1. Confirm the pin button is amber/pressed. Put Safari (or any app) fullscreen →
+   the overlay floats above it. Switch Spaces (ctrl-←/→) → the overlay follows
+   to every Space.
+2. Devtools console (dev build: right-click glass → Inspect Element):
+   ```js
+   const { invoke } = window.__TAURI_INTERNALS__;
+   await invoke("get_shell_state")     // → { ..., pinned: true }
+   await invoke("shell_diagnostics")   // → { ..., joinsAllSpacesAndFullscreen: true, pinned: true }
+   ```
+
+## 3. Unpinned — normal window
+
+1. Click the 📌 button (or tray → uncheck "Pin on top"). It dims to the normal
+   (un-pressed) state; tooltip becomes "Unpinned — behaves like a normal
+   window…". **No relaunch.**
+2. Click another app (e.g. Finder) so it comes forward → the overlay now goes
+   **behind** it (it did not before). Switch to another Space → the overlay does
+   **not** follow (single-Space).
+3. Console:
+   ```js
+   await invoke("get_shell_state")     // → { ..., pinned: false }
+   await invoke("shell_diagnostics")   // → { ..., joinsAllSpacesAndFullscreen: false, pinned: false }
+   ```
+4. It is still frameless glass, still movable by dragging the body, still
+   hideable (✕ / ⌥Space).
+
+## 4. Live toggle both ways + tray mirror
+
+- Toggle pin from the 📌 button → the tray "Pin on top" check mark updates to
+  match (and vice-versa: toggling from the tray updates the button). Each flip
+  takes effect immediately, no relaunch.
+
+## 5. Persistence across restart
+
+- Unpin, quit (menu bar → Quit LiveCap), relaunch → the overlay comes back
+  **unpinned** (normal window, not on all Spaces; button un-pressed; tray
+  unchecked). Re-pin, restart → comes back pinned. State lives in
+  `~/Library/Application Support/app.livecap.desktop/shell-state.json`
+  (`"pinned": true|false`); a state file written before this field existed
+  defaults to pinned.
+
+## 6. No regressions
+
+- Capture exclusion is independent of pin: `await invoke("capture_excluded")`
+  stays `true` in both pin states (prod). `LIVECAP_CAPTURE_VISIBLE=1` is still
+  the only dev escape hatch.
+- Click-through, modes, edge snapping, drag threshold, and per-session language
+  are unchanged by toggling pin.
+
+### Headless self-check (no live rig)
+
+```
+pnpm build && pnpm tauri build --debug --bundles app
+rm -f ~/Library/Application\ Support/app.livecap.desktop/{ui-heartbeat.json,shell-state.json}
+LIVECAP_CAPTURE_VISIBLE=1 ./target/debug/bundle/macos/LiveCap.app/Contents/MacOS/livecap-app &
+sleep 5; cat ~/Library/Application\ Support/app.livecap.desktop/ui-heartbeat.json   # bootError:null, mode:panel
+pkill -TERM -f livecap-app; sleep 2
+grep pinned ~/Library/Application\ Support/app.livecap.desktop/shell-state.json     # → "pinned": true
+```
+The pin/unpin window behavior itself (floats-over vs. goes-behind, all-Spaces vs.
+single-Space) needs the **live rig** — sections 2–4 above.
+
+---
+
 # #11 Caption feed + live pipeline E2E
 
 Prerequisites on the test Mac:
@@ -279,8 +361,10 @@ Checks while the sheet is open:
    participant → overlay NOT visible on the receiving end (screenshot the
    receiver for the PR matrix). Overlay still visible locally.
 
-## 2. Always-on-top + Spaces/fullscreen
+## 2. Always-on-top + Spaces/fullscreen (now pin-gated)
 
+This behavior is now controlled by the pin toggle (see "Pin-on-top toggle"
+above) and applies **while pinned** (the default):
 - Put Safari (or any app) fullscreen → press ⌥Space twice (hide/show) →
   overlay floats above the fullscreen app.
 - Switch Spaces (ctrl-←/→) → overlay follows to every Space.

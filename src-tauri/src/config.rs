@@ -32,7 +32,7 @@ pub struct DisplayState {
     pub geometry: BTreeMap<String, Geometry>,
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ShellConfig {
     /// Keyed by display name (Tauri monitor name).
     #[serde(default)]
@@ -40,6 +40,28 @@ pub struct ShellConfig {
     /// Click-through preference for Strip/Capsule.
     #[serde(default)]
     pub click_through: bool,
+    /// Pin-on-top preference: when true the overlay is always-on-top, joins
+    /// every Space, and floats at status-window level (the aggressive default);
+    /// when false it behaves like a normal window. Defaults to true, including
+    /// for state files written before this field existed.
+    #[serde(default = "default_pinned")]
+    pub pinned: bool,
+}
+
+/// Default for [`ShellConfig::pinned`] — on, matching the historical hardwired
+/// always-on-top behavior. Also the value a missing field deserializes to.
+fn default_pinned() -> bool {
+    true
+}
+
+impl Default for ShellConfig {
+    fn default() -> Self {
+        ShellConfig {
+            displays: BTreeMap::new(),
+            click_through: false,
+            pinned: default_pinned(),
+        }
+    }
 }
 
 impl ShellConfig {
@@ -153,5 +175,37 @@ mod tests {
     #[test]
     fn missing_file_falls_back_to_defaults() {
         assert_eq!(load(Path::new("/nonexistent/livecap.json")), ShellConfig::default());
+    }
+
+    #[test]
+    fn pinned_defaults_to_true() {
+        assert!(ShellConfig::default().pinned);
+    }
+
+    #[test]
+    fn pinned_round_trips_when_off() {
+        let path = temp_path("pinned-off");
+        let cfg = ShellConfig {
+            pinned: false,
+            ..ShellConfig::default()
+        };
+        save_atomic(&path, &cfg).unwrap();
+        let loaded = load(&path);
+        assert!(!loaded.pinned);
+        assert_eq!(loaded, cfg);
+        std::fs::remove_dir_all(path.parent().unwrap()).ok();
+    }
+
+    #[test]
+    fn legacy_state_without_pinned_defaults_to_true() {
+        // A state file written before the `pinned` field existed must restore
+        // the historical always-on-top behavior, not serde's `bool` default.
+        let path = temp_path("legacy-no-pinned");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, br#"{"displays":{},"click_through":true}"#).unwrap();
+        let loaded = load(&path);
+        assert!(loaded.pinned);
+        assert!(loaded.click_through);
+        std::fs::remove_dir_all(path.parent().unwrap()).ok();
     }
 }

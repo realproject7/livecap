@@ -19,13 +19,14 @@ struct TrayHandles {
     mode_items: Vec<(Mode, CheckMenuItem<Wry>)>,
     captioning: MenuItem<Wry>,
     mic: CheckMenuItem<Wry>,
+    pinned: CheckMenuItem<Wry>,
 }
 
 fn icon(live: bool) -> Image<'static> {
     Image::new_owned(glyph::menubar_icon(live), glyph::SIZE, glyph::SIZE)
 }
 
-pub fn create(app: &AppHandle, initial_mode: Mode) -> tauri::Result<()> {
+pub fn create(app: &AppHandle, initial_mode: Mode, initial_pinned: bool) -> tauri::Result<()> {
     let caps = crate::CAPABILITIES;
 
     let toggle = MenuItem::with_id(app, "toggle", "Show/Hide LiveCap", true, Some("Alt+Space"))?;
@@ -50,6 +51,17 @@ pub fn create(app: &AppHandle, initial_mode: Mode) -> tauri::Result<()> {
         .collect();
     let mode_menu = Submenu::with_id_and_items(app, "mode", "Mode", true, &mode_refs)?;
 
+    // Pin-on-top toggle, mirrored with the panel's 📌 button. Checked = the
+    // overlay floats over every Space; unchecked = ordinary window.
+    let pinned = CheckMenuItem::with_id(
+        app,
+        "pinned",
+        "Pin on top",
+        true,
+        initial_pinned,
+        None::<&str>,
+    )?;
+
     // Real capability gating: captioning is live (#11); settings enables
     // when #12 flips its flag — no UI rewiring needed.
     let captioning = MenuItem::with_id(
@@ -70,6 +82,7 @@ pub fn create(app: &AppHandle, initial_mode: Mode) -> tauri::Result<()> {
             &toggle,
             &PredefinedMenuItem::separator(app)?,
             &mode_menu,
+            &pinned,
             &PredefinedMenuItem::separator(app)?,
             &captioning,
             &mic,
@@ -102,6 +115,15 @@ pub fn create(app: &AppHandle, initial_mode: Mode) -> tauri::Result<()> {
                     crate::session::toggle_mic(app).await;
                 });
             }
+            "pinned" => {
+                // Toggle pin-on-top; read the desired state from the new check
+                // mark and apply it (the panel button + tray stay in sync via
+                // sync_pinned / the shell://mode event).
+                if let Some(handles) = app.try_state::<TrayHandles>() {
+                    let want = handles.pinned.is_checked().unwrap_or(true);
+                    overlay::set_pinned(app, want);
+                }
+            }
             "settings" => overlay::open_settings(app),
             "quit" => {
                 // Full clean teardown (#66): stop the session (reaping the host
@@ -125,8 +147,17 @@ pub fn create(app: &AppHandle, initial_mode: Mode) -> tauri::Result<()> {
         mode_items,
         captioning,
         mic,
+        pinned,
     });
     Ok(())
+}
+
+/// Mirror the pin-on-top state in the tray check item (driven by the panel
+/// button or a tray click round-tripping through `overlay::set_pinned`).
+pub fn sync_pinned(app: &AppHandle, pinned: bool) {
+    if let Some(handles) = app.try_state::<TrayHandles>() {
+        let _ = handles.pinned.set_checked(pinned);
+    }
 }
 
 /// Mirror the session's mic state (#53): enabled while a session is running,

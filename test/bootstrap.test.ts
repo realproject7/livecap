@@ -4,7 +4,7 @@ import type { AppSettings } from "../src/app-settings";
 import { bootstrap, type BootstrapInvokers, type BootstrapSink } from "../src/bootstrap";
 import type { Capabilities, SessionChannels, SessionPhase, ShellState } from "../src/protocol";
 
-const SHELL: ShellState = { mode: "capsule", clickThrough: false, live: true };
+const SHELL: ShellState = { mode: "capsule", clickThrough: false, pinned: true, live: true };
 const CAPS: Capabilities = { captioning: true, settings: true };
 const CHANNELS: SessionChannels = { system: true, mic: true };
 const SETTINGS = { onboardingComplete: true } as unknown as AppSettings;
