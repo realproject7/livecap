@@ -312,8 +312,18 @@ pub fn run() {
             permissions::open_privacy_settings,
         ])
         .setup(|app| {
+            // Regular: LiveCap shows a Dock icon (and a standard app menu) on
+            // top of its menu-bar tray, so it can be launched/quit like an
+            // ordinary app (⌘Q, Dock right-click). The tray stays regardless.
             #[cfg(target_os = "macos")]
-            app.set_activation_policy(tauri::ActivationPolicy::Accessory);
+            {
+                app.set_activation_policy(tauri::ActivationPolicy::Regular);
+                // A standard app menu so ⌘Q and the Edit shortcuts (⌘C/⌘V/⌘A,
+                // needed by the quick-translate input) work now that the app is
+                // a regular, Dock-visible app. The menu-bar tray is separate.
+                let menu = tauri::menu::Menu::default(app.handle())?;
+                app.set_menu(menu)?;
+            }
 
             let window = app
                 .get_webview_window(overlay::WINDOW_LABEL)
@@ -451,9 +461,16 @@ pub fn run() {
         })
         .build(tauri::generate_context!())
         .expect("error while building tauri application")
-        .run(|app, event| {
-            if let RunEvent::Exit = event {
-                app.state::<Shell>().save_now();
+        .run(|app, event| match event {
+            RunEvent::Exit => app.state::<Shell>().save_now(),
+            // Dock icon clicked (macOS): re-show the overlay if it was hidden.
+            #[cfg(target_os = "macos")]
+            RunEvent::Reopen { .. } => {
+                if let Some(window) = overlay::overlay_window(app) {
+                    let _ = window.show();
+                    let _ = window.set_focus();
+                }
             }
+            _ => {}
         });
 }
