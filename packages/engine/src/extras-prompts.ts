@@ -407,11 +407,7 @@ export function parseCoachResult(text: string): CoachResult {
   for (const raw of text.split("\n")) {
     const line = raw.trim();
     if (line === "") continue;
-    const normalized = line
-      .replace(/^[#*\s]+/, "")
-      .replace(/[:：#*\s]+$/, "")
-      .toUpperCase();
-    const key = COACH_SECTION_BY_HEADER[normalized] ?? null;
+    const key = COACH_SECTION_BY_HEADER[headerNormalize(line)] ?? null;
     if (key) {
       current = key;
       sawHeader = true;
