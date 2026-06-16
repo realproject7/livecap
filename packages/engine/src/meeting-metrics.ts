@@ -155,8 +155,13 @@ export function computeMeetingMetrics(records: readonly FinalizedRecord[]): Meet
   let micLowConfidence = 0;
 
   for (const record of records) {
-    // Negative/NaN durations would corrupt the ratio; treat them as zero.
-    const duration = record.durationMs > 0 ? record.durationMs : 0;
+    // Only a FINITE positive duration counts; negative, NaN, AND non-finite
+    // (Infinity) durations are treated as zero. Without the finiteness gate an
+    // Infinity slips through (`Infinity > 0`), making micMs/totalMs Infinity and
+    // micShare `Infinity/Infinity = NaN` — the exact corruption this guard exists
+    // to prevent and a violation of the [0,1] micShare contract (#88).
+    const duration =
+      Number.isFinite(record.durationMs) && record.durationMs > 0 ? record.durationMs : 0;
     if (record.channel === "mic") {
       micMs += duration;
       micUtterances += 1;

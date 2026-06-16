@@ -54,6 +54,38 @@ describe("computeMeetingMetrics — talk-time ratio", () => {
     expect(talkTime.systemMs).toBe(1000);
     expect(talkTime.micShare).toBeCloseTo(0.5, 10);
   });
+
+  it("treats non-finite durations (Infinity/-Infinity/NaN) as zero — micShare stays in [0,1] (#88)", () => {
+    // Without the finiteness gate, Infinity > 0 passes through and micShare
+    // becomes Infinity/Infinity = NaN. It must read as 0 here.
+    const a = computeMeetingMetrics([
+      mic("a", Number.POSITIVE_INFINITY),
+      system("b", 1000),
+    ]).talkTime;
+    expect(Number.isNaN(a.micShare)).toBe(false);
+    expect(a.micShare).toBe(0);
+    expect(a.micMs).toBe(0);
+    expect(a.systemMs).toBe(1000);
+
+    // Infinity mic with no system speech → no finite speech at all → 0, not NaN.
+    const b = computeMeetingMetrics([mic("a", Number.POSITIVE_INFINITY)]).talkTime;
+    expect(Number.isNaN(b.micShare)).toBe(false);
+    expect(b.micShare).toBe(0);
+    expect(b.totalMs).toBe(0);
+
+    // -Infinity and NaN are likewise dropped; only the finite mic duration counts.
+    const c = computeMeetingMetrics([
+      mic("a", 1000),
+      mic("bad", Number.NEGATIVE_INFINITY),
+      mic("bad", Number.NaN),
+      system("s", Number.POSITIVE_INFINITY),
+    ]).talkTime;
+    expect(c.micMs).toBe(1000);
+    expect(c.systemMs).toBe(0);
+    expect(c.micShare).toBe(1);
+    expect(c.micShare).toBeGreaterThanOrEqual(0);
+    expect(c.micShare).toBeLessThanOrEqual(1);
+  });
 });
 
 describe("computeMeetingMetrics — Smooth Score", () => {
