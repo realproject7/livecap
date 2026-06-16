@@ -41,7 +41,8 @@ export interface TalkTime {
  * assert the formula directly.
  */
 export interface SmoothSignals {
-  /** Total words across mic utterances. */
+  /** Word units across mic utterances — whitespace tokens for space-delimited
+   *  scripts, CJK characters for non-space-delimited content (#86). */
   micWordCount: number;
   /** Filler tokens/phrases in mic text (um, uh, you know, 음, 그러니까, …). */
   fillerCount: number;
@@ -80,6 +81,11 @@ export interface MeetingMetrics {
 // inter-utterance gaps (start offsets), and the array carries only per-utterance
 // `durationMs`, not start times, so gaps are not derivable here. An optional LLM
 // refinement is a later follow-up.
+//
+// LANGUAGE (#86): `micWordCount` (the density denominator) is script-aware so a
+// fluent sentence in a non-space-delimited language (Japanese, Chinese) is not
+// scored as one giant "word" with its density spiking toward 1. EN/KO and any
+// space-delimited script keep their exact whitespace token count — unchanged.
 const DISFLUENCY_WEIGHT = 2.0;
 const LOWCONF_WEIGHT = 0.6;
 
@@ -101,15 +107,27 @@ const FILLER_WORDS = new Set([
   "저기",
 ]);
 
-// Multi-word filler / hedge phrases (lower-cased substring match on mic text).
+// Multi-word filler / hedge phrases, matched as consecutive whitespace tokens
+// (word-boundary-aware — see `countPhrase`).
 const FILLER_PHRASES = ["you know", "sort of", "kind of", "그러니까", "뭐랄까"];
 
 // Repair phrases (a spoken self-correction lead-in).
 const REPAIR_PHRASES = ["i mean"];
 
 // Restart markers: an em-dash (—) or a double hyphen (--) used mid-utterance to
-// abandon and restart a phrase ("take out—take our …").
+// abandon and restart a phrase ("take out—take our …"). Counted only for
+// space-delimited scripts — in CJK the em-dash is ordinary punctuation, not a
+// restart (#86), so it is skipped for records containing CJK characters.
 const RESTART_MARKER = /—|--/g;
+
+// Unicode ranges for scripts written WITHOUT inter-word spaces: Hiragana +
+// Katakana (U+3040-U+30FF), CJK Ext-A (U+3400-U+4DBF), CJK Unified
+// (U+4E00-U+9FFF), CJK Compatibility Ideographs (U+F900-U+FAFF), and halfwidth
+// Katakana (U+FF66-U+FF9F). Hangul (U+AC00-U+D7A3) is deliberately EXCLUDED —
+// Korean delimits words (eojeol) with spaces, so its whitespace tokenization is
+// correct and stays on the unchanged path.
+const CJK_CHAR = /[\u3040-\u30ff\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff\uff66-\uff9f]/u;
+const CJK_CHAR_GLOBAL = new RegExp(CJK_CHAR.source, "gu");
 
 function clamp01(x: number): number {
   if (x < 0) return 0;
@@ -126,18 +144,58 @@ function tokenize(text: string): string[] {
     .filter((w) => w !== "");
 }
 
-function countOccurrences(haystack: string, needle: string): number {
-  if (needle === "") return 0;
+/** A token that is a pure CJK run (no Latin letter, digit, or Hangul) — the kind
+ *  whitespace tokenization wrongly collapses into a single "word". Token is
+ *  already lower-cased by {@link tokenize}. */
+function isCjkOnly(token: string): boolean {
+  return CJK_CHAR.test(token) && !/[a-z0-9\uac00-\ud7a3]/u.test(token);
+}
+
+/**
+ * Word-unit count for the disfluency-density denominator. Space-delimited scripts
+ * (English, Korean, …) keep their EXACT whitespace token count — unchanged. For
+ * non-space-delimited CJK content — where a whole fluent sentence collapses to a
+ * single whitespace token and would spike density toward 1 — each CJK character
+ * counts as one unit (a deliberately lenient over-count: it can only LOWER
+ * density, never spuriously collapse a fluent score). Mixed text sums the
+ * non-CJK whitespace words and the CJK characters.
+ *
+ * (Intl.Segmenter word granularity was considered for exact CJK words, but its
+ * counts vary with the runtime's bundled ICU and its types need a tsconfig lib
+ * change; codepoint counting is deterministic, dependency-free, and leaves the
+ * EN/KO path byte-identical.)
+ */
+function wordUnits(tokens: string[], cjkChars: number): number {
+  if (cjkChars === 0) return tokens.length; // EN/KO and any space-delimited script
+  return tokens.filter((t) => !isCjkOnly(t)).length + cjkChars;
+}
+
+/** Count non-overlapping runs of `phrase` (a token sequence) inside `tokens`.
+ *  Word-boundary-aware by construction — tokens are whitespace-delimited,
+ *  punctuation-stripped words — so "you know" never matches inside "you know-how"
+ *  the way a raw substring search would (#86 secondary). */
+function countPhrase(tokens: string[], phrase: string[]): number {
+  if (phrase.length === 0) return 0;
   let count = 0;
-  let from = 0;
-  for (;;) {
-    const at = haystack.indexOf(needle, from);
-    if (at === -1) break;
-    count += 1;
-    from = at + needle.length;
+  for (let i = 0; i + phrase.length <= tokens.length; i++) {
+    let hit = true;
+    for (let j = 0; j < phrase.length; j++) {
+      if (tokens[i + j] !== phrase[j]) {
+        hit = false;
+        break;
+      }
+    }
+    if (hit) {
+      count += 1;
+      i += phrase.length - 1;
+    }
   }
   return count;
 }
+
+// Phrases pre-tokenized once, so matching is consecutive-token comparison.
+const FILLER_PHRASE_TOKENS = FILLER_PHRASES.map((p) => tokenize(p));
+const REPAIR_PHRASE_TOKENS = REPAIR_PHRASES.map((p) => tokenize(p));
 
 /**
  * Compute talk-time ratio + Smooth Score from finalized records. Pure and
@@ -167,13 +225,15 @@ export function computeMeetingMetrics(records: readonly FinalizedRecord[]): Meet
       micUtterances += 1;
       if (record.lowConfidence) micLowConfidence += 1;
 
-      const lower = record.text.toLowerCase();
       const tokens = tokenize(record.text);
-      micWordCount += tokens.length;
+      const cjkChars = (record.text.match(CJK_CHAR_GLOBAL) ?? []).length;
+      micWordCount += wordUnits(tokens, cjkChars);
       for (const token of tokens) if (FILLER_WORDS.has(token)) fillerCount += 1;
-      for (const phrase of FILLER_PHRASES) fillerCount += countOccurrences(lower, phrase);
-      for (const phrase of REPAIR_PHRASES) repairCount += countOccurrences(lower, phrase);
-      repairCount += (record.text.match(RESTART_MARKER) ?? []).length;
+      for (const phrase of FILLER_PHRASE_TOKENS) fillerCount += countPhrase(tokens, phrase);
+      for (const phrase of REPAIR_PHRASE_TOKENS) repairCount += countPhrase(tokens, phrase);
+      // Em-dash restart is a disfluency only in space-delimited scripts; in CJK
+      // the em-dash (—) is ordinary punctuation, so skip it there (#86).
+      if (cjkChars === 0) repairCount += (record.text.match(RESTART_MARKER) ?? []).length;
       // Immediate word repetition ("I I would", "take take") — a restart not
       // glued by an em-dash. Alphabetic tokens only, so a repeated filler is
       // already counted above, not double-counted as a content repair.
