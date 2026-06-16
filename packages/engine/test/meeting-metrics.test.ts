@@ -54,6 +54,38 @@ describe("computeMeetingMetrics — talk-time ratio", () => {
     expect(talkTime.systemMs).toBe(1000);
     expect(talkTime.micShare).toBeCloseTo(0.5, 10);
   });
+
+  it("treats non-finite durations (Infinity/-Infinity/NaN) as zero — micShare stays in [0,1] (#88)", () => {
+    // Without the finiteness gate, Infinity > 0 passes through and micShare
+    // becomes Infinity/Infinity = NaN. It must read as 0 here.
+    const a = computeMeetingMetrics([
+      mic("a", Number.POSITIVE_INFINITY),
+      system("b", 1000),
+    ]).talkTime;
+    expect(Number.isNaN(a.micShare)).toBe(false);
+    expect(a.micShare).toBe(0);
+    expect(a.micMs).toBe(0);
+    expect(a.systemMs).toBe(1000);
+
+    // Infinity mic with no system speech → no finite speech at all → 0, not NaN.
+    const b = computeMeetingMetrics([mic("a", Number.POSITIVE_INFINITY)]).talkTime;
+    expect(Number.isNaN(b.micShare)).toBe(false);
+    expect(b.micShare).toBe(0);
+    expect(b.totalMs).toBe(0);
+
+    // -Infinity and NaN are likewise dropped; only the finite mic duration counts.
+    const c = computeMeetingMetrics([
+      mic("a", 1000),
+      mic("bad", Number.NEGATIVE_INFINITY),
+      mic("bad", Number.NaN),
+      system("s", Number.POSITIVE_INFINITY),
+    ]).talkTime;
+    expect(c.micMs).toBe(1000);
+    expect(c.systemMs).toBe(0);
+    expect(c.micShare).toBe(1);
+    expect(c.micShare).toBeGreaterThanOrEqual(0);
+    expect(c.micShare).toBeLessThanOrEqual(1);
+  });
 });
 
 describe("computeMeetingMetrics — Smooth Score", () => {
@@ -150,5 +182,62 @@ describe("computeMeetingMetrics — Smooth Score", () => {
     ]).smoothScore;
     expect(withNoisySystem).toBe(micOnly);
     expect(withNoisySystem).toBe(100);
+  });
+});
+
+describe("computeMeetingMetrics — non-space-delimited languages (#86)", () => {
+  it("does NOT collapse the score for fluent Japanese (no spaces between words)", () => {
+    const { smoothScore, signals } = computeMeetingMetrics([
+      mic("今日はとても良い天気ですね、では会議を始めましょう"),
+    ]);
+    // Before #86 the whole sentence tokenized to ~1 word, spiking density.
+    expect(signals.micWordCount).toBeGreaterThan(1);
+    expect(signals.fillerCount).toBe(0);
+    expect(signals.repairCount).toBe(0);
+    expect(smoothScore).toBe(100);
+  });
+
+  it("does NOT collapse the score for fluent Chinese", () => {
+    const { smoothScore, signals } = computeMeetingMetrics([
+      mic("我们今天讨论一下产品路线图和下个季度的目标"),
+    ]);
+    expect(signals.micWordCount).toBeGreaterThan(1);
+    expect(smoothScore).toBe(100);
+  });
+
+  it("does NOT count an em-dash as a repair in CJK text (it is ordinary punctuation there)", () => {
+    const { smoothScore, signals } = computeMeetingMetrics([
+      mic("そうですね——とても良い提案だと思います"),
+    ]);
+    expect(signals.repairCount).toBe(0);
+    expect(smoothScore).toBe(100);
+  });
+
+  it("still counts an em-dash restart for Korean (space-delimited, unchanged)", () => {
+    const { signals } = computeMeetingMetrics([mic("음 그러니까—그게 말이죠")]);
+    // KO has no CJK chars, so it stays on the space-delimited path: em-dash counts.
+    expect(signals.repairCount).toBe(1);
+  });
+
+  it("handles mixed CJK + Latin without collapsing", () => {
+    const { smoothScore } = computeMeetingMetrics([mic("I think 今日は良い提案です")]);
+    expect(smoothScore).toBe(100);
+  });
+});
+
+describe("computeMeetingMetrics — word-boundary-aware phrase matching (#86)", () => {
+  it("does not count 'you know' inside 'know-how' (no false positive)", () => {
+    const { signals } = computeMeetingMetrics([mic("do you know-how this works")]);
+    expect(signals.fillerCount).toBe(0);
+  });
+
+  it("still counts a genuine 'you know' as a filler phrase", () => {
+    const { signals } = computeMeetingMetrics([mic("you know it works")]);
+    expect(signals.fillerCount).toBe(1);
+  });
+
+  it("does not count 'i mean' inside 'hi meant' (word-boundary aware)", () => {
+    const { signals } = computeMeetingMetrics([mic("hi meant to ask")]);
+    expect(signals.repairCount).toBe(0);
   });
 });
