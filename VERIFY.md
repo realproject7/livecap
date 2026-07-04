@@ -48,7 +48,7 @@ Sign each debug bundle with the stable self-signed "LiveCap Dev" identity
 instead of ad-hoc:
 
 ```sh
-scripts/dev-sign.sh   # default: src-tauri/target/debug/bundle/macos/LiveCap.app
+scripts/dev-sign.sh   # default: target/debug/bundle/macos/LiveCap.app
 ```
 
 First run creates the identity in the login keychain (openssl self-signed
@@ -62,7 +62,7 @@ prompts on subsequent `dev-sign.sh` + `open` iterations. Always launch via
 `open` (direct-binary launch attributes TCC to the terminal).
 
 Per-rebuild loop: `pnpm tauri build --debug` → `scripts/dev-sign.sh` →
-`open src-tauri/target/debug/bundle/macos/LiveCap.app`.
+`open target/debug/bundle/macos/LiveCap.app`.
 
 ---
 

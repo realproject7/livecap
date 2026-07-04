@@ -8,7 +8,7 @@
 #
 # Usage:
 #   scripts/dev-sign.sh [path/to/LiveCap.app]
-#   (default: src-tauri/target/debug/bundle/macos/LiveCap.app)
+#   (default: target/debug/bundle/macos/LiveCap.app)
 #
 # What it does:
 #   1. If no "LiveCap Dev" codesigning identity exists in the login keychain,
@@ -22,7 +22,7 @@
 set -euo pipefail
 
 IDENTITY="LiveCap Dev"
-APP="${1:-src-tauri/target/debug/bundle/macos/LiveCap.app}"
+APP="${1:-target/debug/bundle/macos/LiveCap.app}"
 LOGIN_KEYCHAIN="$HOME/Library/Keychains/login.keychain-db"
 
 if [ ! -d "$APP" ]; then
