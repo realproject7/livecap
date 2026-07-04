@@ -330,18 +330,36 @@ impl WhisperEngine {
     }
 }
 
-/// The confidence floor an utterance must clear to be emitted (#92/#93/#109).
+/// The effective confidence floors for `model_name` (#92/#93/#109): the
+/// per-family table values, each overridable by its env knob
+/// (`LIVECAP_[AUTO_DETECT_]CONFIDENCE_FLOOR`, clamped `0.0..=1.0`), with the #93
+/// invariant `auto_detect >= forced` re-established AFTER overrides.
 ///
-/// Resolution order: env override (`LIVECAP_[AUTO_DETECT_]CONFIDENCE_FLOOR`,
-/// clamped `0.0..=1.0`) → the per-model-family table value. Auto-detected
-/// language gets the stricter auto-detect floor; a forced source language gets
-/// the plain floor.
+/// The two env knobs are independent, so an operator can raise the FORCED floor
+/// above the (table or env) auto floor. That would make auto-detected language
+/// LESS strict than a forced one — the opposite of #93's intent — so the
+/// resolved auto floor is lifted to at least the resolved forced floor rather
+/// than trusted as-is.
+fn resolved_floors(model_name: &str) -> ConfidenceFloors {
+    let table = family_floors(model_family(model_name));
+    let forced = env_floor_override(CONFIDENCE_FLOOR_ENV).unwrap_or(table.forced);
+    let auto_detect = env_floor_override(AUTO_DETECT_CONFIDENCE_FLOOR_ENV).unwrap_or(table.auto_detect);
+    ConfidenceFloors {
+        forced,
+        auto_detect: auto_detect.max(forced),
+    }
+}
+
+/// The confidence floor an utterance must clear to be emitted (#92/#93/#109).
+/// Auto-detected language gets the stricter auto-detect floor; a forced source
+/// language gets the plain floor. See [`resolved_floors`] for env resolution
+/// and the `auto_detect >= forced` guarantee.
 fn confidence_floor(model_name: &str, auto_detect: bool) -> f32 {
-    let floors = family_floors(model_family(model_name));
+    let floors = resolved_floors(model_name);
     if auto_detect {
-        env_floor_override(AUTO_DETECT_CONFIDENCE_FLOOR_ENV).unwrap_or(floors.auto_detect)
+        floors.auto_detect
     } else {
-        env_floor_override(CONFIDENCE_FLOOR_ENV).unwrap_or(floors.forced)
+        floors.forced
     }
 }
 
@@ -730,6 +748,50 @@ mod tests {
         assert_eq!(confidence_floor(TEST_MODEL, true), SEED_FLOORS.auto_detect);
 
         // Restore the ambient environment for any other consumer.
+        match prev_forced {
+            Some(v) => std::env::set_var(CONFIDENCE_FLOOR_ENV, v),
+            None => std::env::remove_var(CONFIDENCE_FLOOR_ENV),
+        }
+        match prev_auto {
+            Some(v) => std::env::set_var(AUTO_DETECT_CONFIDENCE_FLOOR_ENV, v),
+            None => std::env::remove_var(AUTO_DETECT_CONFIDENCE_FLOOR_ENV),
+        }
+    }
+
+    #[test]
+    fn env_override_preserves_auto_ge_forced_invariant() {
+        let _guard = env_lock();
+        // The two env knobs are independent (#109/#93): a forced override above
+        // the auto floor must NOT make auto-detect less strict than forced. The
+        // resolved auto floor is lifted to at least the resolved forced floor.
+        let prev_forced = std::env::var(CONFIDENCE_FLOOR_ENV).ok();
+        let prev_auto = std::env::var(AUTO_DETECT_CONFIDENCE_FLOOR_ENV).ok();
+
+        // Forced override above the (unset → table 0.6) auto floor: auto is
+        // lifted to the forced value, and the forced floor itself is unchanged.
+        std::env::set_var(CONFIDENCE_FLOOR_ENV, "0.9");
+        std::env::remove_var(AUTO_DETECT_CONFIDENCE_FLOOR_ENV);
+        assert_eq!(confidence_floor(TEST_MODEL, false), 0.9);
+        assert_eq!(confidence_floor(TEST_MODEL, true), 0.9);
+        assert!(confidence_floor(TEST_MODEL, true) >= confidence_floor(TEST_MODEL, false));
+
+        // Forced override above an explicit LOWER auto override: auto is still
+        // lifted to the forced value (the override can't invert the invariant).
+        std::env::set_var(CONFIDENCE_FLOOR_ENV, "0.8");
+        std::env::set_var(AUTO_DETECT_CONFIDENCE_FLOOR_ENV, "0.3");
+        assert_eq!(confidence_floor(TEST_MODEL, false), 0.8);
+        assert_eq!(confidence_floor(TEST_MODEL, true), 0.8);
+
+        // A higher auto override is honored as-is (invariant already holds).
+        std::env::set_var(CONFIDENCE_FLOOR_ENV, "0.4");
+        std::env::set_var(AUTO_DETECT_CONFIDENCE_FLOOR_ENV, "0.7");
+        assert_eq!(confidence_floor(TEST_MODEL, false), 0.4);
+        assert_eq!(confidence_floor(TEST_MODEL, true), 0.7);
+
+        // Resolved floors always satisfy the invariant.
+        let floors = resolved_floors(TEST_MODEL);
+        assert!(floors.auto_detect >= floors.forced);
+
         match prev_forced {
             Some(v) => std::env::set_var(CONFIDENCE_FLOOR_ENV, v),
             None => std::env::remove_var(CONFIDENCE_FLOOR_ENV),
