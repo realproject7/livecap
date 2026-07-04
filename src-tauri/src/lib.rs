@@ -4,6 +4,7 @@
 mod bridge;
 mod config;
 mod dashboard;
+mod dev_flags;
 mod glyph;
 mod modes;
 mod overlay;
@@ -363,13 +364,16 @@ pub fn run() {
 
             // Screen-capture exclusion (EPIC launch gate) + Spaces/fullscreen
             // behavior + window level. Setup runs on the main thread.
-            // LIVECAP_CAPTURE_VISIBLE=1 disables BOTH exclusion mechanisms
-            // (Tauri content-protection here + NSWindow sharingType in
-            // platform::configure_overlay) — DEV/VERIFICATION ONLY (#54).
-            if std::env::var("LIVECAP_CAPTURE_VISIBLE").as_deref() != Ok("1") {
+            // LIVECAP_CAPTURE_VISIBLE=1 — or, in debug builds only,
+            // "captureVisible" in <appData>/dev-flags.json (#108) — disables
+            // BOTH exclusion mechanisms (Tauri content-protection here +
+            // NSWindow sharingType in platform::configure_overlay) —
+            // DEV/VERIFICATION ONLY (#54).
+            let capture_visible = dev_flags::capture_visible(app.handle());
+            if !capture_visible {
                 window.set_content_protected(true)?;
             }
-            platform::configure_overlay(&window, initial_pinned);
+            platform::configure_overlay(&window, initial_pinned, capture_visible);
             // Keep Tauri's own always-on-top flag in sync with the restored pin
             // state (the conf default is true; flip it off if unpinned).
             if !initial_pinned {
@@ -413,9 +417,11 @@ pub fn run() {
             }
 
             // Headless E2E support (also used by #13): start a captioning
-            // session at launch when LIVECAP_AUTOSTART=1 — same code path as
-            // the tray/chrome start, just triggered without UI.
-            if std::env::var("LIVECAP_AUTOSTART").as_deref() == Ok("1") {
+            // session at launch when LIVECAP_AUTOSTART=1 — or, in debug
+            // builds only, "autostart" in <appData>/dev-flags.json (#108) —
+            // same code path as the tray/chrome start, just triggered
+            // without UI.
+            if dev_flags::autostart(app.handle()) {
                 let handle = app.handle().clone();
                 tauri::async_runtime::spawn(async move {
                     if let Err(e) = session::start(handle).await {

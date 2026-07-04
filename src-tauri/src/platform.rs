@@ -88,15 +88,17 @@ mod imp {
             .unwrap_or(false)
     }
 
-    pub fn configure_overlay(window: &WebviewWindow, pinned: bool) {
+    pub fn configure_overlay(window: &WebviewWindow, pinned: bool, capture_visible: bool) {
         set_pinned(window, pinned);
         if let Some(ns) = ns_window(window) {
-            // LIVECAP_CAPTURE_VISIBLE=1 keeps the overlay visible to screen
-            // capture — DEV/VERIFICATION ONLY (the operator's screenshot-based
-            // checks can't see an excluded window, #54). Production default is
-            // exclusion; the privacy row in Settings reads the real state.
-            if std::env::var("LIVECAP_CAPTURE_VISIBLE").as_deref() == Ok("1") {
-                eprintln!("WARNING: capture exclusion DISABLED via LIVECAP_CAPTURE_VISIBLE=1");
+            // `capture_visible` (resolved in lib.rs from LIVECAP_CAPTURE_VISIBLE,
+            // or dev-flags.json in debug builds, #108) keeps the overlay visible
+            // to screen capture — DEV/VERIFICATION ONLY (the operator's
+            // screenshot-based checks can't see an excluded window, #54).
+            // Production default is exclusion; the privacy row in Settings
+            // reads the real state.
+            if capture_visible {
+                eprintln!("WARNING: capture exclusion DISABLED (dev capture-visible flag)");
             } else {
                 ns.setSharingType(NSWindowSharingType::None);
             }
@@ -191,7 +193,7 @@ mod imp {
 mod imp {
     use tauri::WebviewWindow;
 
-    pub fn configure_overlay(_window: &WebviewWindow, _pinned: bool) {}
+    pub fn configure_overlay(_window: &WebviewWindow, _pinned: bool, _capture_visible: bool) {}
 
     pub fn set_pinned(_window: &WebviewWindow, _pinned: bool) {}
 
@@ -214,9 +216,12 @@ mod imp {
 
 /// One-time overlay window setup: applies the initial pin state (window level
 /// plus Spaces/fullscreen collection behavior) and sharingType = none (capture
-/// exclusion). `pinned` comes from the persisted shell state.
-pub fn configure_overlay(window: &WebviewWindow, pinned: bool) {
-    imp::configure_overlay(window, pinned);
+/// exclusion). `pinned` comes from the persisted shell state;
+/// `capture_visible` is the resolved dev capture-visible flag (env var, or
+/// dev-flags.json in debug builds — see `dev_flags`) which skips the
+/// exclusion for screenshot-based verification.
+pub fn configure_overlay(window: &WebviewWindow, pinned: bool, capture_visible: bool) {
+    imp::configure_overlay(window, pinned, capture_visible);
 }
 
 /// Flip the overlay's pin state at runtime: status vs. normal window level and

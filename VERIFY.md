@@ -10,6 +10,62 @@ glass Panel; the LiveCap glyph appears in the menu bar; no Dock icon).
 
 ---
 
+# 0. Dev-verify loop (#108): dev-flags.json + dev-sign.sh
+
+The old loop (inject `LSEnvironment` into Info.plist with PlistBuddy →
+`codesign --force --deep --sign -` → `lsregister -f`) is retired: ad-hoc
+re-signing changed the cdhash every build, which reset ALL TCC grants and
+cost one operator SecurityAgent click per iteration. The new loop:
+
+## Dev flags — no plist edit, no re-sign
+
+Debug builds (`#[cfg(debug_assertions)]` — `pnpm tauri dev` or
+`pnpm tauri build --debug`) also read
+`~/Library/Application Support/app.livecap.desktop/dev-flags.json`:
+
+```json
+{ "captureVisible": true, "autostart": true }
+```
+
+- `captureVisible` — overlay stays visible to screen capture (both the Tauri
+  content-protection layer and the NSWindow sharingType exclusion are
+  skipped), so screenshot-based checks can see it.
+- `autostart` — a captioning session starts at launch, no UI click.
+- Both fields optional; missing or malformed file = all flags off.
+- The env vars still win when set: `LIVECAP_CAPTURE_VISIBLE` /
+  `LIVECAP_AUTOSTART` override the file (`1` = on, anything else = off);
+  only an UNSET env var falls through to the file.
+- Release builds compile the file-reading code out entirely
+  (`src-tauri/src/dev_flags.rs`) — the file is ignored there by
+  construction.
+
+Write the file once, then plain `open .../LiveCap.app` picks the flags up on
+every launch. Delete the file (or the field) to restore production behavior.
+
+## Stable signing — TCC grants persist across rebuilds
+
+Sign each debug bundle with the stable self-signed "LiveCap Dev" identity
+instead of ad-hoc:
+
+```sh
+scripts/dev-sign.sh   # default: target/debug/bundle/macos/LiveCap.app
+```
+
+First run creates the identity in the login keychain (openssl self-signed
+cert with the codeSigning EKU + `security import` + `security
+add-trusted-cert`; expect ONE GUI password prompt for the trust step and one
+"Always Allow" on first key use — both one-time; the script prints manual
+Keychain Access steps if automated creation fails). Every run signs the
+bundle and refreshes LaunchServices. Because the identity is stable, mic +
+system-audio TCC grants survive rebuilds: grant once, then zero permission
+prompts on subsequent `dev-sign.sh` + `open` iterations. Always launch via
+`open` (direct-binary launch attributes TCC to the terminal).
+
+Per-rebuild loop: `pnpm tauri build --debug` → `scripts/dev-sign.sh` →
+`open target/debug/bundle/macos/LiveCap.app`.
+
+---
+
 # Session dashboard (#90, this round)
 
 A dashboard browses past sessions saved in `~/Documents/LiveCap` (or the
