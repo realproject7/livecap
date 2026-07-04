@@ -17,35 +17,112 @@ use super::acceleration::whisper_context_acceleration;
 /// with trailing silence (Meetily logged a warning and let it fail instead).
 const MIN_SAMPLES: usize = 16000 + 1600; // 1.1 s at 16 kHz
 
-/// Confidence floor below which a transcribed utterance is dropped (#92).
+/// The pair of confidence floors an utterance must clear to be emitted
+/// (#92/#93). Both on the real per-token-probability scale (`0.0..=1.0`, see
+/// [`WhisperEngine::transcribe`]).
 ///
 /// whisper.cpp hallucinates plausible-looking captions on silence / ambient
 /// noise (the VAD lets a faint segment through and the decoder fills it with a
-/// phantom sentence). `avg_confidence` was computed but never used to gate;
-/// this floor drops those low-confidence utterances before they pollute the
-/// feed, summary, and coaching list.
-///
-/// EMPIRICALLY TUNED — adjust live against real captures (the operator owns the
-/// Metal/whisper-run + real-audio loop). Scale: `avg_confidence` (see
-/// `transcribe`) is now the mean of whisper's REAL per-token probabilities
-/// (`full_get_token_prob`), in `0.0..=1.0` — NOT the old text-length proxy.
-/// Real speech averages ~0.85+; silence/noise hallucinations score lower.
-/// 0.5 keeps confident speech (including short real phrases) and drops weak
-/// phantoms; raise toward 0.6 if phantoms still leak, lower if real speech is cut.
-const CONFIDENCE_FLOOR: f32 = 0.5;
+/// phantom sentence). These floors drop those low-confidence utterances before
+/// they pollute the feed, summary, and coaching list. Real speech averages
+/// ~0.85+; silence/noise hallucinations score lower.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct ConfidenceFloors {
+    /// Floor for a FORCED source language (#92). 0.5 keeps confident speech
+    /// (including short real phrases) and drops weak phantoms.
+    forced: f32,
+    /// Stricter floor required to TRUST an AUTO-detected language (#93).
+    ///
+    /// In Auto mode whisper picks the language per utterance and is unreliable
+    /// on noise / short audio — it has emitted CJK for English-only audio. An
+    /// auto-detected utterance whose confidence sits in `[forced, auto_detect)`
+    /// is dropped rather than emitted with a possibly-wrong language label
+    /// (which would mis-route the channel and translate the wrong direction).
+    /// Always `>= forced`.
+    auto_detect: f32,
+}
 
-/// Extra confidence margin required to TRUST an auto-detected language (#93).
+/// Historical seed floors (#92/#93): every model family starts here.
 ///
-/// In Auto mode (`language` = `None`/`"auto"`) whisper picks the language per
-/// utterance and is unreliable on noise / short audio — it has emitted CJK for
-/// English-only audio. When the user forces a source language this never runs;
-/// it only guards Auto mode. An auto-detected utterance whose confidence sits
-/// in `[CONFIDENCE_FLOOR, AUTO_DETECT_CONFIDENCE_FLOOR)` is dropped rather than
-/// emitted with a possibly-wrong language label (which would mis-route the
-/// channel and translate in the wrong direction). On the real-token-probability
-/// scale (see `CONFIDENCE_FLOOR`), kept just above the plain floor so only
-/// borderline auto detections are dropped while confident speech survives.
-const AUTO_DETECT_CONFIDENCE_FLOOR: f32 = 0.6;
+/// EMPIRICALLY TUNED against `tiny` — but production defaults to `small` and
+/// token-probability distributions differ per model family, so [`ModelFamily`]
+/// exists to let the calibration ticket (#111) set real per-family values
+/// against live captures. Until then all families share this seed, so behavior
+/// is unchanged from the previous two hardcoded consts.
+const SEED_FLOORS: ConfidenceFloors = ConfidenceFloors {
+    forced: 0.5,
+    auto_detect: 0.6,
+};
+
+/// Whisper model families the confidence floors are calibrated against (#109).
+/// Quantized variants (e.g. `small-q5_1`) share their family's floors, and the
+/// `large-v3-turbo` distillation shares the `large-v3` floors.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ModelFamily {
+    Tiny,
+    Base,
+    Small,
+    Medium,
+    LargeV3,
+}
+
+/// Map a model name (from [`crate::model::MODEL_NAMES`], possibly quantized) to
+/// its [`ModelFamily`]. The quantization suffix (`-q5_1`, `-q5_0`, …) is not a
+/// family, so it is stripped first. Unknown/future names fall back to the
+/// `small` family — the production default (all families are seeded
+/// identically today, so the fallback is behavior-preserving).
+fn model_family(model_name: &str) -> ModelFamily {
+    // Everything before the first "-q" is the size/architecture; the rest is
+    // the quantization tag (none of the family stems contain "-q").
+    let stem = model_name.split("-q").next().unwrap_or(model_name);
+    match stem {
+        "tiny" => ModelFamily::Tiny,
+        "base" => ModelFamily::Base,
+        "small" => ModelFamily::Small,
+        "medium" => ModelFamily::Medium,
+        // large-v3 and its turbo distillation share the large-v3 floors.
+        _ if stem.starts_with("large-v3") => ModelFamily::LargeV3,
+        _ => ModelFamily::Small,
+    }
+}
+
+/// The per-family confidence-floor table (#109). Seeded uniformly with
+/// [`SEED_FLOORS`]; the calibration ticket (#111) replaces these arms
+/// per-family with real-audio evidence. Every arm keeps `auto_detect >= forced`.
+fn family_floors(family: ModelFamily) -> ConfidenceFloors {
+    match family {
+        ModelFamily::Tiny => SEED_FLOORS,
+        ModelFamily::Base => SEED_FLOORS,
+        ModelFamily::Small => SEED_FLOORS,
+        ModelFamily::Medium => SEED_FLOORS,
+        ModelFamily::LargeV3 => SEED_FLOORS,
+    }
+}
+
+/// Env var overriding the FORCED-language confidence floor (#109) — a
+/// recompile-free live-tuning knob for the calibration loop. Parsed as `f32`
+/// and clamped to `0.0..=1.0`; unset / empty / invalid falls back to the table.
+const CONFIDENCE_FLOOR_ENV: &str = "LIVECAP_CONFIDENCE_FLOOR";
+
+/// Env var overriding the AUTO-detect confidence floor (#109). Same parsing and
+/// clamping rules as [`CONFIDENCE_FLOOR_ENV`].
+const AUTO_DETECT_CONFIDENCE_FLOOR_ENV: &str = "LIVECAP_AUTO_DETECT_CONFIDENCE_FLOOR";
+
+/// Read an `f32` floor override from environment variable `var`, clamped to
+/// `0.0..=1.0`. Returns `None` when the var is unset, empty, unparseable, or
+/// non-finite — the caller then uses the per-family table value. Not caption
+/// content, so this is a tuning knob in all builds, not a security surface.
+fn env_floor_override(var: &str) -> Option<f32> {
+    parse_floor_override(&std::env::var(var).ok()?)
+}
+
+/// Parse and clamp a raw floor-override string to `0.0..=1.0`. Returns `None`
+/// for empty, unparseable, or non-finite (`inf`/`nan`) input so the caller
+/// falls back to the table value. Pure (no environment access).
+fn parse_floor_override(raw: &str) -> Option<f32> {
+    let value: f32 = raw.trim().parse().ok()?;
+    value.is_finite().then(|| value.clamp(0.0, 1.0))
+}
 
 /// A transcribed utterance.
 #[derive(Debug, Clone)]
@@ -230,12 +307,12 @@ impl WhisperEngine {
         // this is additive to VAD, not a replacement. No caption content in
         // logs (SECURITY.md / EPIC #1) — length + score only.
         let auto_detect = matches!(language, Some("auto") | None);
-        if is_low_confidence_drop(&cleaned_result, avg_confidence, auto_detect) {
+        if is_low_confidence_drop(&self.model_name, &cleaned_result, avg_confidence, auto_detect) {
             log::debug!(
                 "Dropping low-confidence utterance ({} chars, conf {:.2} < {:.2}, auto={})",
                 cleaned_result.chars().count(),
                 avg_confidence,
-                confidence_floor(auto_detect),
+                confidence_floor(&self.model_name, auto_detect),
                 auto_detect
             );
             return Ok(Utterance {
@@ -253,22 +330,49 @@ impl WhisperEngine {
     }
 }
 
-/// The confidence floor an utterance must clear to be emitted (#92/#93).
-/// Auto-detected language gets the stricter [`AUTO_DETECT_CONFIDENCE_FLOOR`];
-/// a forced source language gets the plain [`CONFIDENCE_FLOOR`].
-fn confidence_floor(auto_detect: bool) -> f32 {
+/// The effective confidence floors for `model_name` (#92/#93/#109): the
+/// per-family table values, each overridable by its env knob
+/// (`LIVECAP_[AUTO_DETECT_]CONFIDENCE_FLOOR`, clamped `0.0..=1.0`), with the #93
+/// invariant `auto_detect >= forced` re-established AFTER overrides.
+///
+/// The two env knobs are independent, so an operator can raise the FORCED floor
+/// above the (table or env) auto floor. That would make auto-detected language
+/// LESS strict than a forced one — the opposite of #93's intent — so the
+/// resolved auto floor is lifted to at least the resolved forced floor rather
+/// than trusted as-is.
+fn resolved_floors(model_name: &str) -> ConfidenceFloors {
+    let table = family_floors(model_family(model_name));
+    let forced = env_floor_override(CONFIDENCE_FLOOR_ENV).unwrap_or(table.forced);
+    let auto_detect = env_floor_override(AUTO_DETECT_CONFIDENCE_FLOOR_ENV).unwrap_or(table.auto_detect);
+    ConfidenceFloors {
+        forced,
+        auto_detect: auto_detect.max(forced),
+    }
+}
+
+/// The confidence floor an utterance must clear to be emitted (#92/#93/#109).
+/// Auto-detected language gets the stricter auto-detect floor; a forced source
+/// language gets the plain floor. See [`resolved_floors`] for env resolution
+/// and the `auto_detect >= forced` guarantee.
+fn confidence_floor(model_name: &str, auto_detect: bool) -> f32 {
+    let floors = resolved_floors(model_name);
     if auto_detect {
-        AUTO_DETECT_CONFIDENCE_FLOOR
+        floors.auto_detect
     } else {
-        CONFIDENCE_FLOOR
+        floors.forced
     }
 }
 
 /// Whether an utterance should be dropped as a low-confidence hallucination
 /// (#92). Empty text is never "dropped" here (it carried nothing to begin
 /// with); non-empty text below the floor is.
-fn is_low_confidence_drop(text: &str, avg_confidence: f32, auto_detect: bool) -> bool {
-    !text.is_empty() && avg_confidence < confidence_floor(auto_detect)
+fn is_low_confidence_drop(
+    model_name: &str,
+    text: &str,
+    avg_confidence: f32,
+    auto_detect: bool,
+) -> bool {
+    !text.is_empty() && avg_confidence < confidence_floor(model_name, auto_detect)
 }
 
 // ---------------------------------------------------------------------------
@@ -440,59 +544,261 @@ mod tests {
         assert_eq!(clean_repetitive_text(s), s);
     }
 
-    // ---- confidence-floor gate (#92/#93) ----
+    // ---- confidence-floor gate (#92/#93/#109) ----
+
+    // Reference model for the floor tests: the production default (#109). All
+    // families are seeded identically, so any name yields the seed floors.
+    const TEST_MODEL: &str = "small";
+
+    // The floor env vars are process-global, so serialize every test that reads
+    // or writes them; parallel execution must never observe a half-set override.
+    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    fn env_lock() -> std::sync::MutexGuard<'static, ()> {
+        ENV_LOCK.lock().unwrap_or_else(|poison| poison.into_inner())
+    }
 
     #[test]
     fn confidence_floor_is_stricter_in_auto_mode() {
+        let _guard = env_lock();
         // #93: auto-detected language demands a higher margin than a forced one.
-        assert_eq!(confidence_floor(false), CONFIDENCE_FLOOR);
-        assert_eq!(confidence_floor(true), AUTO_DETECT_CONFIDENCE_FLOOR);
-        const { assert!(AUTO_DETECT_CONFIDENCE_FLOOR >= CONFIDENCE_FLOOR) };
+        assert_eq!(confidence_floor(TEST_MODEL, false), SEED_FLOORS.forced);
+        assert_eq!(confidence_floor(TEST_MODEL, true), SEED_FLOORS.auto_detect);
+        const { assert!(SEED_FLOORS.auto_detect >= SEED_FLOORS.forced) };
     }
 
     #[test]
     fn low_confidence_utterance_is_dropped() {
+        let _guard = env_lock();
         // #92: below the floor → drop (whisper hallucination on silence).
-        // Expressed relative to the consts so it tracks live tuning.
-        let below_plain = CONFIDENCE_FLOOR - 0.05;
-        assert!(is_low_confidence_drop("scarf off the popcorn", below_plain, false));
-        let below_auto = AUTO_DETECT_CONFIDENCE_FLOOR - 0.05;
-        assert!(is_low_confidence_drop("這一點是我的建議", below_auto, true));
+        // Expressed relative to the table so it tracks live tuning.
+        let below_plain = SEED_FLOORS.forced - 0.05;
+        assert!(is_low_confidence_drop(
+            TEST_MODEL,
+            "scarf off the popcorn",
+            below_plain,
+            false
+        ));
+        let below_auto = SEED_FLOORS.auto_detect - 0.05;
+        assert!(is_low_confidence_drop(
+            TEST_MODEL,
+            "這一點是我的建議",
+            below_auto,
+            true
+        ));
     }
 
     #[test]
     fn confident_utterance_is_kept() {
+        let _guard = env_lock();
         // Real speech that clears the floor is emitted (the floor is inclusive).
-        assert!(!is_low_confidence_drop("a clear confident sentence", 0.95, false));
         assert!(!is_low_confidence_drop(
+            TEST_MODEL,
             "a clear confident sentence",
-            CONFIDENCE_FLOOR,
+            0.95,
             false
         ));
         assert!(!is_low_confidence_drop(
+            TEST_MODEL,
             "a clear confident sentence",
-            AUTO_DETECT_CONFIDENCE_FLOOR,
+            SEED_FLOORS.forced,
+            false
+        ));
+        assert!(!is_low_confidence_drop(
+            TEST_MODEL,
+            "a clear confident sentence",
+            SEED_FLOORS.auto_detect,
             true
         ));
     }
 
     #[test]
     fn borderline_auto_detection_is_dropped_but_forced_is_kept() {
+        let _guard = env_lock();
         // #93: confidence between the two floors — trusted when the source
         // language was forced, dropped when it was auto-detected. (When the two
         // floors are equal this still holds: the forced case sits AT its floor,
         // which is kept; the auto case below its floor is dropped.)
-        let between = (CONFIDENCE_FLOOR + AUTO_DETECT_CONFIDENCE_FLOOR) / 2.0;
-        assert!(!is_low_confidence_drop("forced language text", between, false));
-        if AUTO_DETECT_CONFIDENCE_FLOOR > CONFIDENCE_FLOOR {
-            assert!(is_low_confidence_drop("auto language text", between, true));
+        let between = (SEED_FLOORS.forced + SEED_FLOORS.auto_detect) / 2.0;
+        assert!(!is_low_confidence_drop(
+            TEST_MODEL,
+            "forced language text",
+            between,
+            false
+        ));
+        if SEED_FLOORS.auto_detect > SEED_FLOORS.forced {
+            assert!(is_low_confidence_drop(
+                TEST_MODEL,
+                "auto language text",
+                between,
+                true
+            ));
         }
     }
 
     #[test]
     fn empty_text_is_never_a_low_confidence_drop() {
         // Empty text carried nothing — the gate is only for non-empty phantoms.
-        assert!(!is_low_confidence_drop("", 0.0, false));
-        assert!(!is_low_confidence_drop("", 0.0, true));
+        assert!(!is_low_confidence_drop(TEST_MODEL, "", 0.0, false));
+        assert!(!is_low_confidence_drop(TEST_MODEL, "", 0.0, true));
+    }
+
+    // ---- per-model-family floor table (#109) ----
+
+    #[test]
+    fn model_family_maps_names_and_quantized_variants() {
+        // Base families.
+        assert_eq!(model_family("tiny"), ModelFamily::Tiny);
+        assert_eq!(model_family("base"), ModelFamily::Base);
+        assert_eq!(model_family("small"), ModelFamily::Small);
+        assert_eq!(model_family("medium"), ModelFamily::Medium);
+        assert_eq!(model_family("large-v3"), ModelFamily::LargeV3);
+        // Quantized variants (from crate::model::MODEL_NAMES) map to their
+        // family, not to a distinct floor.
+        assert_eq!(model_family("tiny-q5_1"), ModelFamily::Tiny);
+        assert_eq!(model_family("base-q5_1"), ModelFamily::Base);
+        assert_eq!(model_family("small-q5_1"), ModelFamily::Small);
+        assert_eq!(model_family("medium-q5_0"), ModelFamily::Medium);
+        assert_eq!(model_family("large-v3-q5_0"), ModelFamily::LargeV3);
+        // The large-v3 turbo distillation (and its quant) share large-v3.
+        assert_eq!(model_family("large-v3-turbo"), ModelFamily::LargeV3);
+        assert_eq!(model_family("large-v3-turbo-q5_0"), ModelFamily::LargeV3);
+        // Every shipped model name resolves without panicking.
+        for name in crate::model::MODEL_NAMES {
+            let _ = model_family(name);
+        }
+        // Unknown/future names fall back to the production-default family.
+        assert_eq!(model_family("nonexistent-9000"), ModelFamily::Small);
+    }
+
+    #[test]
+    fn every_family_seeded_with_historical_floors() {
+        // #109 acceptance: no behavior change with no env set — all families
+        // still carry the historical (0.5, 0.6) floors, and each upholds the
+        // auto >= forced invariant.
+        for family in [
+            ModelFamily::Tiny,
+            ModelFamily::Base,
+            ModelFamily::Small,
+            ModelFamily::Medium,
+            ModelFamily::LargeV3,
+        ] {
+            let floors = family_floors(family);
+            assert_eq!(floors.forced, 0.5);
+            assert_eq!(floors.auto_detect, 0.6);
+            assert!(floors.auto_detect >= floors.forced);
+        }
+    }
+
+    // ---- env override (#109) ----
+
+    #[test]
+    fn parse_floor_override_clamps_and_rejects_invalid() {
+        // In-range values pass through.
+        assert_eq!(parse_floor_override("0.42"), Some(0.42));
+        assert_eq!(parse_floor_override("  0.75  "), Some(0.75)); // trimmed
+        assert_eq!(parse_floor_override("0"), Some(0.0));
+        assert_eq!(parse_floor_override("1"), Some(1.0));
+        // Out-of-range clamps into 0.0..=1.0.
+        assert_eq!(parse_floor_override("1.5"), Some(1.0));
+        assert_eq!(parse_floor_override("-0.3"), Some(0.0));
+        // Invalid / non-finite → None (caller uses the table value).
+        assert_eq!(parse_floor_override(""), None);
+        assert_eq!(parse_floor_override("high"), None);
+        assert_eq!(parse_floor_override("0.5x"), None);
+        assert_eq!(parse_floor_override("inf"), None);
+        assert_eq!(parse_floor_override("NaN"), None);
+    }
+
+    #[test]
+    fn env_var_names_are_the_documented_knobs() {
+        assert_eq!(CONFIDENCE_FLOOR_ENV, "LIVECAP_CONFIDENCE_FLOOR");
+        assert_eq!(
+            AUTO_DETECT_CONFIDENCE_FLOOR_ENV,
+            "LIVECAP_AUTO_DETECT_CONFIDENCE_FLOOR"
+        );
+    }
+
+    #[test]
+    fn env_override_replaces_table_value_and_is_clamped() {
+        let _guard = env_lock();
+        // Snapshot then clear, so this test starts from a known-unset state
+        // regardless of the ambient environment.
+        let prev_forced = std::env::var(CONFIDENCE_FLOOR_ENV).ok();
+        let prev_auto = std::env::var(AUTO_DETECT_CONFIDENCE_FLOOR_ENV).ok();
+
+        // Valid override wins over the table value.
+        std::env::set_var(CONFIDENCE_FLOOR_ENV, "0.8");
+        std::env::set_var(AUTO_DETECT_CONFIDENCE_FLOOR_ENV, "0.9");
+        assert_eq!(confidence_floor(TEST_MODEL, false), 0.8);
+        assert_eq!(confidence_floor(TEST_MODEL, true), 0.9);
+
+        // Out-of-range override is clamped, not discarded.
+        std::env::set_var(CONFIDENCE_FLOOR_ENV, "2.0");
+        assert_eq!(confidence_floor(TEST_MODEL, false), 1.0);
+
+        // Invalid override falls back to the per-family table value.
+        std::env::set_var(CONFIDENCE_FLOOR_ENV, "not-a-number");
+        assert_eq!(confidence_floor(TEST_MODEL, false), SEED_FLOORS.forced);
+
+        // Unset → table value.
+        std::env::remove_var(CONFIDENCE_FLOOR_ENV);
+        std::env::remove_var(AUTO_DETECT_CONFIDENCE_FLOOR_ENV);
+        assert_eq!(confidence_floor(TEST_MODEL, false), SEED_FLOORS.forced);
+        assert_eq!(confidence_floor(TEST_MODEL, true), SEED_FLOORS.auto_detect);
+
+        // Restore the ambient environment for any other consumer.
+        match prev_forced {
+            Some(v) => std::env::set_var(CONFIDENCE_FLOOR_ENV, v),
+            None => std::env::remove_var(CONFIDENCE_FLOOR_ENV),
+        }
+        match prev_auto {
+            Some(v) => std::env::set_var(AUTO_DETECT_CONFIDENCE_FLOOR_ENV, v),
+            None => std::env::remove_var(AUTO_DETECT_CONFIDENCE_FLOOR_ENV),
+        }
+    }
+
+    #[test]
+    fn env_override_preserves_auto_ge_forced_invariant() {
+        let _guard = env_lock();
+        // The two env knobs are independent (#109/#93): a forced override above
+        // the auto floor must NOT make auto-detect less strict than forced. The
+        // resolved auto floor is lifted to at least the resolved forced floor.
+        let prev_forced = std::env::var(CONFIDENCE_FLOOR_ENV).ok();
+        let prev_auto = std::env::var(AUTO_DETECT_CONFIDENCE_FLOOR_ENV).ok();
+
+        // Forced override above the (unset → table 0.6) auto floor: auto is
+        // lifted to the forced value, and the forced floor itself is unchanged.
+        std::env::set_var(CONFIDENCE_FLOOR_ENV, "0.9");
+        std::env::remove_var(AUTO_DETECT_CONFIDENCE_FLOOR_ENV);
+        assert_eq!(confidence_floor(TEST_MODEL, false), 0.9);
+        assert_eq!(confidence_floor(TEST_MODEL, true), 0.9);
+        assert!(confidence_floor(TEST_MODEL, true) >= confidence_floor(TEST_MODEL, false));
+
+        // Forced override above an explicit LOWER auto override: auto is still
+        // lifted to the forced value (the override can't invert the invariant).
+        std::env::set_var(CONFIDENCE_FLOOR_ENV, "0.8");
+        std::env::set_var(AUTO_DETECT_CONFIDENCE_FLOOR_ENV, "0.3");
+        assert_eq!(confidence_floor(TEST_MODEL, false), 0.8);
+        assert_eq!(confidence_floor(TEST_MODEL, true), 0.8);
+
+        // A higher auto override is honored as-is (invariant already holds).
+        std::env::set_var(CONFIDENCE_FLOOR_ENV, "0.4");
+        std::env::set_var(AUTO_DETECT_CONFIDENCE_FLOOR_ENV, "0.7");
+        assert_eq!(confidence_floor(TEST_MODEL, false), 0.4);
+        assert_eq!(confidence_floor(TEST_MODEL, true), 0.7);
+
+        // Resolved floors always satisfy the invariant.
+        let floors = resolved_floors(TEST_MODEL);
+        assert!(floors.auto_detect >= floors.forced);
+
+        match prev_forced {
+            Some(v) => std::env::set_var(CONFIDENCE_FLOOR_ENV, v),
+            None => std::env::remove_var(CONFIDENCE_FLOOR_ENV),
+        }
+        match prev_auto {
+            Some(v) => std::env::set_var(AUTO_DETECT_CONFIDENCE_FLOOR_ENV, v),
+            None => std::env::remove_var(AUTO_DETECT_CONFIDENCE_FLOOR_ENV),
+        }
     }
 }
