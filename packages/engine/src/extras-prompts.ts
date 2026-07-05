@@ -438,3 +438,88 @@ export function parseCoachResult(text: string): CoachResult {
     explanation: explanation.join("\n").trim(),
   };
 }
+
+// --- Batched speech coaching (#112) -----------------------------------------
+
+/** Hard indexed delimiter separating items in a batched coaching turn (#112).
+ *  Tolerant on parse: 1–6 leading `#`, any case, e.g. `### ITEM 3` / `## item 3`. */
+const COACH_ITEM_HEADER = /^#{1,6}\s*ITEM\s+(\d+)\b/i;
+
+/**
+ * Build ONE coaching request covering several utterances (#112), so a review of
+ * many utterances costs a few grouped turns instead of one turn each. Each input
+ * is numbered with a hard `### ITEM k` delimiter and the model is asked to echo
+ * that marker before the SAME three BETTER / CHANGES / EXPLANATION sections used
+ * by {@link buildCoachPrompt}. Markers and section headers stay in English so
+ * {@link parseCoachBatch} can split and key off them regardless of body language.
+ */
+export function buildCoachBatchPrompt(
+  texts: string[],
+  meetingLanguage: string,
+  explanationLanguage: string,
+): { system: string; user: string } {
+  const system =
+    `You are a speech coach. The user gives SEVERAL things they said in a meeting, ` +
+    `numbered as items. For EACH item, produce a cleaner, natural-sounding native ` +
+    `version. Do not invent new claims — only improve phrasing and remove ` +
+    `disfluencies. Output ONLY the per-item sections below, no preamble, no commentary.`;
+  const instructions = [
+    `Coach EACH of the ${texts.length} numbered utterances below. For every item, ` +
+      `output its "### ITEM k" line (k = the item number, 1-based) followed by ` +
+      `EXACTLY these three section headers, each on its own line:`,
+    "BETTER",
+    `<the improved native rewrite, in ${meetingLanguage}>`,
+    "CHANGES",
+    "<original phrase> => <replacement> (one key edit per line; omit if none)",
+    "EXPLANATION",
+    `<a short note on why it is better, in ${explanationLanguage}>`,
+    `Write each BETTER rewrite in ${meetingLanguage} and each EXPLANATION in ` +
+      `${explanationLanguage}, but keep the "### ITEM k" markers and the three section ` +
+      "headers (BETTER / CHANGES / EXPLANATION) in English exactly as above. " +
+      `Output all ${texts.length} items in order, nothing else.`,
+    "",
+  ];
+  const items = texts.map((t, i) => `### ITEM ${i + 1}\n${t}`).join("\n\n");
+  return { system, user: [...instructions, items].join("\n") };
+}
+
+/**
+ * Split a batched coaching response into per-item results (#112), aligned to
+ * item numbers `1..expectedCount`. Output is split on the `### ITEM k` markers
+ * and each chunk is parsed with {@link parseCoachResult}. An item is `null` when
+ * its marker is absent OR its chunk yields no usable rewrite (empty `better`) —
+ * the caller re-runs those (and only those) through the single-item path, so a
+ * miscounted or partially-garbled batch never loses an utterance. A duplicate
+ * `### ITEM k` marker keeps the first occurrence.
+ */
+export function parseCoachBatch(text: string, expectedCount: number): (CoachResult | null)[] {
+  const chunks = new Map<number, string>();
+  let current: number | null = null;
+  let buffer: string[] = [];
+  const flush = () => {
+    if (current !== null && !chunks.has(current)) chunks.set(current, buffer.join("\n"));
+    buffer = [];
+  };
+  for (const raw of text.split("\n")) {
+    const match = raw.trim().match(COACH_ITEM_HEADER);
+    if (match) {
+      flush();
+      current = Number.parseInt(match[1] ?? "", 10);
+      continue;
+    }
+    if (current !== null) buffer.push(raw);
+  }
+  flush();
+
+  const results: (CoachResult | null)[] = [];
+  for (let k = 1; k <= expectedCount; k += 1) {
+    const chunk = chunks.get(k);
+    if (chunk === undefined) {
+      results.push(null);
+      continue;
+    }
+    const parsed = parseCoachResult(chunk);
+    results.push(parsed.better.trim() === "" ? null : parsed);
+  }
+  return results;
+}

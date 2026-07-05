@@ -2,12 +2,14 @@ import { describe, it, expect } from "vitest";
 
 import {
   buildAnalyzeRespondPrompt,
+  buildCoachBatchPrompt,
   buildCoachPrompt,
   buildIncrementalSummaryBoardPrompt,
   buildQuickTranslatePrompt,
   buildReplyPrompt,
   buildSummaryBoardPrompt,
   parseAnalyzeRespond,
+  parseCoachBatch,
   parseCoachResult,
   parseSummaryBoard,
 } from "../src/extras-prompts";
@@ -326,6 +328,104 @@ describe("parseCoachResult (#79)", () => {
   it("never throws on degenerate shapes", () => {
     expect(() => parseCoachResult("")).not.toThrow();
     expect(parseCoachResult("")).toEqual({ better: "", changes: [], explanation: "" });
+  });
+});
+
+describe("buildCoachBatchPrompt (#112)", () => {
+  it("numbers each utterance with a ### ITEM marker and keeps English section headers", () => {
+    const { system, user } = buildCoachBatchPrompt(
+      ["um first thing", "uh second thing"],
+      "English",
+      "한국어",
+    );
+    expect(system).toContain("SEVERAL");
+    // Hard indexed delimiters, one per input, carrying the input text.
+    expect(user).toContain("### ITEM 1\num first thing");
+    expect(user).toContain("### ITEM 2\nuh second thing");
+    // Same three sections as the single-item prompt, headers kept in English.
+    expect(user).toContain("BETTER");
+    expect(user).toContain("CHANGES");
+    expect(user).toContain("EXPLANATION");
+    // Body languages routed like the single prompt: rewrite→meeting, note→target.
+    expect(user).toContain("BETTER rewrite in English");
+    expect(user).toContain("EXPLANATION in 한국어");
+    // Announces the exact item count so the model emits all of them.
+    expect(user).toContain("Coach EACH of the 2 numbered utterances");
+  });
+});
+
+describe("parseCoachBatch (#112)", () => {
+  it("splits a well-formed batch into per-item results, aligned to item number", () => {
+    const text = [
+      "### ITEM 1",
+      "BETTER",
+      "The first, cleaner sentence.",
+      "CHANGES",
+      "um => (removed)",
+      "EXPLANATION",
+      "Tighter opening.",
+      "### ITEM 2",
+      "BETTER",
+      "The second, cleaner sentence.",
+      "EXPLANATION",
+      "States it directly.",
+    ].join("\n");
+    const parsed = parseCoachBatch(text, 2);
+    expect(parsed).toHaveLength(2);
+    expect(parsed[0]).toEqual({
+      better: "The first, cleaner sentence.",
+      changes: [{ from: "um", to: "(removed)" }],
+      explanation: "Tighter opening.",
+    });
+    expect(parsed[1]).toMatchObject({
+      better: "The second, cleaner sentence.",
+      explanation: "States it directly.",
+    });
+  });
+
+  it("returns null for items a miscounted batch dropped (count-mismatch fallback signal)", () => {
+    // Model returned only ITEM 1 though 3 were requested.
+    const text = ["### ITEM 1", "BETTER", "Only the first came back.", "EXPLANATION", "x"].join("\n");
+    const parsed = parseCoachBatch(text, 3);
+    expect(parsed).toHaveLength(3);
+    expect(parsed[0]?.better).toBe("Only the first came back.");
+    expect(parsed[1]).toBeNull();
+    expect(parsed[2]).toBeNull();
+  });
+
+  it("marks an item with no usable rewrite as null (empty BETTER)", () => {
+    const text = ["### ITEM 1", "CHANGES", "um => (removed)", "### ITEM 2", "BETTER", "Real rewrite."].join("\n");
+    const parsed = parseCoachBatch(text, 2);
+    expect(parsed[0]).toBeNull(); // no BETTER content → re-run
+    expect(parsed[1]?.better).toBe("Real rewrite.");
+  });
+
+  it("preserves KO-header / markdown tolerance inside each item chunk", () => {
+    const text = [
+      "### ITEM 1",
+      "## 개선",
+      "더 명확한 문장입니다.",
+      "수정",
+      "- 음 => (삭제)",
+      "**해설:**",
+      "군더더기를 없앴습니다.",
+      "### ITEM 2",
+      "BETTER",
+      "Second one.",
+    ].join("\n");
+    const parsed = parseCoachBatch(text, 2);
+    expect(parsed[0]).toEqual({
+      better: "더 명확한 문장입니다.",
+      changes: [{ from: "음", to: "(삭제)" }],
+      explanation: "군더더기를 없앴습니다.",
+    });
+    expect(parsed[1]?.better).toBe("Second one.");
+  });
+
+  it("tolerates marker case / hash count and keeps the first of a duplicate marker", () => {
+    const text = ["## item 1", "BETTER", "First.", "###   ITEM   1", "BETTER", "Dup ignored."].join("\n");
+    const parsed = parseCoachBatch(text, 1);
+    expect(parsed[0]?.better).toBe("First.");
   });
 });
 
