@@ -5,6 +5,20 @@
 /** Who spoke a line. Rendered as "Them" / "Me". */
 export type Speaker = "them" | "me";
 
+/**
+ * A coaching rewrite persisted for one of the user's own utterances (#113):
+ * a cleaner rewrite (`better`), the key edits (`changes`), and why
+ * (`explanation`). Generated in the post-meeting review — so it is written by
+ * the amend-after-finalize path, never during live capture — and only ever
+ * attached to `speaker: "me"` entries. Mirrors the engine's coach result shape
+ * structurally, without importing the engine (this package stays engine-free).
+ */
+export interface CoachingData {
+  better: string;
+  changes: Array<{ from: string; to: string }>;
+  explanation: string;
+}
+
 /** One finalized caption: original line + its translation. */
 export interface CaptionEntry {
   speaker: Speaker;
@@ -18,6 +32,10 @@ export interface CaptionEntry {
   pinned?: boolean;
   /** Low-confidence line → appends a " (?)" marker to the source. */
   lowConfidence?: boolean;
+  /** Coaching rewrite (#113) — only ever set for `speaker: "me"` entries.
+   *  Persisted in a separate "## Coaching" section keyed by (timestamp ·
+   *  occurrence), not inline in the transcript. */
+  coaching?: CoachingData;
 }
 
 /** The structured meeting board (PROPOSAL §8.4 / §8.9). */
