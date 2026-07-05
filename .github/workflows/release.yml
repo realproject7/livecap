@@ -105,7 +105,7 @@ jobs:
       - name: Collect artifacts and generate SHA-256 checksums
         run: |
           mkdir -p release-artifacts
-          cp src-tauri/target/aarch64-apple-darwin/release/bundle/dmg/*.dmg release-artifacts/
+          cp target/aarch64-apple-darwin/release/bundle/dmg/*.dmg release-artifacts/
           cd release-artifacts
           shasum -a 256 *.dmg > SHA256SUMS.txt
           cat SHA256SUMS.txt
