@@ -12,6 +12,13 @@ jobs:
       - uses: actions/checkout@v4
       - run: ./scripts/no-stub-gate.sh
 
+  color-guard:
+    # #116: fail if src CSS uses a raw color literal outside the :root tokens.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: ./scripts/color-guard.sh
+
   packages-linux:
     # Engine/archive packages are Tauri-free and must build & test headless.
     runs-on: ubuntu-latest

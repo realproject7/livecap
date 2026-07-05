@@ -11,6 +11,22 @@
   --radius-panel: 16px;
   --radius-control: 9px;
   --font: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI", sans-serif;
+
+  /* ---- #116: colors for surfaces added after the Glass package ----
+     Mirrored verbatim in src/styles.css :root; keep the two in sync. */
+  --sheet-bg: #0d0f12;
+  --on-accent: #1a1205;
+  --accent-success: #7ad17a;
+  --accent-success-bg: rgba(122, 209, 122, 0.14);
+  --surface-1: rgba(255, 255, 255, 0.04);
+  --surface-2: rgba(255, 255, 255, 0.06);
+  --surface-3: rgba(255, 255, 255, 0.09);
+  --surface-4: rgba(255, 255, 255, 0.14);
+  --surface-overlay: rgba(255, 255, 255, 0.18);
+  --accent-live-bg: rgba(232, 184, 75, 0.18);
+  --accent-live-bg-strong: rgba(232, 184, 75, 0.26);
+  --accent-live-glow: rgba(232, 184, 75, 0.55);
+  --scrim-bg: rgba(13, 15, 18, 0.85);
 }
 * { margin: 0; padding: 0; box-sizing: border-box; }
 html, body { font-family: var(--font); -webkit-font-smoothing: antialiased; }
