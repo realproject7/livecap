@@ -71,6 +71,48 @@ function renderMetrics(metrics: MetricsData): string {
   );
 }
 
+// Coaching section separators (#113), kept as named constants so parse.ts can
+// invert them without drift. Changes render as `from => to`, multiple joined by
+// ` · ` — the same middot the board uses.
+export const COACHING_ARROW = " => ";
+export const COACHING_CHANGE_SEP = " · ";
+
+/** Render one coached "me" entry as a `### (timestamp · k)` block (#113). The
+ *  heading echoes the source text as an advisory redundancy check; empty
+ *  `changes`/`explanation` omit their line so absence round-trips to the
+ *  default. `better` may span multiple lines and is rendered verbatim. */
+function renderCoachingEntry(e: CaptionEntry, occurrence: number, coaching: NonNullable<CaptionEntry["coaching"]>): string {
+  let out = `### (${e.timestamp} · ${occurrence}) — ${e.source}\n`;
+  out += `**Better:** ${coaching.better}\n`;
+  if (coaching.changes.length > 0) {
+    const list = coaching.changes.map((c) => `${c.from}${COACHING_ARROW}${c.to}`).join(COACHING_CHANGE_SEP);
+    out += `**Changes:** ${list}\n`;
+  }
+  if (coaching.explanation !== "") out += `**Explanation:** ${coaching.explanation}\n`;
+  return out;
+}
+
+/**
+ * Render the "## Coaching" section (#113), or "" when no entry carries coaching
+ * (so a coaching-free document is byte-identical to before — the append-only
+ * transcript invariant and every existing golden stay intact). Each coached
+ * `me` entry is keyed by `(timestamp · k)`, where `k` is its 1-based occurrence
+ * among `me` entries sharing that timestamp, disambiguating duplicate clocks.
+ * Placed AFTER the transcript so `amendCoaching` only ever appends.
+ */
+export function renderCoaching(entries: CaptionEntry[]): string {
+  const occurrence = new Map<string, number>();
+  const blocks: string[] = [];
+  for (const e of entries) {
+    if (e.speaker !== "me") continue;
+    const k = (occurrence.get(e.timestamp) ?? 0) + 1;
+    occurrence.set(e.timestamp, k);
+    if (e.coaching !== undefined) blocks.push(renderCoachingEntry(e, k, e.coaching));
+  }
+  if (blocks.length === 0) return "";
+  return `\n## Coaching\n\n${blocks.join("\n")}`;
+}
+
 /** Everything above the transcript entries (rewritten on each brief update). */
 export function renderFrontMatter(m: ArchiveModel): string {
   let doc = `# ${m.title}\n> ${renderMetaLine(m)}\n`;
@@ -83,11 +125,13 @@ export function renderFrontMatter(m: ArchiveModel): string {
   return doc;
 }
 
-/** The complete document: front matter + all transcript entries. */
+/** The complete document: front matter + all transcript entries + optional
+ *  Coaching section (#113, appended after the transcript). */
 export function renderDocument(m: ArchiveModel): string {
   let doc = renderFrontMatter(m);
   m.entries.forEach((e, i) => {
     doc += (i === 0 ? "" : "\n") + renderEntryBody(e);
   });
+  doc += renderCoaching(m.entries);
   return doc;
 }

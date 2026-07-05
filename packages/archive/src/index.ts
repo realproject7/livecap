@@ -11,11 +11,18 @@ export type { AdoptionOptions, AdoptionResult } from "./adopt";
 export { sanitizeTitle, archiveFileName, MAX_TITLE_BYTES, FALLBACK_TITLE } from "./sanitize";
 export { nodeArchiveFs } from "./fs";
 export type { ArchiveFs } from "./fs";
-export { renderDocument, renderEntryBody, renderEntryAppend, renderFrontMatter } from "./render";
+export {
+  renderDocument,
+  renderEntryBody,
+  renderEntryAppend,
+  renderFrontMatter,
+  renderCoaching,
+} from "./render";
 export type { ArchiveModel } from "./render";
 export type {
   Speaker,
   CaptionEntry,
+  CoachingData,
   BoardData,
   MetricsData,
   SessionMeta,

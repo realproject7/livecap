@@ -17,7 +17,7 @@ import type { ArchiveFs } from "./fs";
 import { uniquePath } from "./paths";
 import { renderDocument, renderEntryAppend, type ArchiveModel } from "./render";
 import { sanitizeTitle } from "./sanitize";
-import type { BriefUpdate, CaptionEntry, FinalBrief, SessionMeta } from "./types";
+import type { BriefUpdate, CaptionEntry, CoachingData, FinalBrief, SessionMeta } from "./types";
 
 export interface SessionArchiveWriterOptions {
   fs: ArchiveFs;
@@ -127,6 +127,46 @@ export class SessionArchiveWriter {
     this.workingPath = finalPath;
     this.finalized = true;
     return finalPath;
+  }
+
+  /**
+   * Amend a FINALIZED session file with coaching results (#113). Coaching is
+   * produced in the post-meeting review, after the session is finalized, so
+   * this is the only writer method callable once finalized (all others throw).
+   *
+   * Each update targets a `me` entry by `(timestamp, occurrence)` — `occurrence`
+   * is the 1-based position among `me` entries sharing that timestamp — matching
+   * the key render.ts / parse.ts use. Unmatched updates are ignored (never
+   * throws). The whole document is re-rendered from the in-memory model and
+   * written via the same temp-file + rename discipline as every other write;
+   * because coaching renders as a trailing "## Coaching" section, every other
+   * section stays byte-identical.
+   */
+  amendCoaching(
+    updates: Array<{ timestamp: string; occurrence: number; coaching: CoachingData }>,
+  ): Promise<void> {
+    if (!this.opened) throw new Error("archive writer not opened");
+    if (!this.finalized) throw new Error("archive writer not finalized (amendCoaching is post-finalize only)");
+
+    // JSON-encoded (timestamp, occurrence) key — collision-safe and plain text.
+    const key = (timestamp: string, occurrence: number): string =>
+      JSON.stringify([timestamp, occurrence]);
+    const byKey = new Map<string, CoachingData>();
+    for (const u of updates) byKey.set(key(u.timestamp, u.occurrence), u.coaching);
+
+    // Attach to a COPY of each matched entry so the caller's original
+    // CaptionEntry objects (aliased in via appendCaption) are never mutated.
+    const occurrence = new Map<string, number>();
+    this.model.entries.forEach((entry, index) => {
+      if (entry.speaker !== "me") return;
+      const k = (occurrence.get(entry.timestamp) ?? 0) + 1;
+      occurrence.set(entry.timestamp, k);
+      const data = byKey.get(key(entry.timestamp, k));
+      if (data !== undefined) this.model.entries[index] = { ...entry, coaching: data };
+    });
+
+    this.atomicWrite(this.workingPath, renderDocument(this.model));
+    return Promise.resolve();
   }
 
   private applyBrief(brief: BriefUpdate): void {

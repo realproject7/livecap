@@ -12,7 +12,8 @@
 // every field degrades to a sensible default ("" / 0 / [] / undefined), so the
 // dashboard aggregations stay NaN-free (cf. #88).
 
-import type { BoardData, CaptionEntry, MetricsData, Speaker } from "./types";
+import { COACHING_ARROW, COACHING_CHANGE_SEP } from "./render";
+import type { BoardData, CaptionEntry, CoachingData, MetricsData, Speaker } from "./types";
 
 /** Header metadata recovered from the `> …` meta line + the H1 title. */
 export interface ParsedSessionMeta {
@@ -143,6 +144,99 @@ const SMOOTH_SCORE = /^\*\*Smooth Score\*\* — (\d+)$/;
 const ENTRY_HEADER = /^(📌 )?\*\*(Me|Them)\*\* \(([^)]*)\) — (.*)$/;
 const LOW_CONFIDENCE_SUFFIX = " (?)";
 
+// Coaching section (#113), the inverse of render.ts renderCoaching.
+// `### (10:45 · 2) — echoed source` — timestamp + occurrence + advisory echo.
+const COACHING_HEADING = /^### \((.+?) · (\d+)\) — /;
+const COACHING_BETTER = /^\*\*Better:\*\* ?(.*)$/;
+const COACHING_CHANGES = /^\*\*Changes:\*\* ?(.*)$/;
+const COACHING_EXPLANATION = /^\*\*Explanation:\*\* ?(.*)$/;
+
+/** Stable key linking a coaching block to its `me` entry by (timestamp,
+ *  occurrence). JSON-encoded so the two components can never collide and the
+ *  source stays plain text (no delimiter bytes). Mirrors the writer's key. */
+function coachingKey(timestamp: string, occurrence: number): string {
+  return JSON.stringify([timestamp, occurrence]);
+}
+
+/**
+ * Parse the "## Coaching" section body into a `(timestamp · occurrence) →
+ * CoachingData` map (#113). `better` and `explanation` may span multiple lines
+ * (continuation lines after their label are collected until the next label /
+ * heading), so multi-line rewrites round-trip. Missing `Changes`/`Explanation`
+ * default to `[]` / `""`, matching the render side's omit-when-empty.
+ */
+function parseCoachingSection(lines: string[]): Map<string, CoachingData> {
+  const map = new Map<string, CoachingData>();
+  let ts: string | null = null;
+  let occurrence = 0;
+  let better: string[] = [];
+  let changes: CoachingData["changes"] = [];
+  let explanation: string[] = [];
+  let field: "better" | "explanation" | null = null;
+
+  const flush = () => {
+    if (ts === null) return;
+    map.set(coachingKey(ts, occurrence), {
+      better: better.join("\n").trim(),
+      changes,
+      explanation: explanation.join("\n").trim(),
+    });
+  };
+
+  for (const raw of lines) {
+    const heading = raw.match(COACHING_HEADING);
+    if (heading) {
+      flush();
+      ts = heading[1] ?? "";
+      occurrence = toInt(heading[2]);
+      better = [];
+      changes = [];
+      explanation = [];
+      field = null;
+      continue;
+    }
+    if (ts === null) continue; // preamble before the first block (e.g. the blank line)
+    const b = raw.match(COACHING_BETTER);
+    if (b) {
+      better.push(b[1] ?? "");
+      field = "better";
+      continue;
+    }
+    const c = raw.match(COACHING_CHANGES);
+    if (c) {
+      changes = parseChangeList(c[1] ?? "");
+      field = null;
+      continue;
+    }
+    const ex = raw.match(COACHING_EXPLANATION);
+    if (ex) {
+      explanation.push(ex[1] ?? "");
+      field = "explanation";
+      continue;
+    }
+    // Continuation line for a multi-line better/explanation.
+    if (field === "better") better.push(raw);
+    else if (field === "explanation") explanation.push(raw);
+  }
+  flush();
+  return map;
+}
+
+/** Split a rendered Changes payload (`from => to · from => to`) back into edits;
+ *  malformed items (no arrow / empty side) are skipped, mirroring the engine's
+ *  coach parser. */
+function parseChangeList(payload: string): CoachingData["changes"] {
+  const changes: CoachingData["changes"] = [];
+  for (const part of payload.split(COACHING_CHANGE_SEP)) {
+    const at = part.indexOf(COACHING_ARROW);
+    if (at === -1) continue;
+    const from = part.slice(0, at).trim();
+    const to = part.slice(at + COACHING_ARROW.length).trim();
+    if (from !== "" && to !== "") changes.push({ from, to });
+  }
+  return changes;
+}
+
 const BOARD_LABELS: Record<string, keyof BoardData> = {
   Decisions: "decisions",
   "Action items": "actionItems",
@@ -228,7 +322,8 @@ export function parseSession(markdown: string): ParsedSession {
     metrics = { talkRatioMic, smoothScore };
   }
 
-  const entries = parseEntries(sections.get("Transcript") ?? []);
+  const coaching = parseCoachingSection(sections.get("Coaching") ?? []);
+  const entries = parseEntries(sections.get("Transcript") ?? [], coaching);
 
   return {
     meta,
@@ -240,9 +335,14 @@ export function parseSession(markdown: string): ParsedSession {
   };
 }
 
-/** Parse the Transcript body: a header line, then its `> translation` line. */
-function parseEntries(lines: string[]): CaptionEntry[] {
+/**
+ * Parse the Transcript body: a header line, then its `> translation` line.
+ * Coaching (#113) is re-attached to each `me` entry by its 1-based occurrence
+ * among `me` entries sharing that timestamp — the same key render.ts emits.
+ */
+function parseEntries(lines: string[], coaching: Map<string, CoachingData>): CaptionEntry[] {
   const entries: CaptionEntry[] = [];
+  const occurrence = new Map<string, number>();
   for (let i = 0; i < lines.length; i++) {
     const header = (lines[i] ?? "").match(ENTRY_HEADER);
     if (!header) continue;
@@ -263,6 +363,12 @@ function parseEntries(lines: string[]): CaptionEntry[] {
     const entry: CaptionEntry = { speaker, timestamp, source, target };
     if (pinned) entry.pinned = true;
     if (lowConfidence) entry.lowConfidence = true;
+    if (speaker === "me") {
+      const k = (occurrence.get(timestamp) ?? 0) + 1;
+      occurrence.set(timestamp, k);
+      const data = coaching.get(coachingKey(timestamp, k));
+      if (data !== undefined) entry.coaching = data;
+    }
     entries.push(entry);
   }
   return entries;
