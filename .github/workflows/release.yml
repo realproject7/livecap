@@ -1,0 +1,123 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  build-macos-arm64:
+    # v1 ships aarch64-apple-darwin only (#117 default: operator hardware is
+    # Apple silicon; universal binary doubles CI time — revisit on demand).
+    runs-on: macos-14
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - name: Verify tag matches app version
+        # The tag's X.Y.Z core must match package.json, tauri.conf.json and
+        # src-tauri/Cargo.toml. Pre-release/test suffixes (v0.1.0-dry.1) only
+        # need a matching core, so unsigned dry-run tags stay possible.
+        run: |
+          TAG_VERSION="${GITHUB_REF_NAME#v}"
+          CORE_VERSION="${TAG_VERSION%%-*}"
+          PKG_VERSION="$(node -p "require('./package.json').version")"
+          CONF_VERSION="$(node -p "require('./src-tauri/tauri.conf.json').version")"
+          CARGO_VERSION="$(sed -n 's/^version = "\(.*\)"$/\1/p' src-tauri/Cargo.toml | head -n1)"
+          echo "tag core=$CORE_VERSION package.json=$PKG_VERSION tauri.conf.json=$CONF_VERSION Cargo.toml=$CARGO_VERSION"
+          if [ "$CORE_VERSION" != "$PKG_VERSION" ] || [ "$CORE_VERSION" != "$CONF_VERSION" ] || [ "$CORE_VERSION" != "$CARGO_VERSION" ]; then
+            echo "::error::Tag $GITHUB_REF_NAME does not match the app version. Bump package.json, src-tauri/tauri.conf.json and src-tauri/Cargo.toml first (see docs/RELEASE.md)."
+            exit 1
+          fi
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin
+      - uses: Swatinem/rust-cache@v2
+
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm build
+
+      - name: Detect Apple signing secrets
+        # GitHub cannot test secret presence in `if:` reliably without first
+        # mapping secrets into env, so this step maps them (values never
+        # printed) and exposes two booleans:
+        #   sign     — all three certificate secrets present
+        #   notarize — sign AND all three notarization secrets present
+        id: signing
+        env:
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          SIGN=false
+          NOTARIZE=false
+          if [ -n "$APPLE_CERTIFICATE" ] && [ -n "$APPLE_CERTIFICATE_PASSWORD" ] && [ -n "$APPLE_SIGNING_IDENTITY" ]; then
+            SIGN=true
+            if [ -n "$APPLE_ID" ] && [ -n "$APPLE_PASSWORD" ] && [ -n "$APPLE_TEAM_ID" ]; then
+              NOTARIZE=true
+            fi
+          fi
+          echo "sign=$SIGN" >> "$GITHUB_OUTPUT"
+          echo "notarize=$NOTARIZE" >> "$GITHUB_OUTPUT"
+          echo "Code signing: $SIGN — Notarization: $NOTARIZE"
+          if [ "$SIGN" = false ]; then
+            echo "::notice::Apple signing secrets absent — building UNSIGNED (expected until operator gate #14 lands)."
+          elif [ "$NOTARIZE" = false ]; then
+            echo "::warning::Certificate secrets present but notarization trio (APPLE_ID/APPLE_PASSWORD/APPLE_TEAM_ID) incomplete — signing without notarization."
+          fi
+
+      - name: Build DMG (signed${{ steps.signing.outputs.notarize == 'true' && ' + notarized' || '' }})
+        if: steps.signing.outputs.sign == 'true'
+        env:
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          # Tauri v2 imports the certificate into a temporary keychain and
+          # notarizes automatically when the env trio is present. Unset a
+          # partial notarization trio so the bundler skips notarization
+          # cleanly instead of failing on empty credentials.
+          if [ -z "$APPLE_ID" ] || [ -z "$APPLE_PASSWORD" ] || [ -z "$APPLE_TEAM_ID" ]; then
+            unset APPLE_ID APPLE_PASSWORD APPLE_TEAM_ID
+          fi
+          pnpm tauri build --target aarch64-apple-darwin
+
+      - name: Build DMG (unsigned — Apple signing secrets absent)
+        if: steps.signing.outputs.sign != 'true'
+        run: pnpm tauri build --target aarch64-apple-darwin
+
+      - name: Collect artifacts and generate SHA-256 checksums
+        run: |
+          mkdir -p release-artifacts
+          cp src-tauri/target/aarch64-apple-darwin/release/bundle/dmg/*.dmg release-artifacts/
+          cd release-artifacts
+          shasum -a 256 *.dmg > SHA256SUMS.txt
+          cat SHA256SUMS.txt
+
+      - name: Create draft GitHub Release with artifacts
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          TAG="$GITHUB_REF_NAME"
+          if ! gh release view "$TAG" --json isDraft >/dev/null 2>&1; then
+            gh release create "$TAG" --draft --verify-tag \
+              --title "LiveCap $TAG" \
+              --generate-notes
+          fi
+          gh release upload "$TAG" release-artifacts/*.dmg release-artifacts/SHA256SUMS.txt --clobber
