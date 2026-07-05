@@ -189,8 +189,11 @@ export type HostOutbound =
       systemMs: number;
     }
   /** Speech-coaching results (#82): one item per requested utterance, aligned by
-   *  `id`; routed back to the requesting card. */
-  | { type: "coaching"; cardId: number; items: CoachingItemWire[] }
+   *  `id`; routed back to the requesting card. `persistFailed` (#114) is set when
+   *  the single best-effort attempt to save these rewrites into the finalized
+   *  session file failed — the card still renders the items, plus a one-line
+   *  "couldn't save" status. Absent means saved (or nothing to save). */
+  | { type: "coaching"; cardId: number; items: CoachingItemWire[]; persistFailed?: boolean }
   | { type: "gauge"; gauge: GaugeWire }
   | { type: "engineSwitch"; engine: string }
   | { type: "quickTranslateResult"; id: number; text: string }

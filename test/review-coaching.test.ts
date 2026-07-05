@@ -105,6 +105,36 @@ describe("coaching failure routing (#5/#82)", () => {
     expect(review.el.querySelector(".coach-progress")).toBeNull();
   });
 
+  it("a save failure (#114) still renders the rewrites, plus a one-line status", () => {
+    const { review, requestCoaching } = makeReview();
+    show(review);
+
+    review.el.querySelector<HTMLButtonElement>(".coach-row")?.click();
+    const cardId = requestCoaching.mock.results[0]?.value as number;
+
+    review.coachingCard(cardId)?.fill(
+      [
+        {
+          id: 7,
+          better: "I think we should ship it.",
+          changes: [{ from: "um ship", to: "ship it" }],
+          explanation: "Removed the filler word.",
+        },
+      ],
+      true, // the host could not amend the session file
+    );
+
+    // The rewrites render normally…
+    const item = review.el.querySelector(".coach-item");
+    expect(item?.querySelector(".coach-better")?.textContent).toContain("ship it");
+    // …and the status line (the same element request errors use) carries the
+    // one-line notice instead of the spinner.
+    const progress = review.el.querySelector(".coach-progress");
+    expect(progress?.textContent).toBe("couldn't save coaching to the session file");
+    // No retry control — persistence is a single attempt, not retried.
+    expect(review.el.querySelector(".coach-retry")).toBeNull();
+  });
+
   it("the card's top-right ✕ closes it", () => {
     const { review, requestCoaching } = makeReview();
     show(review);

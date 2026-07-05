@@ -34,7 +34,8 @@ import {
 } from "@livecap/archive";
 import type { BoardData, CaptionEntry, MetricsData } from "@livecap/archive";
 
-import type { Channel, GaugeWire, HostInbound, HostOutbound } from "../protocol.ts";
+import type { Channel, CoachingItemWire, GaugeWire, HostInbound, HostOutbound } from "../protocol.ts";
+import { coachingAmendKeys } from "./coaching-keys.ts";
 import { detectClaudeCli } from "./detect-cli.ts";
 import { toFinalizedRecords } from "./metrics-records.ts";
 import { LazyLocalEngine } from "./local-tier.ts";
@@ -499,10 +500,59 @@ export class HostSession {
         changes: result.changes,
         explanation: result.explanation,
       }));
-      this.emit({ type: "coaching", cardId, items });
+      // Persist into the finalized session file (#114) BEFORE emitting, so the
+      // result message can carry the save outcome; a failure never blocks the
+      // rewrites from rendering (the card shows a one-line status instead).
+      if (await this.persistCoaching(items)) {
+        this.emit({ type: "coaching", cardId, items });
+      } else {
+        this.emit({ type: "coaching", cardId, items, persistFailed: true });
+      }
       this.emitGauge(); // extras spend changed → refresh the gauge
     } catch (error) {
       this.emit({ type: "extrasFailed", id: cardId, detail: errorDetail(error) });
+    }
+  }
+
+  /** Save coaching results into the finalized session file via the #113 amend
+   *  API. Single attempt, best-effort: returns false on failure so the caller
+   *  can flag it on the wire. No writer (auto-save off) or no coached item that
+   *  maps to an archived `me` entry means nothing to save → success. Re-coached
+   *  utterances overwrite their persisted entry (amendCoaching last-write-wins). */
+  private async persistCoaching(items: CoachingItemWire[]): Promise<boolean> {
+    const writer = this.writer;
+    if (!writer) return true;
+    // `entriesById` insertion order IS the archived entry order (each id is set
+    // right after its successful appendCaption), so the occurrence indices match
+    // the ones the writer computes when it renders the Coaching section.
+    const keys = coachingAmendKeys(
+      Array.from(this.entriesById, ([id, entry]) => ({
+        id,
+        speaker: entry.speaker,
+        timestamp: entry.timestamp,
+      })),
+      items.map((item) => item.id),
+    );
+    const updates = items.flatMap((item) => {
+      const key = keys.get(item.id);
+      if (!key) return [];
+      return [
+        {
+          timestamp: key.timestamp,
+          occurrence: key.occurrence,
+          coaching: { better: item.better, changes: item.changes, explanation: item.explanation },
+        },
+      ];
+    });
+    if (updates.length === 0) return true;
+    try {
+      await writer.amendCoaching(updates);
+      return true;
+    } catch (error) {
+      // Content-free by contract (#23): errorDetail never carries caption or
+      // rewrite text — only the error class/message from the fs layer.
+      this.emit({ type: "status", detail: `coaching save failed (${errorDetail(error)})` });
+      return false;
     }
   }
 
