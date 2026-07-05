@@ -6,12 +6,14 @@
 import { ExtrasBudget, ExtrasBudgetExceededError } from "./extras-budget";
 import {
   buildAnalyzeRespondPrompt,
+  buildCoachBatchPrompt,
   buildCoachPrompt,
   buildIncrementalSummaryBoardPrompt,
   buildQuickTranslatePrompt,
   buildReplyPrompt,
   buildSummaryBoardPrompt,
   parseAnalyzeRespond,
+  parseCoachBatch,
   parseCoachResult,
   parseSummaryBoard,
   type AnalyzeRespondResult,
@@ -81,6 +83,59 @@ const ZERO_USAGE: Usage = {
  *  nothing to coach — counting whitespace-separated words. */
 function isDegenerateUtterance(text: string): boolean {
   return text.trim().split(/\s+/).filter((w) => w !== "").length <= 1;
+}
+
+/** Max utterances coached per grouped `complete()` turn (#112). Batching cuts
+ *  the ~one-turn-per-utterance wall-clock ~N×; the cap keeps each batched
+ *  prompt/response small enough to parse reliably, and overflow spills into
+ *  additional turns. */
+const COACH_BATCH_SIZE = 5;
+
+/**
+ * Split one batch turn's {@link Usage} into `count` even shares whose fields sum
+ * back to the original EXACTLY (#112). Token fields (integers) distribute their
+ * division remainder one-per-item across the first items; cost fields (floats)
+ * carry any rounding residual on the first share. So summing a batch's per-item
+ * usages always reconstructs the turn total, with no drift.
+ */
+function divideUsage(usage: Usage, count: number): Usage[] {
+  const ints = (total: number): number[] => {
+    const base = Math.floor(total / count);
+    const remainder = total - base * count;
+    return Array.from({ length: count }, (_, i) => base + (i < remainder ? 1 : 0));
+  };
+  const floats = (total: number): number[] => {
+    const each = total / count;
+    const parts = Array.from({ length: count }, () => each);
+    parts[0] = each + (total - each * count); // absorb float residual on the first share
+    return parts;
+  };
+  const cumulative = floats(usage.cumulativeCostUsd);
+  const turn = floats(usage.turnCostUsd);
+  const input = ints(usage.inputTokens);
+  const output = ints(usage.outputTokens);
+  const cacheRead = ints(usage.cacheReadInputTokens);
+  return Array.from({ length: count }, (_, i) => ({
+    cumulativeCostUsd: cumulative[i]!,
+    turnCostUsd: turn[i]!,
+    inputTokens: input[i]!,
+    outputTokens: output[i]!,
+    cacheReadInputTokens: cacheRead[i]!,
+  }));
+}
+
+/** Sum two {@link Usage} records field-by-field (#112). Used when a batched item
+ *  had to be re-run individually: its attribution is the batch share it already
+ *  cost PLUS the re-run turn, so overall per-item usage still accounts for every
+ *  token actually spent. */
+function addUsage(a: Usage, b: Usage): Usage {
+  return {
+    cumulativeCostUsd: a.cumulativeCostUsd + b.cumulativeCostUsd,
+    turnCostUsd: a.turnCostUsd + b.turnCostUsd,
+    inputTokens: a.inputTokens + b.inputTokens,
+    outputTokens: a.outputTokens + b.outputTokens,
+    cacheReadInputTokens: a.cacheReadInputTokens + b.cacheReadInputTokens,
+  };
 }
 
 export class ExtrasPipeline {
@@ -210,20 +265,80 @@ export class ExtrasPipeline {
   }
 
   /**
-   * Batch coaching for "review all my utterances" (#79): results are aligned by
-   * index with `texts`. Degenerate items short-circuit to a no-op with no
-   * round-trip (so a transcript full of "Yeah"/"Right" is free); each remaining
-   * item is coached with its own `complete()` call — robust per-item parsing
-   * rather than one fragile multi-item prompt.
+   * Batch coaching for "review all my utterances" (#79/#112): results are aligned
+   * by index with `texts`. Degenerate items short-circuit to a no-op with no
+   * round-trip (so a transcript full of "Yeah"/"Right" is free, still zero model
+   * calls). The remaining real items are coached in groups of up to
+   * {@link COACH_BATCH_SIZE} per `complete()` turn (#112) — one grouped prompt
+   * with hard `### ITEM k` delimiters instead of one turn per utterance, cutting
+   * wall-clock ~N× (the CLI runs one serialized session, so fewer turns is the
+   * lever). Robustness is preserved: if the batch drops or garbles an item, ONLY
+   * that item is re-run through the single-item path, so no utterance is lost.
+   *
+   * Usage: each batch turn's cost is divided evenly across its items (see
+   * {@link divideUsage}); a re-run item additionally carries its re-run turn.
+   * Summing the returned per-item usages reconstructs the real turn totals.
    */
   async coachUtterances(
     texts: string[],
     options: { language?: string } = {},
   ): Promise<CoachPipelineResult[]> {
-    const results: CoachPipelineResult[] = [];
-    for (const text of texts) {
-      results.push(await this.coachUtterance(text, options));
+    const results = new Array<CoachPipelineResult>(texts.length);
+    // Real (non-degenerate) items, keeping their original position in `texts`.
+    const pending: { index: number; text: string }[] = [];
+    texts.forEach((text, index) => {
+      if (isDegenerateUtterance(text)) {
+        results[index] = { better: text.trim(), changes: [], explanation: "", usage: ZERO_USAGE };
+      } else {
+        pending.push({ index, text });
+      }
+    });
+
+    for (let start = 0; start < pending.length; start += COACH_BATCH_SIZE) {
+      const group = pending.slice(start, start + COACH_BATCH_SIZE);
+      if (group.length === 1) {
+        // A lone real item gains nothing from a batch prompt — use the direct,
+        // already-tested single-item path.
+        const only = group[0]!;
+        results[only.index] = await this.coachUtterance(only.text, options);
+      } else {
+        await this.coachBatch(group, options, results);
+      }
     }
     return results;
+  }
+
+  /**
+   * Coach one group of real utterances in a single `complete()` turn (#112),
+   * writing each item's result into `results` at its original index. Items the
+   * batch drops or garbles (see {@link parseCoachBatch}) are re-run one at a time
+   * through {@link coachUtterance} so none is lost.
+   */
+  private async coachBatch(
+    group: { index: number; text: string }[],
+    options: { language?: string },
+    results: CoachPipelineResult[],
+  ): Promise<void> {
+    const better = options.language ?? this.meetingLanguage;
+    const { text: out, usage } = await this.engine.complete(
+      buildCoachBatchPrompt(
+        group.map((g) => g.text),
+        better,
+        this.summaryLanguage,
+      ),
+    );
+    this.budget?.record(usage.turnCostUsd);
+    const parsed = parseCoachBatch(out, group.length);
+    const shares = divideUsage(usage, group.length);
+    for (let j = 0; j < group.length; j += 1) {
+      const item = group[j]!;
+      const itemParsed = parsed[j];
+      if (itemParsed) {
+        results[item.index] = { ...itemParsed, usage: shares[j]! };
+      } else {
+        const rerun = await this.coachUtterance(item.text, options);
+        results[item.index] = { ...rerun, usage: addUsage(shares[j]!, rerun.usage) };
+      }
+    }
   }
 }
