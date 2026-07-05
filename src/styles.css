@@ -20,6 +20,30 @@
      opacity fade. */
   --fade: 150ms;
   --font: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI", sans-serif;
+
+  /* ---- #116: colors for surfaces added after the Glass package ----
+     Canonical in design/system/tokens.css; keep the two in sync. */
+  /* Opaque sheet background for full-cover surfaces (Onboarding/Settings/
+     Dashboard) so the live feed never bleeds through (#96). */
+  --sheet-bg: #0d0f12;
+  /* Dark text/icon on top of --accent-live (amber). */
+  --on-accent: #1a1205;
+  /* Coaching "improved" accent (#79) and its tint. */
+  --accent-success: #7ad17a;
+  --accent-success-bg: rgba(122, 209, 122, 0.14);
+  /* White surface-tint scale — elevation is brightness. Raw
+     rgba(255,255,255,α) literals snap to the nearest step when within ±0.02. */
+  --surface-1: rgba(255, 255, 255, 0.04);
+  --surface-2: rgba(255, 255, 255, 0.06);
+  --surface-3: rgba(255, 255, 255, 0.09);
+  --surface-4: rgba(255, 255, 255, 0.14);
+  /* One-off tints outside the scale (>±0.02 from any step), kept at their
+     exact values so pixels don't shift (#116 total-inventory rule). */
+  --surface-overlay: rgba(255, 255, 255, 0.18);
+  --accent-live-bg: rgba(232, 184, 75, 0.18);
+  --accent-live-bg-strong: rgba(232, 184, 75, 0.26);
+  --accent-live-glow: rgba(232, 184, 75, 0.55);
+  --scrim-bg: rgba(13, 15, 18, 0.85);
 }
 
 * {
@@ -90,7 +114,7 @@ body[data-mode="capsule"] #chrome {
   flex-shrink: 0;
   border: none;
   border-radius: var(--radius-control);
-  background: rgba(255, 255, 255, 0.06);
+  background: var(--surface-2);
   color: var(--text-translation);
   display: flex;
   align-items: center;
@@ -109,7 +133,7 @@ body[data-mode="capsule"] #chrome {
 }
 .btn:hover:not(:disabled) {
   color: var(--text-original);
-  background: rgba(255, 255, 255, 0.12);
+  background: var(--surface-4);
 }
 .btn:disabled {
   opacity: 0.35;
@@ -122,10 +146,10 @@ body[data-mode="capsule"] #chrome {
    tell at a glance whether the overlay is floating on top. */
 #btn-pin[aria-pressed="true"] {
   color: var(--accent-live);
-  background: rgba(232, 184, 75, 0.18);
+  background: var(--accent-live-bg);
 }
 #btn-pin[aria-pressed="true"]:hover {
-  background: rgba(232, 184, 75, 0.26);
+  background: var(--accent-live-bg-strong);
 }
 
 /* ===================== #11: live panel ===================== */
@@ -254,7 +278,7 @@ body[data-mode="capsule"] #panel-body {
   padding: 8px 10px;
   border: none;
   border-radius: 8px;
-  background: rgba(255, 255, 255, 0.08);
+  background: var(--surface-3);
   color: var(--text-original);
   font-size: 13.5px;
   font-family: var(--font);
@@ -265,7 +289,7 @@ body[data-mode="capsule"] #panel-body {
   border-radius: 10px;
   padding: 11px 28px;
   background: var(--accent-live);
-  color: #1a1205;
+  color: var(--on-accent);
   font-size: 14px;
   font-weight: 600;
   cursor: pointer;
@@ -336,7 +360,7 @@ body[data-phase="paused"] #summary .lbl {
 }
 .live-dot.on {
   background: var(--accent-live);
-  box-shadow: 0 0 8px rgba(232, 184, 75, 0.55);
+  box-shadow: 0 0 8px var(--accent-live-glow);
 }
 
 /* ---- caption feed ---- */
@@ -494,7 +518,7 @@ body[data-phase="paused"] #summary .lbl {
 }
 .g:hover {
   color: var(--text-original);
-  background: rgba(255, 255, 255, 0.1);
+  background: var(--surface-3);
 }
 .cap.is-pinned .g-pin {
   color: var(--accent-live);
@@ -512,7 +536,7 @@ body[data-phase="paused"] #summary .lbl {
   padding: 5px 12px;
   font-size: 11px;
   color: var(--text-original);
-  background: rgba(255, 255, 255, 0.12);
+  background: var(--surface-4);
   backdrop-filter: blur(8px);
   cursor: pointer;
   opacity: 0;
@@ -552,7 +576,7 @@ body[data-mode="capsule"] #live-chip {
 }
 .card {
   position: relative;
-  background: rgba(255, 255, 255, 0.05);
+  background: var(--surface-2);
   border-radius: 12px;
   padding: 10px 12px;
   margin-bottom: 8px;
@@ -587,7 +611,7 @@ body[data-mode="capsule"] #live-chip {
 .card-x:hover,
 .coach-card .card-x:hover {
   color: var(--text-original);
-  background: rgba(255, 255, 255, 0.1);
+  background: var(--surface-3);
 }
 .card-label {
   /* keep the label clear of the absolute top-right ✕ */
@@ -633,7 +657,7 @@ body[data-mode="capsule"] #live-chip {
   font-size: 12px;
   padding: 6px 12px;
   border-radius: 99px;
-  background: rgba(255, 255, 255, 0.05);
+  background: var(--surface-2);
   cursor: pointer;
   transition: opacity var(--fade) ease;
 }
@@ -655,7 +679,7 @@ body[data-mode="capsule"] #live-chip {
   display: flex;
   align-items: center;
   gap: 8px;
-  background: rgba(255, 255, 255, 0.055);
+  background: var(--surface-2);
   border-radius: 12px;
   padding: 8px 12px;
 }
@@ -688,7 +712,7 @@ body[data-mode="capsule"] #live-chip {
   flex-shrink: 0;
   border: none;
   border-radius: 50%;
-  background: rgba(255, 255, 255, 0.09);
+  background: var(--surface-3);
   color: var(--text-translation);
   font-size: 13px;
   cursor: pointer;
@@ -772,7 +796,7 @@ body[data-mode="capsule"] #capsule-view {
   max-width: 86%;
   color: var(--text-translation);
   font-size: 11.5px;
-  background: rgba(13, 15, 18, 0.85);
+  background: var(--scrim-bg);
   border-radius: 8px;
   padding: 6px 12px;
   white-space: nowrap;
@@ -810,7 +834,7 @@ body[data-capsize="l"] #capsule-view .txt { font-size: 15.5px; }
   inset: 0;
   z-index: 6;
   /* Near-opaque so the live feed/chips never bleed through the first-run flow. */
-  background: #0d0f12;
+  background: var(--sheet-bg);
   border-radius: var(--radius-panel);
   align-items: center;
   justify-content: center;
@@ -824,7 +848,7 @@ body[data-capsize="l"] #capsule-view .txt { font-size: 15.5px; }
   max-width: 320px;
   display: flex;
   flex-direction: column;
-  background: rgba(255, 255, 255, 0.04);
+  background: var(--surface-1);
   border-radius: 14px;
   padding: 22px 20px 18px;
 }
@@ -891,7 +915,7 @@ body[data-capsize="l"] #capsule-view .txt { font-size: 15.5px; }
   padding: 8px 10px;
   border: none;
   border-radius: 8px;
-  background: rgba(255, 255, 255, 0.08);
+  background: var(--surface-3);
   color: var(--text-original);
   font-size: 13.5px;
   font-family: var(--font);
@@ -906,7 +930,7 @@ body[data-capsize="l"] #capsule-view .txt { font-size: 15.5px; }
   border: none;
   border-radius: 10px;
   padding: 9px 14px;
-  background: rgba(255, 255, 255, 0.12);
+  background: var(--surface-4);
   color: var(--text-original);
   font-size: 13px;
   font-weight: 500;
@@ -914,7 +938,7 @@ body[data-capsize="l"] #capsule-view .txt { font-size: 15.5px; }
   transition: opacity var(--fade) ease;
 }
 .ob-primary:hover:not(:disabled) {
-  background: rgba(255, 255, 255, 0.18);
+  background: var(--surface-overlay);
 }
 .ob-primary:disabled {
   opacity: 0.4;
@@ -956,7 +980,7 @@ body[data-capsize="l"] #capsule-view .txt { font-size: 15.5px; }
   flex-direction: column;
   /* Opaque (not the translucent --glass-bg): the sheet fully covers the panel
      behind it, so the home/feed never bleeds through (#96). */
-  background: #0d0f12;
+  background: var(--sheet-bg);
   border-radius: var(--radius-panel);
 }
 #settings-sheet.open {
@@ -1013,7 +1037,7 @@ body[data-capsize="l"] #capsule-view .txt { font-size: 15.5px; }
 }
 .sh-seg {
   display: flex;
-  background: rgba(255, 255, 255, 0.06);
+  background: var(--surface-2);
   border-radius: 9px;
   padding: 2px;
   margin-bottom: 12px;
@@ -1030,7 +1054,7 @@ body[data-capsize="l"] #capsule-view .txt { font-size: 15.5px; }
   transition: opacity var(--fade) ease;
 }
 .sh-seg-btn[aria-pressed="true"] {
-  background: rgba(255, 255, 255, 0.14);
+  background: var(--surface-4);
   color: var(--text-original);
 }
 .sh-gauge {
@@ -1046,7 +1070,7 @@ body[data-capsize="l"] #capsule-view .txt { font-size: 15.5px; }
   flex: 1;
   height: 5px;
   border-radius: 3px;
-  background: rgba(255, 255, 255, 0.08);
+  background: var(--surface-3);
   overflow: hidden;
 }
 .sh-gauge-fill {
@@ -1106,7 +1130,7 @@ body[data-capsize="l"] #capsule-view .txt { font-size: 15.5px; }
 .sh-num {
   border: none;
   border-radius: 7px;
-  background: rgba(255, 255, 255, 0.08);
+  background: var(--surface-3);
   color: var(--text-original);
   font-size: 12px;
   font-family: var(--font);
@@ -1124,7 +1148,7 @@ body[data-capsize="l"] #capsule-view .txt { font-size: 15.5px; }
 .sh-capsule {
   border: none;
   border-radius: 6px;
-  background: rgba(255, 255, 255, 0.06);
+  background: var(--surface-2);
   color: var(--text-meta);
   padding: 3px 8px;
   cursor: pointer;
@@ -1135,13 +1159,13 @@ body[data-capsize="l"] #capsule-view .txt { font-size: 15.5px; }
 }
 .sh-size[aria-pressed="true"],
 .sh-capsule[aria-pressed="true"] {
-  background: rgba(255, 255, 255, 0.14);
+  background: var(--surface-4);
   color: var(--text-original);
 }
 .sh-folder {
   border: none;
   border-radius: 7px;
-  background: rgba(255, 255, 255, 0.08);
+  background: var(--surface-3);
   color: var(--text-original);
   font-size: 12px;
   font-family: var(--font);
@@ -1172,7 +1196,7 @@ body[data-capsize="l"] #capsule-view .txt { font-size: 15.5px; }
 }
 .sh-hotkeys kbd {
   font-family: var(--font);
-  background: rgba(255, 255, 255, 0.08);
+  background: var(--surface-3);
   border-radius: 5px;
   padding: 2px 6px;
   font-size: 11px;
@@ -1246,7 +1270,7 @@ body[data-mode="capsule"] #review {
 }
 .review-tab[aria-selected="true"] {
   color: var(--text-original);
-  background: rgba(255, 255, 255, 0.08);
+  background: var(--surface-3);
 }
 .review-tab:hover {
   color: var(--text-original);
@@ -1273,7 +1297,7 @@ body[data-mode="capsule"] #review {
 }
 .review-close:hover {
   color: var(--text-original);
-  background: rgba(255, 255, 255, 0.1);
+  background: var(--surface-3);
 }
 .review-body {
   flex: 1;
@@ -1301,7 +1325,7 @@ body[data-mode="capsule"] #review {
 .talk-bar {
   height: 4px;
   border-radius: 2px;
-  background: rgba(255, 255, 255, 0.08);
+  background: var(--surface-3);
   overflow: hidden;
   margin-bottom: 16px;
 }
@@ -1348,7 +1372,7 @@ body[data-mode="capsule"] #review {
 }
 .review-actions button {
   border: none;
-  background: rgba(255, 255, 255, 0.06);
+  background: var(--surface-2);
   color: var(--text-translation);
   font-size: 12px;
   padding: 6px 12px;
@@ -1372,7 +1396,7 @@ body[data-mode="capsule"] #review {
 }
 .coach-toolbar button {
   border: none;
-  background: rgba(255, 255, 255, 0.06);
+  background: var(--surface-2);
   color: var(--text-translation);
   font-size: 12px;
   padding: 6px 12px;
@@ -1392,7 +1416,7 @@ body[data-mode="capsule"] #review {
   width: 100%;
   text-align: left;
   border: none;
-  background: rgba(255, 255, 255, 0.04);
+  background: var(--surface-1);
   color: var(--text-original);
   font-size: 13.5px;
   line-height: 1.4;
@@ -1402,7 +1426,7 @@ body[data-mode="capsule"] #review {
   cursor: pointer;
 }
 .coach-row:hover {
-  background: rgba(255, 255, 255, 0.08);
+  background: var(--surface-3);
 }
 .coach-row-time {
   flex-shrink: 0;
@@ -1413,7 +1437,7 @@ body[data-mode="capsule"] #review {
 }
 .coach-card {
   position: relative;
-  background: rgba(255, 255, 255, 0.05);
+  background: var(--surface-2);
   border-radius: 12px;
   padding: 10px 12px;
   margin-bottom: 10px;
@@ -1427,7 +1451,7 @@ body[data-mode="capsule"] #review {
 }
 .coach-retry {
   border: none;
-  background: rgba(255, 255, 255, 0.08);
+  background: var(--surface-3);
   color: var(--text-translation);
   font-size: 12px;
   padding: 5px 12px;
@@ -1463,8 +1487,8 @@ body[data-mode="capsule"] #review {
   line-height: 1.45;
 }
 .coach-change {
-  color: #7ad17a;
-  background: rgba(122, 209, 122, 0.14);
+  color: var(--accent-success);
+  background: var(--accent-success-bg);
   border-radius: 3px;
   padding: 0 2px;
 }
@@ -1474,7 +1498,7 @@ body[data-mode="capsule"] #review {
   align-items: center;
   justify-content: center;
   border: none;
-  background: rgba(255, 255, 255, 0.08);
+  background: var(--surface-3);
   color: var(--text-translation);
   font-size: 14px;
   width: 30px;
@@ -1500,7 +1524,7 @@ body[data-mode="capsule"] #review {
   flex-direction: column;
   /* Opaque (not the translucent --glass-bg): the dashboard fully covers the
      panel behind it, so the home/feed never bleeds through (#96). */
-  background: #0d0f12;
+  background: var(--sheet-bg);
   border-radius: var(--radius-panel);
 }
 #dashboard.open {
@@ -1555,7 +1579,7 @@ body[data-mode="capsule"] #dashboard {
 .dash-back:hover,
 .dash-close:hover {
   color: var(--text-original);
-  background: rgba(255, 255, 255, 0.1);
+  background: var(--surface-3);
 }
 .dash-back[hidden] {
   display: none;
@@ -1608,7 +1632,7 @@ body[data-mode="capsule"] #dashboard {
   margin: 4px 0 16px;
 }
 .dash-stat {
-  background: rgba(255, 255, 255, 0.04);
+  background: var(--surface-1);
   border-radius: 10px;
   padding: 10px 12px;
 }
@@ -1640,7 +1664,7 @@ body[data-mode="capsule"] #dashboard {
   width: 100%;
   text-align: left;
   border: none;
-  background: rgba(255, 255, 255, 0.04);
+  background: var(--surface-1);
   color: var(--text-original);
   padding: 10px 12px;
   border-radius: 9px;
@@ -1649,7 +1673,7 @@ body[data-mode="capsule"] #dashboard {
   transition: background var(--fade) ease;
 }
 .dash-row:hover {
-  background: rgba(255, 255, 255, 0.08);
+  background: var(--surface-3);
 }
 .dash-row-title {
   font-size: 13.5px;
@@ -1697,7 +1721,7 @@ body[data-mode="capsule"] #dashboard {
 .dash-coach-row {
   display: flex;
   gap: 10px;
-  background: rgba(255, 255, 255, 0.04);
+  background: var(--surface-1);
   color: var(--text-original);
   font-size: 13px;
   line-height: 1.4;
