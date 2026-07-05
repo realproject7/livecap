@@ -5,6 +5,9 @@
 // byte-identical amend, backward compatibility, occurrence disambiguation, and
 // CJK safety.
 
+import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
+
 import { describe, it, expect } from "vitest";
 
 import { parseSession } from "../src/parse";
@@ -218,6 +221,19 @@ describe("coaching persistence (#113) — backward compatibility", () => {
 
   it("renderCoaching returns '' for a coaching-free model (byte-identical documents)", () => {
     expect(renderCoaching(ENTRIES)).toBe("");
+  });
+});
+
+describe("coaching persistence (#113) — source hygiene", () => {
+  it("keeps the coaching source files plain text (no NUL / control bytes in keys)", () => {
+    // Regression guard (RE1): the (timestamp, occurrence) key must be text-safe —
+    // an embedded NUL once turned parse.ts into a binary, un-reviewable file.
+    for (const rel of ["../src/parse.ts", "../src/writer.ts", "../src/render.ts"]) {
+      const src = readFileSync(fileURLToPath(new URL(rel, import.meta.url)), "utf8");
+      // No control chars except tab / newline / carriage return (\t \n \r).
+      // eslint-disable-next-line no-control-regex
+      expect(src).not.toMatch(/[\u0000-\u0008\u000B\u000C\u000E-\u001F]/);
+    }
   });
 });
 

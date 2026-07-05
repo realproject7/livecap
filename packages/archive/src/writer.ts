@@ -148,8 +148,11 @@ export class SessionArchiveWriter {
     if (!this.opened) throw new Error("archive writer not opened");
     if (!this.finalized) throw new Error("archive writer not finalized (amendCoaching is post-finalize only)");
 
+    // JSON-encoded (timestamp, occurrence) key — collision-safe and plain text.
+    const key = (timestamp: string, occurrence: number): string =>
+      JSON.stringify([timestamp, occurrence]);
     const byKey = new Map<string, CoachingData>();
-    for (const u of updates) byKey.set(`${u.timestamp} ${u.occurrence}`, u.coaching);
+    for (const u of updates) byKey.set(key(u.timestamp, u.occurrence), u.coaching);
 
     // Attach to a COPY of each matched entry so the caller's original
     // CaptionEntry objects (aliased in via appendCaption) are never mutated.
@@ -158,7 +161,7 @@ export class SessionArchiveWriter {
       if (entry.speaker !== "me") return;
       const k = (occurrence.get(entry.timestamp) ?? 0) + 1;
       occurrence.set(entry.timestamp, k);
-      const data = byKey.get(`${entry.timestamp} ${k}`);
+      const data = byKey.get(key(entry.timestamp, k));
       if (data !== undefined) this.model.entries[index] = { ...entry, coaching: data };
     });
 
