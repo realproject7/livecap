@@ -794,3 +794,64 @@ level was not the cause and is unchanged.
 - The per-session picker writes the chosen language to `settings.json` before
   starting, so it doubles as the persisted default; a session already running
   keeps its language (engine/language changes apply from the next start, per #12).
+
+---
+
+# #114 Persisted coaching (save on generate + Dashboard rendering)
+
+Automated coverage (already green, run from this checkout):
+- Caption id → `(timestamp · occurrence)` amend-key mapping —
+  `pnpm exec vitest run test/coaching-keys` (duplicate clock labels, interleaved
+  "them" entries, partial batches).
+- Review tab save-failure status — `pnpm exec vitest run test/review-coaching`
+  (`a save failure (#114) still renders the rewrites, plus a one-line status`).
+- Dashboard rendering of persisted rewrites — `pnpm exec vitest run
+  test/dashboard-coaching` (coached entry → before/better/highlight/explanation;
+  coaching-free session → before-only rows).
+
+## A. Save on generate → Dashboard renders the rewrite (AC)
+
+1. Run a short session where YOU speak a few disfluent lines (e.g. "I goed to
+   the store", "so um I think we should ship"), then stop it.
+2. In the review's **Coaching** tab, coach one row (or Review all). The cards
+   render as before; no new status line appears.
+3. Open the saved session file (Review → "Open saved file" copies the path):
+   it now ends with a `## Coaching` section — one `### (HH:MM · k) — <line>`
+   block per coached utterance with **Better** / **Changes** / **Explanation**.
+   Every other section is byte-identical to before the amend.
+4. Menu bar → Dashboard → open that session: the Coaching section shows the
+   coached utterance as before (struck through) → **Better** with the changed
+   spans highlighted green + the explanation — same look as the review tab, no
+   ▶ play button. Utterances you did NOT coach stay plain before-only rows.
+5. Re-coach the SAME utterance in the review tab (click its row again): the
+   file's block for that `(HH:MM · k)` key is overwritten (last write wins),
+   not duplicated.
+
+## B. Save-failure path (AC, review-pass amendment)
+
+1. Run a session as above, stop it, but BEFORE generating coaching make the
+   saved file read-only: `chmod 444 ~/Documents/LiveCap/<the new file>.md`
+   (or whatever archive folder Settings points at).
+2. Coach a row: the rewrites still render normally on the card, and the card's
+   status line reads exactly "couldn't save coaching to the session file".
+   No retry happens (single attempt), the app does not crash.
+3. Console/host stderr: the failure log is content-free (an fs error class +
+   message only — no caption or rewrite text).
+4. `chmod 644` the file, coach another row → this one saves; the Dashboard
+   shows the second utterance coached, the first still before-only.
+
+## C. Backward compatibility
+
+1. Open the Dashboard on sessions saved before this change (no `## Coaching`
+   section): the Coaching section renders exactly as today (before-only rows),
+   and the file on disk is untouched by merely viewing it.
+2. Sessions with archive auto-save OFF: coaching in the review tab works and
+   shows NO save-status line (there is no file; nothing to save is not a
+   failure).
+
+## Known limits for the reviewer (#114)
+- Coaching persists only for utterances that made it into the archive (an
+  utterance whose archive append failed mid-session has no entry to amend and
+  is silently skipped — the card still shows its rewrite).
+- Retroactive coaching from the Dashboard stays out of scope (review-tab-only,
+  per the ticket).

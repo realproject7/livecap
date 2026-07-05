@@ -8,8 +8,9 @@
 //     to open its detail.
 //   • Detail — one session's full transcript (original + translation), the
 //     post-meeting review (summary / board + talk-ratio + Smooth Score), and
-//     coaching (the user's own "Me" utterances, the same "before" the live
-//     coaching tab lists — the saved file does not persist rewrites).
+//     coaching (the user's own "Me" utterances; entries whose rewrites were
+//     persisted by the review tab (#113/#114) render before → better with the
+//     changed spans highlighted + the explanation, others stay before-only).
 //
 // The data layer is REUSED from @livecap/archive (#98): `parseSession` parses a
 // saved Markdown file back to structure; `aggregateSessions` rolls the parsed
@@ -23,6 +24,11 @@ import { invoke } from "@tauri-apps/api/core";
 import { aggregateSessions, type DashboardStats } from "@livecap/archive/src/dashboard.ts";
 import { parseSession, type ParsedSession } from "@livecap/archive/src/parse.ts";
 import type { SessionIndexEntry } from "@livecap/archive/src/dashboard.ts";
+import type { CaptionEntry } from "@livecap/archive/src/types.ts";
+
+// The review tab's change-highlighting (#82), reused verbatim so persisted
+// rewrites look the same here as they did when generated (#114).
+import { renderBetter } from "./review";
 
 /** One saved session as handed over by the Rust `list_archived_sessions`
  *  command: a file name + the raw Markdown to parse. */
@@ -307,9 +313,9 @@ export function buildDashboard(callbacks: DashboardCallbacks): DashboardSurface 
     wrap.appendChild(sectionHeading("Board"));
     wrap.appendChild(renderBoard(session));
 
-    // Coaching: the user's own utterances (the "before"). The saved file does
-    // not persist the rewrites (#98 note) — those are generated live in the
-    // post-meeting Coaching tab; here the dashboard surfaces what was said.
+    // Coaching: the user's own utterances. Entries whose rewrite was persisted
+    // by the review tab (#113/#114) render before → better with the review
+    // tab's own visual language; the rest keep the before-only row.
     const mine = session.entries.filter((e) => e.speaker === "me");
     wrap.appendChild(sectionHeading("Coaching"));
     if (mine.length === 0) {
@@ -319,16 +325,7 @@ export function buildDashboard(callbacks: DashboardCallbacks): DashboardSurface 
       const list = document.createElement("div");
       list.className = "dash-coach-list";
       for (const e of mine) {
-        const item = document.createElement("div");
-        item.className = "dash-coach-row";
-        const time = document.createElement("span");
-        time.className = "dash-coach-time t-meta";
-        time.textContent = e.timestamp;
-        const text = document.createElement("span");
-        text.className = "dash-coach-text";
-        text.textContent = e.source;
-        item.append(time, text);
-        list.appendChild(item);
+        list.appendChild(e.coaching ? renderCoachedEntry(e, e.coaching) : renderBeforeOnlyEntry(e));
       }
       wrap.appendChild(list);
     }
@@ -397,6 +394,45 @@ export function buildDashboard(callbacks: DashboardCallbacks): DashboardSurface 
     }
     if (boardEl.childElementCount === 0) boardEl.textContent = "—";
     return boardEl;
+  }
+
+  /** A "me" utterance without a persisted rewrite: today's before-only row. */
+  function renderBeforeOnlyEntry(e: CaptionEntry): HTMLElement {
+    const item = document.createElement("div");
+    item.className = "dash-coach-row";
+    const time = document.createElement("span");
+    time.className = "dash-coach-time t-meta";
+    time.textContent = e.timestamp;
+    const text = document.createElement("span");
+    text.className = "dash-coach-text";
+    text.textContent = e.source;
+    item.append(time, text);
+    return item;
+  }
+
+  /** A "me" utterance with a persisted rewrite (#114): the review tab's
+   *  coach-item — before (struck through) → better (changes highlighted via
+   *  the shared renderBetter) → explanation. Text flows into DOM nodes only. */
+  function renderCoachedEntry(e: CaptionEntry, coaching: NonNullable<CaptionEntry["coaching"]>): HTMLElement {
+    const item = document.createElement("div");
+    item.className = "coach-item";
+    const before = document.createElement("div");
+    before.className = "coach-before t-meta";
+    before.textContent = e.source;
+    const betterRow = document.createElement("div");
+    betterRow.className = "coach-better-row";
+    const better = document.createElement("div");
+    better.className = "coach-better";
+    renderBetter(better, coaching.better, coaching.changes);
+    betterRow.appendChild(better);
+    item.append(before, betterRow);
+    if (coaching.explanation !== "") {
+      const explain = document.createElement("div");
+      explain.className = "coach-explain t-meta";
+      explain.textContent = coaching.explanation;
+      item.appendChild(explain);
+    }
+    return item;
   }
 
   function sectionHeading(text: string): HTMLElement {

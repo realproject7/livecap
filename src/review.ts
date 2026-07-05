@@ -44,10 +44,12 @@ export interface ReviewCallbacks {
   close: () => void;
 }
 
-/** A coaching result card the orchestrator fills once the host replies. */
+/** A coaching result card the orchestrator fills once the host replies.
+ *  `persistFailed` (#114): the host could not save the rewrites into the
+ *  session file — the items still render, plus a one-line status. */
 export interface CoachingCard {
   id: number;
-  fill: (items: CoachingItemWire[]) => void;
+  fill: (items: CoachingItemWire[], persistFailed?: boolean) => void;
   fail: (detail: string) => void;
 }
 
@@ -79,8 +81,9 @@ export interface ReviewSurface {
 /** Render the "Better" rewrite with each changed span highlighted (#82). The
  *  engine returns `changes[]` as {from,to}; we wrap each `to` occurrence in the
  *  better text with a highlight span. Plain-text safe: built via DOM nodes, never
- *  innerHTML, so model output is never interpreted as markup. */
-function renderBetter(parent: HTMLElement, better: string, changes: { from: string; to: string }[]): void {
+ *  innerHTML, so model output is never interpreted as markup. Exported so the
+ *  Dashboard renders persisted rewrites with the same highlighting (#114). */
+export function renderBetter(parent: HTMLElement, better: string, changes: { from: string; to: string }[]): void {
   parent.replaceChildren();
   // Collect the distinct, non-empty replacement spans to highlight.
   const needles = [...new Set(changes.map((c) => c.to).filter((t) => t !== ""))].sort(
@@ -228,8 +231,15 @@ export function buildReview(callbacks: ReviewCallbacks): ReviewSurface {
     coachCardsEl.prepend(el);
     requestAnimationFrame(() => el.classList.remove("fading-in"));
 
-    card.fill = (items) => {
-      progressEl.remove();
+    card.fill = (items, persistFailed) => {
+      // Save failure (#114): the rewrites render normally; the progress line
+      // (the tab's status-line for request errors, cf. `fail` below) stays and
+      // carries a one-line notice instead of being removed.
+      if (persistFailed === true) {
+        progressEl.textContent = "couldn't save coaching to the session file";
+      } else {
+        progressEl.remove();
+      }
       itemsEl.replaceChildren();
       for (const item of items) renderCoachItem(itemsEl, item);
       coachingCards.delete(cardId);

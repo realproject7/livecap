@@ -961,7 +961,7 @@ void listen<HostOutbound>("host://event", (event) => {
       };
       break;
     case "coaching": {
-      coachingCards.get(message.cardId)?.fill(message.items);
+      coachingCards.get(message.cardId)?.fill(message.items, message.persistFailed);
       break;
     }
     case "extrasFailed": {
