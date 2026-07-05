@@ -21,7 +21,11 @@ set -euo pipefail
 # (or line end) so `#feedcafe`-style tails don't over/under-match a color.
 COLOR_RE='#[0-9a-fA-F]{3,8}([^0-9a-fA-F]|$)|rgba?\('
 
-mapfile -t FILES < <(find src -type f -name '*.css' 2>/dev/null | sort)
+# bash-3.2 compatible (stock macOS bash has no `mapfile`, #126).
+FILES=()
+while IFS= read -r f; do
+  FILES+=("$f")
+done < <(find src -type f -name '*.css' 2>/dev/null | sort)
 if [ ${#FILES[@]} -eq 0 ]; then
   echo "color-guard: no src CSS files found (nothing to check)"
   exit 0
