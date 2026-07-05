@@ -855,3 +855,62 @@ Automated coverage (already green, run from this checkout):
   is silently skipped — the card still shows its rewrite).
 - Retroactive coaching from the Dashboard stays out of scope (review-tab-only,
   per the ticket).
+
+---
+
+# #110 Whisper model selection (small / medium / large-v3-turbo)
+
+Automated coverage (already green, run from this checkout):
+- Rust setting: serde default / camelCase round-trip / sanitize —
+  `cargo test -p livecap-app settings` (missing `sttModel` → "small"; unknown
+  or non-curated values clamp back to "small").
+- TS mirror default handling — `pnpm exec vitest run test/stt-model`.
+- Pipeline plumbing + floor families — `cargo test -p livecap-core with_model`
+  and `cargo test -p livecap-core model_family` (medium and large-v3-turbo map
+  to their #109 floor families; turbo shares large-v3).
+- Repo-URL override knob — `cargo test -p livecap-core base_url_override`.
+
+## A. Switch model → next session transcribes with it (AC)
+
+1. Settings → **Transcription**: pick **Medium · ~1.5 GB** (three-option
+   segmented control below Language; Small carries the "default" copy,
+   Large v3 Turbo the "best accuracy (provisional)" copy).
+2. Start a session: the status line shows
+   `downloading the "medium" caption model N%…` counting up (first start
+   after a switch only; ~1.5 GB, so give it a minute).
+3. The session goes Live and transcribes. `ggml-medium.bin` plus its
+   `.sha256` marker now sit in
+   `~/Library/Application Support/app.livecap.desktop/models/` next to
+   `ggml-small.bin`, and `ui-heartbeat.json` shows the live session.
+4. Stop; start again: no download status this time (model cached).
+5. Repeat with **Large v3 Turbo · ~1.6 GB** if bandwidth allows.
+
+## B. Download failure → fallback, never a dead session (AC)
+
+1. In Settings pick a model that is NOT yet downloaded (e.g. Large v3 Turbo).
+2. Relaunch with downloads pointed at an unreachable host:
+   `LIVECAP_MODEL_BASE_URL=http://127.0.0.1:1 pnpm tauri dev`
+3. Start a session: a status appears — `couldn't download the
+   "large-v3-turbo" caption model — using "small" for this session` — and the
+   session still goes LIVE, captioning with small. The note survives into the
+   Live status detail (joined with any capture note).
+4. stderr shows one content-free warning (model name + network error only —
+   never caption content).
+5. Relaunch WITHOUT the env var: the next start downloads the selected model
+   normally (the fallback never overwrites the persisted pick).
+
+## C. Persistence + old settings files (AC)
+
+1. The pick survives an app restart: Settings reopens with the same button
+   pressed and `settings.json` contains `"sttModel": "medium"`.
+2. Hand-delete the `sttModel` key from `settings.json` → relaunch: Settings
+   shows Small (the serde default), no crash, next session runs small.
+
+## Known limits for the reviewer (#110)
+- The fallback target is the DEFAULT model (small), not the literal previous
+  pick — the ticket allows "previous/default" and settings store only the
+  current pick.
+- No cancel button on the download; quitting mid-download leaves a
+  `.bin.partial` file that is simply re-downloaded next time.
+- "Best accuracy (provisional)" copy stands until the calibration ticket
+  (#111) produces measured per-model floors.

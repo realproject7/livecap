@@ -11,6 +11,8 @@ import {
   gaugeAmountLabel,
   nextResetLabel,
   POOL_PRESETS,
+  sanitizedSttModel,
+  STT_MODELS,
   type AppSettings,
   type CaptionSize,
   type CapsuleContent,
@@ -53,6 +55,10 @@ export function createSettingsSheet(options: SettingsSheetOptions): SettingsShee
   const presetChoices =
     POOL_PRESETS.map((p) => `<option value="${p.id}">${p.label}</option>`).join("") +
     '<option value="custom">Custom…</option>';
+  // #110: whisper model picker — same segmented control as the engine picker.
+  const sttChoices = STT_MODELS.map(
+    (m) => `<button class="sh-seg-btn" data-stt="${m.value}">${m.label} · ${m.size}</button>`,
+  ).join("");
 
   host.innerHTML = `
     <div class="sh-head">
@@ -93,6 +99,14 @@ export function createSettingsSheet(options: SettingsSheetOptions): SettingsShee
       <div class="sh-row">
         <span class="sh-row-label">Translate into</span>
         <select class="sh-select" id="sh-lang" aria-label="Target language">${languageChoices}</select>
+      </div>
+
+      <div class="sh-section">Transcription</div>
+      <div class="sh-seg" role="radiogroup" aria-label="Transcription model">${sttChoices}</div>
+      <div class="sh-channels-note t-meta">
+        Small is the default; Large v3 Turbo has the best accuracy (provisional).
+        Applies at the next session start — first use downloads the model, and a
+        failed download falls back to Small.
       </div>
 
       <div class="sh-section">Captions</div>
@@ -143,7 +157,8 @@ export function createSettingsSheet(options: SettingsSheetOptions): SettingsShee
     </div>
   `;
 
-  const segButtons = Array.from(host.querySelectorAll<HTMLButtonElement>(".sh-seg-btn"));
+  const segButtons = Array.from(host.querySelectorAll<HTMLButtonElement>(".sh-seg-btn[data-engine]"));
+  const sttButtons = Array.from(host.querySelectorAll<HTMLButtonElement>(".sh-seg-btn[data-stt]"));
   const sizeButtons = Array.from(host.querySelectorAll<HTMLButtonElement>(".sh-size"));
   const capsuleButtons = Array.from(host.querySelectorAll<HTMLButtonElement>(".sh-capsule"));
   const gaugeFill = el<HTMLDivElement>(host, "#sh-gauge-fill");
@@ -185,6 +200,11 @@ export function createSettingsSheet(options: SettingsSheetOptions): SettingsShee
     // #94: spoken/source language ("auto" or a curated code).
     if (SOURCE_LANGUAGES.some((l) => l.code === s.sourceLanguage)) {
       sourceSelect.value = s.sourceLanguage;
+    }
+    // #110: whisper model pick; absent/unknown (old settings.json) shows Small.
+    const sttModel = sanitizedSttModel(s.sttModel);
+    for (const btn of sttButtons) {
+      btn.setAttribute("aria-pressed", String(btn.dataset.stt === sttModel));
     }
     for (const btn of sizeButtons) {
       btn.setAttribute("aria-pressed", String(btn.dataset.size === s.captionSize));
@@ -252,6 +272,10 @@ export function createSettingsSheet(options: SettingsSheetOptions): SettingsShee
   langSelect.addEventListener("change", () => save({ targetLanguage: langSelect.value }));
   // #94: spoken/source language; applies at the next session start.
   sourceSelect.addEventListener("change", () => save({ sourceLanguage: sourceSelect.value }));
+  // #110: whisper model; downloads (with progress) at the next session start.
+  for (const btn of sttButtons) {
+    btn.addEventListener("click", () => save({ sttModel: btn.dataset.stt as string }));
+  }
   for (const btn of sizeButtons) {
     btn.addEventListener("click", () => {
       const size = btn.dataset.size as CaptionSize;

@@ -13,6 +13,9 @@ export interface AppSettings {
   /** Spoken/source language for transcription (#94): a BCP-47 / ISO-639-1 tag
    *  forces whisper to that language; "auto" keeps per-utterance detection. */
   sourceLanguage: string;
+  /** Whisper STT model (#110): "small" | "medium" | "large-v3-turbo".
+   *  Downloaded on first use at session start; applies to the next session. */
+  sttModel: string;
   poolUsd: number;
   resetDay: number;
   autoSwitch: boolean;
@@ -26,6 +29,20 @@ export interface AppSettings {
    *  start. The Rust side sanitizes so at least one stays on. */
   captureSystem: boolean;
   captureMic: boolean;
+}
+
+/** Curated whisper model picks (#110); values mirror the Rust sanitizer's
+ *  STT_MODELS. Size hints show in the Settings sheet copy. */
+export const STT_MODELS: { value: string; label: string; size: string }[] = [
+  { value: "small", label: "Small", size: "~466 MB" },
+  { value: "medium", label: "Medium", size: "~1.5 GB" },
+  { value: "large-v3-turbo", label: "Large v3 Turbo", size: "~1.6 GB" },
+];
+
+/** The persisted model pick, defaulting to "small" when the field is absent
+ *  (settings.json files predating #110) or holds an unknown value. */
+export function sanitizedSttModel(value: string | null | undefined): string {
+  return STT_MODELS.some((m) => m.value === value) ? (value as string) : "small";
 }
 
 /** Pool presets (PROPOSAL §6); mirrors the engine's POOL_PRESETS. */

@@ -27,6 +27,9 @@ fn default_language() -> String {
 fn default_source_language() -> String {
     "auto".into()
 }
+fn default_stt_model() -> String {
+    "small".into()
+}
 fn default_pool() -> f64 {
     20.0
 }
@@ -44,6 +47,10 @@ fn default_capsule_content() -> String {
     "translation".into()
 }
 
+/// Curated whisper model picks the Settings sheet exposes (#110) — a subset of
+/// `livecap_core::model::MODEL_NAMES`. Anything else sanitizes to the default.
+const STT_MODELS: &[&str] = &["small", "medium", "large-v3-turbo"];
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
 pub struct AppSettings {
@@ -58,6 +65,11 @@ pub struct AppSettings {
     /// forces whisper to that language; "auto" keeps per-utterance detection.
     #[serde(default = "default_source_language")]
     pub source_language: String,
+    /// Whisper STT model for transcription (#110): "small" | "medium" |
+    /// "large-v3-turbo" (curated subset of MODEL_NAMES; downloaded on first use
+    /// at session start).
+    #[serde(default = "default_stt_model")]
+    pub stt_model: String,
     /// Agent SDK monthly pool in USD (PROPOSAL §6; presets 20/100/200).
     pub pool_usd: f64,
     /// Billing reset day of month, 1–28.
@@ -87,6 +99,7 @@ impl Default for AppSettings {
             engine_pref: default_engine(),
             target_language: default_language(),
             source_language: default_source_language(),
+            stt_model: default_stt_model(),
             pool_usd: default_pool(),
             reset_day: default_reset_day(),
             auto_switch: default_true(),
@@ -113,6 +126,14 @@ impl AppSettings {
         // #94: source language is a lowercased non-empty tag, else "auto".
         let source = self.source_language.trim().to_lowercase();
         self.source_language = if source.is_empty() { default_source_language() } else { source };
+        // #110: only the three curated model picks are valid; a hand-edited
+        // value (or a future rename) clamps back to the default.
+        let model = self.stt_model.trim();
+        self.stt_model = if STT_MODELS.contains(&model) {
+            model.to_string()
+        } else {
+            default_stt_model()
+        };
         if !self.pool_usd.is_finite() || self.pool_usd <= 0.0 {
             self.pool_usd = default_pool();
         }
@@ -233,6 +254,7 @@ mod tests {
             engine_pref: "local".into(),
             target_language: "ja".into(),
             source_language: "en".into(),
+            stt_model: "medium".into(),
             pool_usd: 100.0,
             reset_day: 15,
             auto_switch: false,
@@ -267,6 +289,7 @@ mod tests {
         assert_eq!(d.engine_pref, "cli");
         assert_eq!(d.target_language, "ko"); // KO default (§8.6)
         assert_eq!(d.source_language, "auto"); // #94: per-utterance auto-detect
+        assert_eq!(d.stt_model, "small"); // #110: DEFAULT_MODEL stays "small"
         assert_eq!(d.pool_usd, 20.0); // Pro preset
         assert_eq!(d.reset_day, 1);
         assert!(d.auto_switch);
@@ -284,6 +307,7 @@ mod tests {
             engine_pref: "cloud".into(),
             target_language: "  PT-BR ".into(),
             source_language: "  EN ".into(),
+            stt_model: "large-v9".into(),
             pool_usd: f64::NAN,
             reset_day: 31,
             caption_size: "xxl".into(),
@@ -294,6 +318,7 @@ mod tests {
         assert_eq!(clean.engine_pref, "cli");
         assert_eq!(clean.target_language, "pt-br");
         assert_eq!(clean.source_language, "en");
+        assert_eq!(clean.stt_model, "small"); // #110: unknown model → default
         assert_eq!(clean.pool_usd, 20.0);
         assert_eq!(clean.reset_day, 28);
         assert_eq!(clean.caption_size, "m");
@@ -326,8 +351,35 @@ mod tests {
         assert!(parsed.onboarding_complete);
         assert_eq!(parsed.target_language, "en");
         assert_eq!(parsed.source_language, "auto"); // #94: missing → default
+        assert_eq!(parsed.stt_model, "small"); // #110: missing → default
         assert_eq!(parsed.engine_pref, "cli");
         assert_eq!(parsed.pool_usd, 20.0);
+    }
+
+    #[test]
+    fn stt_model_round_trips_camel_case_and_sanitizes() {
+        // #110: the wire key is camelCase like every other field.
+        let parsed: AppSettings =
+            serde_json::from_str(r#"{ "sttModel": "large-v3-turbo" }"#).unwrap();
+        assert_eq!(parsed.stt_model, "large-v3-turbo");
+        let json = serde_json::to_string(&parsed).unwrap();
+        assert!(json.contains(r#""sttModel":"large-v3-turbo""#));
+
+        // Every curated pick survives sanitize; anything else clamps to small.
+        for model in ["small", "medium", "large-v3-turbo"] {
+            let clean = AppSettings {
+                stt_model: model.into(),
+                ..AppSettings::default()
+            }
+            .sanitized();
+            assert_eq!(clean.stt_model, model);
+        }
+        let clean = AppSettings {
+            stt_model: "tiny".into(), // valid MODEL_NAME but not a curated pick
+            ..AppSettings::default()
+        }
+        .sanitized();
+        assert_eq!(clean.stt_model, "small");
     }
 
     #[test]

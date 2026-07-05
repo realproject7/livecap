@@ -69,6 +69,14 @@ impl PipelineConfig {
         }
     }
 
+    /// Set the whisper model by name (#110); see [`crate::model::MODEL_NAMES`].
+    /// The model is downloaded (SHA-256 verified) on first use when the
+    /// pipeline builds.
+    pub fn with_model(mut self, model: &str) -> Self {
+        self.model = model.to_string();
+        self
+    }
+
     /// Set the spoken/source transcription language (#94). A BCP-47 / ISO-639-1
     /// code forces whisper to that language; `"auto"` (or empty) keeps the
     /// current per-utterance auto-detection (`language = None`). Whisper only
@@ -584,6 +592,18 @@ mod tests {
         assert_eq!(PipelineConfig::new(&dir).with_source_language("auto").language, None);
         assert_eq!(PipelineConfig::new(&dir).with_source_language("").language, None);
         assert_eq!(PipelineConfig::new(&dir).with_source_language("  AUTO ").language, None);
+    }
+
+    #[test]
+    fn with_model_overrides_the_default() {
+        // #110: the Settings pick lands in PipelineConfig.model; the default
+        // stays DEFAULT_MODEL for callers that never set one.
+        let dir = std::path::PathBuf::from("/tmp/livecap-models");
+        assert_eq!(PipelineConfig::new(&dir).model, crate::model::DEFAULT_MODEL);
+        assert_eq!(
+            PipelineConfig::new(&dir).with_model("large-v3-turbo").model,
+            "large-v3-turbo"
+        );
     }
 
     #[test]

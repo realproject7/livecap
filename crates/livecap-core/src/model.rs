@@ -24,6 +24,26 @@ pub const DEFAULT_MODEL: &str = "small";
 /// Hugging Face repo hosting the official ggerganov/whisper.cpp models.
 const HF_REPO: &str = "https://huggingface.co/ggerganov/whisper.cpp";
 
+/// Env var overriding the model repo base URL (#110): a dev-run knob for
+/// exercising the download-failure fallback against an unreachable host (the
+/// AC's "point at an unreachable URL" verification). Unset/empty keeps the
+/// official repo. A tuning knob, not caption content.
+const MODEL_BASE_URL_ENV: &str = "LIVECAP_MODEL_BASE_URL";
+
+/// The effective model repo base URL (env override or the official repo).
+fn repo_base_url() -> String {
+    base_url_or_default(std::env::var(MODEL_BASE_URL_ENV).ok())
+}
+
+/// Pure core of [`repo_base_url`]: `None`/blank → the official repo. Trailing
+/// slashes are trimmed so the joined download URLs stay well-formed.
+fn base_url_or_default(overridden: Option<String>) -> String {
+    match overridden {
+        Some(url) if !url.trim().is_empty() => url.trim().trim_end_matches('/').to_string(),
+        _ => HF_REPO.to_string(),
+    }
+}
+
 /// Supported model names (same set Meetily downloads).
 pub const MODEL_NAMES: &[&str] = &[
     "tiny",
@@ -73,6 +93,17 @@ impl ModelManager {
     /// Ensure `model_name` exists locally with a verified SHA-256, downloading
     /// it on first use. Returns the model file path.
     pub async fn ensure_model(&self, model_name: &str) -> Result<PathBuf> {
+        self.ensure_model_with_progress(model_name, |_| {}).await
+    }
+
+    /// Like [`Self::ensure_model`], reporting whole-percent download progress
+    /// (1–100) to `on_progress` while the model streams down (#110). A model
+    /// that is already present reports nothing.
+    pub async fn ensure_model_with_progress(
+        &self,
+        model_name: &str,
+        on_progress: impl FnMut(u64),
+    ) -> Result<PathBuf> {
         let filename = model_filename(model_name)?;
         let path = self.models_dir.join(&filename);
         let marker = self.models_dir.join(format!("{filename}.sha256"));
@@ -107,7 +138,7 @@ impl ModelManager {
             fs::remove_file(&path).await?;
         }
 
-        self.download_and_verify(model_name, &filename, &path, &marker)
+        self.download_and_verify(model_name, &filename, &path, &marker, on_progress)
             .await?;
         Ok(path)
     }
@@ -118,13 +149,14 @@ impl ModelManager {
         filename: &str,
         path: &Path,
         marker: &Path,
+        mut on_progress: impl FnMut(u64),
     ) -> Result<()> {
         fs::create_dir_all(&self.models_dir).await.with_context(|| {
             format!("Failed to create models directory {}", self.models_dir.display())
         })?;
 
         let expected = fetch_expected_sha256(filename).await?;
-        let url = format!("{HF_REPO}/resolve/main/{filename}");
+        let url = format!("{}/resolve/main/{filename}", repo_base_url());
         log::info!(
             "Downloading whisper model '{}' ({:.1} MB) from {}",
             model_name,
@@ -148,6 +180,7 @@ impl ModelManager {
         let mut file = fs::File::create(&partial).await?;
         let mut hasher = Sha256::new();
         let mut downloaded: u64 = 0;
+        let mut last_reported_pct: u64 = 0;
         let mut last_logged_pct: u64 = 0;
 
         let mut stream = response.bytes_stream();
@@ -158,6 +191,11 @@ impl ModelManager {
             downloaded += chunk.len() as u64;
 
             if let Some(pct) = (downloaded * 100).checked_div(expected.size) {
+                // #110: whole-percent callback for UI progress; log every 10%.
+                if pct > last_reported_pct {
+                    last_reported_pct = pct;
+                    on_progress(pct.min(100));
+                }
                 if pct >= last_logged_pct + 10 {
                     log::info!(
                         "Model download progress: {}% ({:.1} MB / {:.1} MB)",
@@ -205,7 +243,7 @@ struct ExpectedDigest {
 /// `resolve/` serves the actual blob — so this is an authoritative,
 /// non-hardcoded source for the expected digest.
 async fn fetch_expected_sha256(filename: &str) -> Result<ExpectedDigest> {
-    let url = format!("{HF_REPO}/raw/main/{filename}");
+    let url = format!("{}/raw/main/{filename}", repo_base_url());
     let body = reqwest::get(&url)
         .await
         .with_context(|| format!("Failed to fetch LFS pointer {url}"))?
@@ -314,5 +352,18 @@ mod tests {
     #[test]
     fn hex_encodes_lowercase() {
         assert_eq!(hex::encode([0u8, 255, 16]), "00ff10");
+    }
+
+    #[test]
+    fn base_url_override_defaults_to_the_official_repo() {
+        // #110: unset/blank keeps the official repo; a dev override is used
+        // verbatim (minus trailing slashes) so the fallback path is testable.
+        assert_eq!(base_url_or_default(None), HF_REPO);
+        assert_eq!(base_url_or_default(Some("".into())), HF_REPO);
+        assert_eq!(base_url_or_default(Some("   ".into())), HF_REPO);
+        assert_eq!(
+            base_url_or_default(Some("http://127.0.0.1:1/".into())),
+            "http://127.0.0.1:1"
+        );
     }
 }
