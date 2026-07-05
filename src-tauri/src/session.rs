@@ -17,7 +17,8 @@ use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use livecap_core::{CaptionPipeline, PipelineConfig};
+use livecap_core::model::DEFAULT_MODEL;
+use livecap_core::{CaptionPipeline, ModelManager, PipelineConfig};
 use serde::Serialize;
 use tauri::{AppHandle, Emitter, Manager, State};
 
@@ -457,6 +458,57 @@ pub(crate) fn archive_dir(app: &AppHandle, settings: &crate::settings::AppSettin
         .unwrap_or_else(|_| app_data_dir.join("LiveCap"))
 }
 
+/// Ensure the Settings-selected whisper model is on disk BEFORE the pipeline
+/// builds (#110), streaming download progress into `session://status` the way
+/// the local tier reports its model download. Returns the model the session
+/// will actually run plus an optional user-facing note:
+/// - selected model present/downloaded → `(selected, None)`;
+/// - its download failed and a fallback exists → `(DEFAULT_MODEL, note)` so a
+///   bad network never yields a dead session;
+/// - the default itself failed → `(selected, None)` and the pipeline build
+///   surfaces the real error through the existing start-failure path.
+async fn ensure_stt_model(
+    app: &AppHandle,
+    models_dir: &Path,
+    selected: &str,
+) -> (String, Option<String>) {
+    let manager = ModelManager::new(models_dir);
+    let ensure = |name: String| {
+        let progress_app = app.clone();
+        let manager = &manager;
+        async move {
+            let label = name.clone();
+            manager
+                .ensure_model_with_progress(&name, move |pct| {
+                    emit_status(
+                        &progress_app,
+                        Phase::Starting,
+                        Some(format!("downloading the \"{label}\" caption model {pct}%…")),
+                    );
+                })
+                .await
+        }
+    };
+    match ensure(selected.to_string()).await {
+        Ok(_) => (selected.to_string(), None),
+        Err(error) if selected != DEFAULT_MODEL => {
+            // Error text is model/network detail, never caption content (#23).
+            eprintln!(
+                "livecap: caption model '{selected}' unavailable ({error}) — falling back to '{DEFAULT_MODEL}'"
+            );
+            let note = format!(
+                "couldn't download the \"{selected}\" caption model — using \"{DEFAULT_MODEL}\" for this session"
+            );
+            emit_status(app, Phase::Starting, Some(note.clone()));
+            // Best effort: if the fallback is missing AND unreachable too, the
+            // pipeline build below reports that terminal error.
+            let _ = ensure(DEFAULT_MODEL.to_string()).await;
+            (DEFAULT_MODEL.to_string(), Some(note))
+        }
+        Err(_) => (selected.to_string(), None),
+    }
+}
+
 async fn start_inner(app: &AppHandle) -> Result<Option<String>, String> {
     let app_data_dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
     let models_dir = app_data_dir.join("models");
@@ -500,9 +552,16 @@ async fn start_inner(app: &AppHandle) -> Result<Option<String>, String> {
         let _ = host.child.kill();
     };
 
+    // #110: the Settings model pick drives transcription. Ensure it is on disk
+    // first (with visible download progress); a failed download falls back to
+    // the default model with a note instead of a dead session.
+    let (stt_model, stt_note) = ensure_stt_model(app, &models_dir, &settings.stt_model).await;
+
     // #94: force whisper to the chosen spoken language ("auto" → per-utterance
     // detection), improving STT accuracy and eliminating auto-misdetection (#93).
-    let config = PipelineConfig::new(models_dir).with_source_language(&settings.source_language);
+    let config = PipelineConfig::new(models_dir)
+        .with_model(&stt_model)
+        .with_source_language(&settings.source_language);
     let (mut pipeline, mut events_rx) = match CaptionPipeline::new(config).await {
         Ok(built) => built,
         Err(error) => {
@@ -545,7 +604,12 @@ async fn start_inner(app: &AppHandle) -> Result<Option<String>, String> {
     inner.pipeline = Some(pipeline);
     inner.host = Some(host);
     inner.events_task = Some(events_task);
-    Ok(capture_note)
+    // #110: a model fallback note must survive into the durable Live status,
+    // not just flash while Starting — join it with any capture note.
+    Ok(match (stt_note, capture_note) {
+        (Some(model), Some(capture)) => Some(format!("{model}; {capture}")),
+        (model, capture) => model.or(capture),
+    })
 }
 
 pub async fn stop(app: AppHandle) -> Result<(), String> {

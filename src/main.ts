@@ -195,6 +195,7 @@ let appSettings: AppSettings = {
   engine: "cli",
   targetLanguage: "ko",
   sourceLanguage: "auto", // #94: per-utterance auto-detect until the user picks
+  sttModel: "small", // #110: default whisper model until the user picks
   poolUsd: 20,
   resetDay: 1,
   autoSwitch: true,
