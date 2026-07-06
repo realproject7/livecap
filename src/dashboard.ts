@@ -168,15 +168,23 @@ function snippetAround(text: string, at: number, len: number): string {
  *  (no raw color literals; #116/#126 color-guard). */
 function styleSearchInput(el: HTMLInputElement): void {
   el.style.width = "100%";
-  el.style.boxSizing = "border-box";
+  el.style.boxSizing = "border-box"; // border stays inside → no layout shift
   el.style.padding = "8px 12px";
-  el.style.border = "none";
-  el.style.outline = "none";
+  // DESIGN-GUIDE §Inputs: a clear default border, accent border on focus.
+  el.style.border = "1px solid var(--hairline)";
+  el.style.outline = "none"; // replaced by the accent border below (not stripped)
   el.style.borderRadius = "9px";
   el.style.background = "var(--surface-2)";
   el.style.color = "var(--text-original)";
   el.style.fontFamily = "var(--font)";
   el.style.fontSize = "13px";
+  el.style.transition = "border-color var(--fade) ease";
+  el.addEventListener("focus", () => {
+    el.style.borderColor = "var(--accent-live)";
+  });
+  el.addEventListener("blur", () => {
+    el.style.borderColor = "var(--hairline)";
+  });
 }
 
 /** A "date · title · duration · languages" subtitle for a history row. */
