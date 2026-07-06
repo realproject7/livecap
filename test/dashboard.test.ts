@@ -8,8 +8,48 @@ import {
   buildDashboardModel,
   formatCost,
   formatDuration,
+  sessionMatches,
   type ArchivedSession,
 } from "../src/dashboard";
+import type { ParsedSession } from "@livecap/archive/src/parse.ts";
+
+/** Build a minimal ParsedSession for the search tests, overriding only the
+ *  fields under test. */
+function makeSession(fields: {
+  title?: string;
+  summary?: string[];
+  decisions?: string[];
+  actionItems?: string[];
+  openQuestions?: string[];
+  entries?: { source: string; target: string }[];
+}): ParsedSession {
+  return {
+    meta: {
+      title: fields.title ?? "",
+      headerDate: "",
+      startClock: "",
+      endClock: "",
+      durationMin: 0,
+      sourceLang: "",
+      targetLang: "",
+      engineName: "",
+      costUsd: 0,
+    },
+    summary: fields.summary ?? [],
+    board: {
+      decisions: fields.decisions ?? [],
+      actionItems: fields.actionItems ?? [],
+      openQuestions: fields.openQuestions ?? [],
+    },
+    entries: (fields.entries ?? []).map((e) => ({
+      speaker: "me" as const,
+      timestamp: "",
+      source: e.source,
+      target: e.target,
+    })),
+    isRecording: false,
+  };
+}
 
 const SESSION_A = `# Quarterly review
 > 2026-06-10 09:00–09:30 (30 min) · EN → KO · engine: Claude CLI ($0.10)
@@ -119,5 +159,90 @@ describe("buildDashboardModel", () => {
     expect(session?.entries[0]?.source).toBe("Hello there.");
     expect(session?.entries[0]?.target).toBe("안녕하세요.");
     expect(session?.board.decisions).toEqual(["ship on Friday"]);
+  });
+});
+
+describe("sessionMatches (#131)", () => {
+  it("matches on the session title", () => {
+    const s = makeSession({ title: "Quarterly Review" });
+    const r = sessionMatches(s, "quarterly");
+    expect(r.matched).toBe(true);
+    expect(r.snippet).toBe("Quarterly Review");
+  });
+
+  it("matches on a summary line", () => {
+    const s = makeSession({ summary: ["Revenue grew 20%", "Hiring paused"] });
+    const r = sessionMatches(s, "hiring");
+    expect(r.matched).toBe(true);
+    expect(r.snippet).toBe("Hiring paused");
+  });
+
+  it("matches on any board item (decisions / action items / open questions)", () => {
+    expect(sessionMatches(makeSession({ decisions: ["Ship on Friday"] }), "friday").matched).toBe(true);
+    expect(sessionMatches(makeSession({ actionItems: ["Mike: send the deck"] }), "deck").matched).toBe(true);
+    const q = sessionMatches(makeSession({ openQuestions: ["Which MAU definition?"] }), "mau");
+    expect(q.matched).toBe(true);
+    expect(q.snippet).toBe("Which MAU definition?");
+  });
+
+  it("matches on a transcript entry source", () => {
+    const s = makeSession({ entries: [{ source: "Let's discuss the budget", target: "예산을 논의합시다" }] });
+    const r = sessionMatches(s, "budget");
+    expect(r.matched).toBe(true);
+    expect(r.snippet).toBe("Let's discuss the budget");
+  });
+
+  it("matches on a transcript entry target (translation)", () => {
+    const s = makeSession({ entries: [{ source: "Let's discuss the budget", target: "예산을 논의합시다" }] });
+    const r = sessionMatches(s, "예산");
+    expect(r.matched).toBe(true);
+    expect(r.snippet).toBe("예산을 논의합시다");
+  });
+
+  it("returns no match when the query is absent from every field", () => {
+    const s = makeSession({ title: "Standup", summary: ["Blockers cleared"] });
+    expect(sessionMatches(s, "budget")).toEqual({ matched: false, snippet: "" });
+  });
+
+  it("is case-insensitive", () => {
+    const s = makeSession({ title: "Quarterly Review" });
+    expect(sessionMatches(s, "QUARTERLY").matched).toBe(true);
+    expect(sessionMatches(s, "rEvIeW").matched).toBe(true);
+  });
+
+  it("treats an empty or whitespace-only query as no match (caller shows the full list)", () => {
+    const s = makeSession({ title: "Standup" });
+    expect(sessionMatches(s, "")).toEqual({ matched: false, snippet: "" });
+    expect(sessionMatches(s, "   ")).toEqual({ matched: false, snippet: "" });
+  });
+
+  it("returns the first field that matched, in title→summary→board→transcript order", () => {
+    const s = makeSession({
+      title: "Weekly sync",
+      summary: ["We talked about the sync cadence"],
+      entries: [{ source: "sync again next week", target: "" }],
+    });
+    // "sync" is in all three; the title wins.
+    expect(sessionMatches(s, "sync").snippet).toBe("Weekly sync");
+  });
+
+  it("truncates a long snippet to ~80 chars around the match with ellipses", () => {
+    const long =
+      "a".repeat(120) + " BUDGET plan for the whole fiscal year " + "b".repeat(120);
+    const s = makeSession({ summary: [long] });
+    const r = sessionMatches(s, "budget");
+    expect(r.matched).toBe(true);
+    // Windowed (not the whole 279-char line), the match is visible, and both
+    // ends are elided.
+    expect(r.snippet.length).toBeLessThanOrEqual(82); // 80 + up to 2 ellipses
+    expect(r.snippet.toLowerCase()).toContain("budget");
+    expect(r.snippet.startsWith("…")).toBe(true);
+    expect(r.snippet.endsWith("…")).toBe(true);
+  });
+
+  it("returns a short field whole (no ellipses when under the cap)", () => {
+    const s = makeSession({ summary: ["Short line with budget"] });
+    const r = sessionMatches(s, "budget");
+    expect(r.snippet).toBe("Short line with budget");
   });
 });

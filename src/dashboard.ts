@@ -102,6 +102,83 @@ function formatRatio(fraction: number | null): string {
   return `${String(Math.round(fraction * 100))}%`;
 }
 
+/** Result of {@link sessionMatches}: whether a session matches a search query,
+ *  and a short snippet of the first field that matched (empty when no match). */
+export interface SessionMatch {
+  matched: boolean;
+  snippet: string;
+}
+
+/** Max snippet length (~80 chars, counted in code points) shown under a row. */
+const SNIPPET_MAX = 80;
+
+/**
+ * Whether `session` matches `query` — a case-insensitive substring of the
+ * session title, any summary line, any board item (decisions / action items /
+ * open questions), or any transcript entry's source/target (#131). Returns the
+ * matched flag plus a snippet of the FIRST field that matched (in that field
+ * order) so the UI can show WHY it matched.
+ *
+ * Pure and DOM-free — searches only the already-parsed, in-memory session, never
+ * touches disk, and never logs (SECURITY.md / EPIC #1). An empty/whitespace-only
+ * query is not a match here; the caller restores the full list for an empty box.
+ */
+export function sessionMatches(session: ParsedSession, query: string): SessionMatch {
+  const q = query.trim().toLowerCase();
+  if (q === "") return { matched: false, snippet: "" };
+
+  const fields: string[] = [
+    session.meta.title,
+    ...session.summary,
+    ...session.board.decisions,
+    ...session.board.actionItems,
+    ...session.board.openQuestions,
+  ];
+  for (const entry of session.entries) {
+    fields.push(entry.source, entry.target);
+  }
+
+  for (const field of fields) {
+    const at = field.toLowerCase().indexOf(q);
+    if (at !== -1) return { matched: true, snippet: snippetAround(field, at, q.length) };
+  }
+  return { matched: false, snippet: "" };
+}
+
+/** A ~{@link SNIPPET_MAX}-char window of `text` centered on the match at
+ *  `[at, at+len)`, with leading/trailing ellipses when truncated. Code-point
+ *  aware, so a multibyte glyph (Hangul/emoji) is never split. */
+function snippetAround(text: string, at: number, len: number): string {
+  const cps = [...text];
+  if (cps.length <= SNIPPET_MAX) return text;
+  // `at` is a UTF-16 index; convert it to a code-point index.
+  const cpAt = [...text.slice(0, at)].length;
+  const context = Math.max(0, Math.floor((SNIPPET_MAX - len) / 2));
+  let start = Math.max(0, cpAt - context);
+  const end = Math.min(cps.length, start + SNIPPET_MAX);
+  start = Math.max(0, end - SNIPPET_MAX); // pull the window back if it hit the end
+  let out = cps.slice(start, end).join("");
+  if (start > 0) out = `…${out}`;
+  if (end < cps.length) out = `${out}…`;
+  return out;
+}
+
+/** Tokenized inline styling for the History search box — the file already
+ *  inline-styles nodes (e.g. the talk bar), and this uses design tokens only
+ *  (no raw color literals; #116/#126 color-guard). */
+function styleSearchInput(el: HTMLInputElement): void {
+  el.style.width = "100%";
+  el.style.boxSizing = "border-box";
+  el.style.padding = "8px 12px";
+  el.style.border = "none";
+  el.style.outline = "none";
+  el.style.borderRadius = "9px";
+  el.style.background = "var(--surface-2)";
+  el.style.color = "var(--text-original)";
+  el.style.fontFamily = "var(--font)";
+  el.style.fontSize = "13px";
+}
+
 /** A "date · title · duration · languages" subtitle for a history row. */
 function rowMeta(entry: SessionIndexEntry): string {
   const parts: string[] = [];
@@ -241,27 +318,100 @@ export function buildDashboard(callbacks: DashboardCallbacks): DashboardSurface 
     h.textContent = "History";
     wrap.appendChild(h);
 
-    // `m.sessions` is newest-first; the chronological index is oldest-first, so
-    // walk it in reverse to pair each row with its session.
+    // Pair each session with its index entry ONCE. `m.sessions` is newest-first;
+    // the chronological index is oldest-first, so read it in reverse.
     const index = m.stats.index;
+    const pairs: { session: ParsedSession; entry: SessionIndexEntry | undefined }[] = [];
     for (let i = 0; i < m.sessions.length; i++) {
       const session = m.sessions[i];
       if (session === undefined) continue;
-      const entry = index[index.length - 1 - i];
-      const row = document.createElement("button");
-      row.className = "dash-row";
-      row.type = "button";
-      const titleSpan = document.createElement("span");
-      titleSpan.className = "dash-row-title";
-      titleSpan.textContent = session.meta.title !== "" ? session.meta.title : "Session";
-      const metaSpan = document.createElement("span");
-      metaSpan.className = "dash-row-meta t-meta";
-      metaSpan.textContent = entry ? rowMeta(entry) : "";
-      row.append(titleSpan, metaSpan);
-      row.addEventListener("click", () => showDetail(session));
-      wrap.appendChild(row);
+      pairs.push({ session, entry: index[index.length - 1 - i] });
     }
+
+    // Search box (#131): case-insensitive substring over title/summary/board/
+    // transcript, debounced, filtering the in-memory sessions only. The hint is
+    // an overlay label that hides once text is typed — the same pattern
+    // #qt-input uses for the composer (an input hint element, not an attribute).
+    const searchWrap = document.createElement("div");
+    searchWrap.className = "dash-search-wrap";
+    searchWrap.style.position = "relative";
+    searchWrap.style.marginBottom = "8px";
+    const search = document.createElement("input");
+    search.type = "search";
+    search.className = "dash-search";
+    search.setAttribute("aria-label", "Search sessions");
+    styleSearchInput(search);
+    const hint = document.createElement("span");
+    hint.className = "dash-search-hint t-meta";
+    hint.textContent = "Search sessions…";
+    hint.style.position = "absolute";
+    hint.style.left = "12px";
+    hint.style.top = "50%";
+    hint.style.transform = "translateY(-50%)";
+    hint.style.pointerEvents = "none";
+    searchWrap.append(search, hint);
+    wrap.appendChild(searchWrap);
+
+    const rows = document.createElement("div");
+    rows.className = "dash-rows";
+    wrap.appendChild(rows);
+
+    const renderRows = (query: string): void => {
+      rows.replaceChildren();
+      const q = query.trim();
+      let shown = 0;
+      for (const { session, entry } of pairs) {
+        let snippet = "";
+        if (q !== "") {
+          const result = sessionMatches(session, q);
+          if (!result.matched) continue;
+          snippet = result.snippet;
+        }
+        rows.appendChild(historyRow(session, entry, snippet));
+        shown += 1;
+      }
+      if (q !== "" && shown === 0) {
+        rows.appendChild(meta(`No sessions match "${q}"`));
+      }
+    };
+
+    // ~150ms debounce so filtering doesn't re-render on every keystroke. The
+    // hint hides immediately (not debounced) as soon as there is text.
+    let debounce = 0;
+    search.addEventListener("input", () => {
+      hint.hidden = search.value !== "";
+      window.clearTimeout(debounce);
+      debounce = window.setTimeout(() => renderRows(search.value), 150);
+    });
+
+    renderRows("");
     return wrap;
+  }
+
+  /** One History row: title + meta, plus an optional match snippet (#131). */
+  function historyRow(
+    session: ParsedSession,
+    entry: SessionIndexEntry | undefined,
+    snippet: string,
+  ): HTMLElement {
+    const row = document.createElement("button");
+    row.className = "dash-row";
+    row.type = "button";
+    const titleSpan = document.createElement("span");
+    titleSpan.className = "dash-row-title";
+    titleSpan.textContent = session.meta.title !== "" ? session.meta.title : "Session";
+    const metaSpan = document.createElement("span");
+    metaSpan.className = "dash-row-meta t-meta";
+    metaSpan.textContent = entry ? rowMeta(entry) : "";
+    row.append(titleSpan, metaSpan);
+    if (snippet !== "") {
+      const snip = document.createElement("span");
+      snip.className = "dash-row-snippet t-meta";
+      snip.textContent = snippet;
+      row.appendChild(snip);
+    }
+    row.addEventListener("click", () => showDetail(session));
+    return row;
   }
 
   function renderDetail(session: ParsedSession): HTMLElement {
