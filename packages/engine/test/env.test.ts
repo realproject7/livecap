@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest";
 
-import { sanitizeChildEnv } from "../src/env";
+import { sanitizeChildEnv, detectProxy } from "../src/env";
 
 describe("sanitizeChildEnv", () => {
   it("strips ANTHROPIC_API_KEY and ANTHROPIC_AUTH_TOKEN by default", () => {
@@ -84,5 +84,76 @@ describe("sanitizeChildEnv", () => {
     expect(env.AWS_PROFILE).toBe("default");
     expect(env.AWS_REGIONAL_THING).toBe("x");
     expect(env.MY_REGION).toBe("eu");
+  });
+
+  it("strips ANTHROPIC_CUSTOM_HEADERS by default — it can smuggle Authorization/x-api-key (#145)", () => {
+    const env = sanitizeChildEnv({
+      PATH: "/usr/bin",
+      ANTHROPIC_CUSTOM_HEADERS: "x-api-key: sk-smuggled",
+    });
+    expect(env.ANTHROPIC_CUSTOM_HEADERS).toBeUndefined();
+    expect(env.PATH).toBe("/usr/bin");
+  });
+
+  it("is case-insensitive about ANTHROPIC_CUSTOM_HEADERS (#145)", () => {
+    const env = sanitizeChildEnv({ Anthropic_Custom_Headers: "x-api-key: sk" });
+    expect(Object.keys(env)).toEqual(["MAX_THINKING_TOKENS"]);
+  });
+
+  it("keeps ANTHROPIC_CUSTOM_HEADERS when ANTHROPIC_BASE_URL is set (custom endpoint is intentional) (#145)", () => {
+    const env = sanitizeChildEnv({
+      ANTHROPIC_BASE_URL: "https://gateway.example",
+      ANTHROPIC_CUSTOM_HEADERS: "x-tenant: acme",
+    });
+    expect(env.ANTHROPIC_CUSTOM_HEADERS).toBe("x-tenant: acme");
+    expect(env.ANTHROPIC_BASE_URL).toBe("https://gateway.example");
+  });
+});
+
+describe("detectProxy (#145)", () => {
+  it("returns null when no proxy var is set", () => {
+    expect(detectProxy({ PATH: "/usr/bin" })).toBeNull();
+  });
+
+  it("detects HTTPS_PROXY and returns host:port", () => {
+    expect(detectProxy({ HTTPS_PROXY: "http://proxy.corp:8080" })).toBe("proxy.corp:8080");
+  });
+
+  it("detects the lowercase https_proxy variant", () => {
+    expect(detectProxy({ https_proxy: "http://proxy.corp:3128" })).toBe("proxy.corp:3128");
+  });
+
+  it("detects HTTP_PROXY and ALL_PROXY", () => {
+    expect(detectProxy({ HTTP_PROXY: "http://h.example:8000" })).toBe("h.example:8000");
+    expect(detectProxy({ ALL_PROXY: "socks5://s.example:1080" })).toBe("s.example:1080");
+  });
+
+  it("never returns the full value — embedded credentials are dropped, host[:port] only", () => {
+    const host = detectProxy({ HTTPS_PROXY: "http://user:s3cret@proxy.corp:8080/path" });
+    expect(host).toBe("proxy.corp:8080");
+    expect(host).not.toContain("s3cret");
+    expect(host).not.toContain("user");
+  });
+
+  it("accepts a scheme-less host:port value", () => {
+    expect(detectProxy({ HTTPS_PROXY: "proxy.corp:8080" })).toBe("proxy.corp:8080");
+  });
+
+  it("returns bare host when no port is present", () => {
+    expect(detectProxy({ HTTPS_PROXY: "http://proxy.corp" })).toBe("proxy.corp");
+  });
+
+  it("ignores empty/whitespace values", () => {
+    expect(detectProxy({ HTTPS_PROXY: "", HTTP_PROXY: "   " })).toBeNull();
+  });
+
+  it("prefers the transcript-carrying HTTPS_PROXY over HTTP_PROXY", () => {
+    expect(detectProxy({ HTTP_PROXY: "http://plain:80", HTTPS_PROXY: "http://secure:443" })).toBe(
+      "secure:443",
+    );
+  });
+
+  it("does not leak the raw value for an unparseable proxy string", () => {
+    expect(detectProxy({ HTTPS_PROXY: "://:::bogus" })).toBe("(set)");
   });
 });
