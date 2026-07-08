@@ -39,14 +39,8 @@ export interface RunnerCallbacks {
 export interface RunnerOptions {
   engine: RunnerEngine;
   callbacks: RunnerCallbacks;
-  /** Release a below-minBatch backlog after this idle window so a lone
-   *  sentence still displays fast. Default 400. */
-  flushAfterMs?: number;
   /** Rolling-context pairs retained. Default 8. */
   maxPairs?: number;
-  /** Timer injection for tests. */
-  schedule?: (fn: () => void, ms: number) => unknown;
-  cancel?: (handle: unknown) => void;
 }
 
 /**
@@ -89,15 +83,11 @@ export function countOutputLines(text: string): number {
 export class TranslationRunner {
   private readonly engine: RunnerEngine;
   private readonly callbacks: RunnerCallbacks;
-  private readonly flushAfterMs: number;
   private readonly maxPairs: number;
-  private readonly schedule: (fn: () => void, ms: number) => unknown;
-  private readonly cancel: (handle: unknown) => void;
 
   private readonly queue = new TranslationQueue();
   private pairs: TranslationPair[] = [];
   private running = false;
-  private flushTimer: unknown = null;
   private idleWaiters: (() => void)[] = [];
   /** User-initiated retranslates, dispatched ahead of the live queue (#139). */
   private readonly priority: Sentence[] = [];
@@ -105,17 +95,11 @@ export class TranslationRunner {
   private readonly pendingIds = new Set<number>();
   /** Ids in the currently-running batch — for dedup while a batch is in flight. */
   private readonly inFlightIds = new Set<number>();
-  /** True while drain() empties everything, so a below-minBatch tail is released
-   *  immediately instead of waiting on the idle window. */
-  private draining = false;
 
   constructor(options: RunnerOptions) {
     this.engine = options.engine;
     this.callbacks = options.callbacks;
-    this.flushAfterMs = options.flushAfterMs ?? 400;
     this.maxPairs = options.maxPairs ?? 8;
-    this.schedule = options.schedule ?? ((fn, ms) => setTimeout(fn, ms));
-    this.cancel = options.cancel ?? ((handle) => clearTimeout(handle as ReturnType<typeof setTimeout>));
   }
 
   /** Sentences waiting plus the in-flight batch indicator (for tests). */
@@ -149,13 +133,8 @@ export class TranslationRunner {
 
   /** Translate everything still queued, then resolve. Used at session stop. */
   drain(): Promise<void> {
-    this.draining = true;
-    this.clearFlushTimer();
     this.pump();
-    if (!this.busy) {
-      this.draining = false;
-      return Promise.resolve();
-    }
+    if (!this.busy) return Promise.resolve();
     return new Promise((resolve) => this.idleWaiters.push(resolve));
   }
 
@@ -163,28 +142,20 @@ export class TranslationRunner {
     if (this.running) return;
     // User-initiated retranslates jump ahead of the live backlog (#139).
     if (this.priority.length > 0) {
-      this.clearFlushTimer();
       void this.run(this.priority.splice(0), true);
       return;
     }
-    let batch = this.queue.nextBatch();
-    // While draining, release a below-minBatch tail immediately (nextBatch is
-    // still tried first, so the backlog newest-first order is preserved).
-    if (!batch && this.draining) batch = this.queue.flush();
+    // Idle-fast dispatch (#142): the engine is idle here (nothing in flight), so
+    // ship the next work NOW rather than waiting for a lone sentence to gather
+    // company. nextBatch() still absorbs an accumulated backlog (newest-first
+    // when backlogged, up to maxBatch otherwise); a lone below-minBatch sentence
+    // falls through to flush() and goes out as a batch-of-1 — no 400ms wait.
+    // Batching now only shapes the BUSY path: sentences that arrive while a batch
+    // is in flight pile up and leave together on the next pump (bursts batch).
+    const batch = this.queue.nextBatch() ?? this.queue.flush();
     if (batch) {
-      this.clearFlushTimer();
       void this.run(batch, false);
       return;
-    }
-    if (this.queue.size > 0 && this.flushTimer === null) {
-      // Below minBatch: release after a short idle window so a lone final
-      // sentence is never stranded waiting for company.
-      this.flushTimer = this.schedule(() => {
-        this.flushTimer = null;
-        if (this.running) return;
-        const flushed = this.queue.flush();
-        if (flushed) void this.run(flushed, false);
-      }, this.flushAfterMs);
     }
     this.settleIfIdle();
   }
@@ -293,16 +264,8 @@ export class TranslationRunner {
     if (results.length > 0) this.callbacks.onBatchDone(results);
   }
 
-  private clearFlushTimer(): void {
-    if (this.flushTimer !== null) {
-      this.cancel(this.flushTimer);
-      this.flushTimer = null;
-    }
-  }
-
   private settleIfIdle(): void {
     if (!this.busy && this.idleWaiters.length > 0) {
-      this.draining = false;
       for (const resolve of this.idleWaiters.splice(0)) resolve();
     }
   }

@@ -112,9 +112,43 @@ export function applyRetranslation(existing: CaptionEntry, text: string): boolea
   return true;
 }
 
+/** The slice of an engine {@link meterEngines} needs — every tier exposes it. */
+interface UsageMeterable {
+  onUsage(listener: (usage: Usage) => void): () => void;
+}
+
+/**
+ * Meter every DISTINCT engine whose usage must be summed for the session (#142).
+ * The CLI-tier two-lane split runs two `ClaudeCliEngine` sessions (live
+ * translation + summary/extras) that both fall back to ONE shared local engine.
+ * Attaching each engine exactly once makes usage/cost sum across both lanes
+ * without double-counting the shared local (which appears in both lanes). The
+ * internal identity set guards against an engine being passed twice.
+ *
+ * `attach` wires the credit ledger; `addTurnCost` tallies the session cost.
+ */
+export function meterEngines(
+  engines: Iterable<UsageMeterable>,
+  attach: (engine: UsageMeterable) => void,
+  addTurnCost: (turnCostUsd: number) => void,
+): void {
+  const seen = new Set<UsageMeterable>();
+  for (const engine of engines) {
+    if (seen.has(engine)) continue;
+    seen.add(engine);
+    attach(engine);
+    engine.onUsage((usage) => addTurnCost(usage.turnCostUsd));
+  }
+}
+
 export class HostSession {
-  private engine: TranslationEngine | null = null;
-  private router: FallbackRouter | null = null;
+  /** Routers for the two CLI lanes (null on the local-only path). A credit- or
+   *  health-driven fallback switches BOTH to the shared local engine (#142). */
+  private translationRouter: FallbackRouter | null = null;
+  private extrasRouter: FallbackRouter | null = null;
+  /** Distinct engines started this session — the teardown set (#142): the two
+   *  routers on the CLI tier, or the single shared local engine otherwise. */
+  private readonly startedEngines = new Set<TranslationEngine>();
   private accountant: CreditAccountant | null = null;
   private extras: ExtrasPipeline | null = null;
   private extrasBudget: ExtrasBudget | null = null;
@@ -214,40 +248,69 @@ export class HostSession {
     // fallback router (never a dead end — no CLI still means local).
     const cli = resolved.enginePref === "cli" ? await detectClaudeCli(process.env.PATH) : null;
     let engineLabel: string;
+    let translationEngine: TranslationEngine;
+    let extrasEngine: TranslationEngine;
+    // Distinct engines whose usage must be summed — attached once each below so
+    // the shared local fallback is never double-counted across the two lanes.
+    const metered: UsageMeterable[] = [];
     if (cli) {
       const cwd = join(config.appDataDir, "cli-session");
       mkdirSync(cwd, { recursive: true });
-      const primary = new ClaudeCliEngine({
+      // Dedicated translation lane (#142): TWO persistent CLI sessions — one for
+      // live translation, one for summary/extras — so a summary turn (awaited,
+      // ~1–5s) no longer head-of-line-blocks live captions through a single
+      // shared turn mutex. Both fall back to the SAME local engine: the split is
+      // CLI-tier only; running two 4B llama-servers is not worth it, so on the
+      // local path summary still contends there (documented, unchanged).
+      const engineConfig = {
         bin: cli.bin,
         cwd,
         env: process.env,
         includePartialMessages: cli.includePartialMessages,
         targetLanguage: resolved.targetLanguage,
-      });
-      // Health/error-driven recovery (#135): a respawn surfaces a content-free
-      // status; a `degraded` streak drives fallback to local, alongside the
-      // credit-threshold path wired below.
-      primary.onHealthEvent((event) => this.onEngineHealthEvent(event));
-      this.router = new FallbackRouter({
-        primary,
-        fallback: local,
-        startOnFallback: () => resolved.autoSwitch && accountant.isBelowThreshold(),
-      });
-      this.engine = this.router;
+      };
+      // Each ClaudeCliEngine mints its own session id (config.sessionId omitted),
+      // so the two persistent `claude -p` conversations stay independent.
+      const translationPrimary = new ClaudeCliEngine(engineConfig);
+      const extrasPrimary = new ClaudeCliEngine(engineConfig);
+      // Health/error-driven recovery (#135) preserved on BOTH lanes: a respawn
+      // surfaces a content-free status; a `degraded` streak drives fallback to
+      // local, alongside the credit-threshold path wired below. The per-turn
+      // watchdog rides inside each ClaudeCliEngine, so it too carries to both.
+      translationPrimary.onHealthEvent((event) => this.onEngineHealthEvent(event));
+      extrasPrimary.onHealthEvent((event) => this.onEngineHealthEvent(event));
+      const startOnFallback = () => resolved.autoSwitch && accountant.isBelowThreshold();
+      this.translationRouter = new FallbackRouter({ primary: translationPrimary, fallback: local, startOnFallback });
+      this.extrasRouter = new FallbackRouter({ primary: extrasPrimary, fallback: local, startOnFallback });
+      translationEngine = this.translationRouter;
+      extrasEngine = this.extrasRouter;
+      // Meter each concrete engine (not the routers): the shared local appears
+      // once, so its usage isn't summed twice across the two lanes (#142).
+      metered.push(translationPrimary, extrasPrimary, local);
       engineLabel = CLI_ENGINE_LABEL;
     } else {
       if (resolved.enginePref === "cli") {
         this.emit({ type: "status", detail: "no Claude CLI found — using the local model" });
       }
-      this.engine = local;
+      // Local-only path: both lanes converge on the ONE shared local engine
+      // (summary still contends with translation here, as before) (#142).
+      translationEngine = local;
+      extrasEngine = local;
+      metered.push(local);
       engineLabel = LOCAL_ENGINE_LABEL;
     }
-    const engine = this.engine;
+    this.startedEngines.add(translationEngine);
+    this.startedEngines.add(extrasEngine);
 
-    accountant.attach(engine);
-    engine.onUsage((usage: Usage) => {
-      this.sessionCostUsd += usage.turnCostUsd;
-    });
+    // Sum usage/cost across every lane (#142): attach the ledger and the
+    // session-cost tally to each distinct engine exactly once.
+    meterEngines(
+      metered,
+      (engine) => accountant.attach(engine),
+      (turnCostUsd) => {
+        this.sessionCostUsd += turnCostUsd;
+      },
+    );
     accountant.onEvent((event) => {
       if (event.type === "gauge") {
         this.emit({ type: "gauge", gauge: this.withExtrasBudget(event.gauge) });
@@ -264,8 +327,12 @@ export class HostSession {
     try {
       // Bound engine readiness (#65): a wedged first-run model acquisition must
       // not hang the host's serialized message chain forever (the #13 symptom —
-      // captions queued behind start were never processed).
-      await withTimeout(engine.start(), ENGINE_READY_TIMEOUT_MS);
+      // captions queued behind start were never processed). Start every distinct
+      // lane (two CLI sessions, or the single shared local engine).
+      await withTimeout(
+        Promise.all(Array.from(this.startedEngines, (engine) => engine.start())),
+        ENGINE_READY_TIMEOUT_MS,
+      );
     } catch (error) {
       // Terminal: surface a content-free failure the Rust shell acts on — it
       // tears the half-started session down to idle with a durable status
@@ -276,7 +343,9 @@ export class HostSession {
       });
       return;
     }
-    if (this.router?.onFallback) {
+    // Both lanes share one startOnFallback predicate, so they begin on the same
+    // tier; the translation router reflects it.
+    if (this.translationRouter?.onFallback) {
       engineLabel = LOCAL_ENGINE_LABEL;
       this.emit({ type: "engineSwitch", engine: LOCAL_ENGINE_LABEL });
     }
@@ -327,14 +396,17 @@ export class HostSession {
     // with the monthly pool the way #13 observed.
     this.extrasBudget = new ExtrasBudget({ capUsd: resolved.extrasBudgetUsd });
     this.extras = new ExtrasPipeline({
-      engine,
+      // Summary/reply/analyze/coach/quick-translate run on the DEDICATED extras
+      // lane (#142) so they never head-of-line-block live translation.
+      engine: extrasEngine,
       summaryLanguage: resolved.summaryLanguage,
       meetingLanguage: resolved.meetingLanguage,
       budget: this.extrasBudget,
     });
 
     this.runner = new TranslationRunner({
-      engine,
+      // Live translation runs on its OWN lane, contending with nothing (#142).
+      engine: translationEngine,
       callbacks: {
         onSnapshot: (items, done) => this.emit({ type: "translation", items, done }),
         onBatchDone: (results) => this.recordBatch(results),
@@ -401,10 +473,16 @@ export class HostSession {
   }
 
   private switchToLocal(): void {
-    const router = this.router;
-    if (!router || router.onFallback) return;
-    void router
-      .switchToFallback()
+    // Switch BOTH lanes to the (single, shared) local engine (#142): if only the
+    // translation lane fell back while summary/extras stayed on the CLI, the
+    // always-on summary load would keep draining CLI credits — defeating the
+    // credit auto-fallback policy. Idempotent: routers already on local are
+    // skipped, and both switchToFallback calls converge on the one local engine.
+    const routers = [this.translationRouter, this.extrasRouter].filter(
+      (router): router is FallbackRouter => router !== null && !router.onFallback,
+    );
+    if (routers.length === 0) return;
+    void Promise.all(routers.map((router) => router.switchToFallback()))
       .then(() => this.emit({ type: "engineSwitch", engine: LOCAL_ENGINE_LABEL }))
       .catch((error: unknown) =>
         this.emit({ type: "status", detail: `local fallback unavailable (${errorDetail(error)})` }),
@@ -790,12 +868,14 @@ export class HostSession {
   dispose(): void {
     this.stopping = true;
     for (const handle of this.intervals.splice(0)) clearInterval(handle);
-    // Reap the engine here (#82): since `stop()` now keeps the engine warm for
-    // post-meeting coaching, teardown is the one place the engine is torn down.
-    // `dispose()` is the synchronous force-kill (local llama-server child);
-    // `stop()` SIGTERMs and awaits it (best-effort, fire-and-forget — the CLI
-    // engine has no `dispose`, only `stop`, so this also kills its child).
-    this.engine?.dispose?.();
-    void this.engine?.stop().catch(() => undefined);
+    // Reap the engines here (#82): since `stop()` now keeps them warm for
+    // post-meeting coaching, teardown is the one place they are torn down. Both
+    // lanes are reaped (#142) — the two routers force-kill their CLI children and
+    // the shared local llama-server child. `dispose()` is the synchronous
+    // force-kill; `stop()` SIGTERMs and awaits it (best-effort, fire-and-forget).
+    for (const engine of this.startedEngines) {
+      engine.dispose?.();
+      void engine.stop().catch(() => undefined);
+    }
   }
 }
