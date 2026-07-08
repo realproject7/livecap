@@ -99,6 +99,15 @@ export class TranslationRunner {
   private running = false;
   private flushTimer: unknown = null;
   private idleWaiters: (() => void)[] = [];
+  /** User-initiated retranslates, dispatched ahead of the live queue (#139). */
+  private readonly priority: Sentence[] = [];
+  /** Ids queued (live queue or priority) but not yet dispatched — for dedup. */
+  private readonly pendingIds = new Set<number>();
+  /** Ids in the currently-running batch — for dedup while a batch is in flight. */
+  private readonly inFlightIds = new Set<number>();
+  /** True while drain() empties everything, so a below-minBatch tail is released
+   *  immediately instead of waiting on the idle window. */
+  private draining = false;
 
   constructor(options: RunnerOptions) {
     this.engine = options.engine;
@@ -111,32 +120,60 @@ export class TranslationRunner {
 
   /** Sentences waiting plus the in-flight batch indicator (for tests). */
   get busy(): boolean {
-    return this.running || this.queue.size > 0;
+    return this.running || this.queue.size > 0 || this.priority.length > 0;
   }
 
   enqueue(sentence: RunnerSentence): void {
+    // Dedup (#139): an id already waiting or in flight must not be queued again —
+    // it would otherwise land twice, even twice in one batch.
+    if (this.pendingIds.has(sentence.id) || this.inFlightIds.has(sentence.id)) return;
+    this.pendingIds.add(sentence.id);
     // id doubles as the monotonic sequence number (assigned by Rust).
     this.queue.enqueue({ id: String(sentence.id), text: sentence.text, seq: sentence.id });
     this.pump();
   }
 
+  /**
+   * Re-translate an already-shown sentence on user request (#139). It jumps
+   * AHEAD of the live queue — a "fix this line now" gesture must get the best
+   * latency, not wait behind the backlog + mutex — and is deduped like enqueue so
+   * it can't coexist with the id's still-pending original or double up in a
+   * batch. Its result is kept OUT of the live rolling context (it is historical).
+   */
+  retranslate(sentence: RunnerSentence): void {
+    if (this.pendingIds.has(sentence.id) || this.inFlightIds.has(sentence.id)) return;
+    this.pendingIds.add(sentence.id);
+    this.priority.push({ id: String(sentence.id), text: sentence.text, seq: sentence.id });
+    this.pump();
+  }
+
   /** Translate everything still queued, then resolve. Used at session stop. */
   drain(): Promise<void> {
+    this.draining = true;
     this.clearFlushTimer();
-    if (!this.running) {
-      const batch = this.queue.flush();
-      if (batch) void this.run(batch);
+    this.pump();
+    if (!this.busy) {
+      this.draining = false;
+      return Promise.resolve();
     }
-    if (!this.busy) return Promise.resolve();
     return new Promise((resolve) => this.idleWaiters.push(resolve));
   }
 
   private pump(): void {
     if (this.running) return;
-    const batch = this.queue.nextBatch();
+    // User-initiated retranslates jump ahead of the live backlog (#139).
+    if (this.priority.length > 0) {
+      this.clearFlushTimer();
+      void this.run(this.priority.splice(0), true);
+      return;
+    }
+    let batch = this.queue.nextBatch();
+    // While draining, release a below-minBatch tail immediately (nextBatch is
+    // still tried first, so the backlog newest-first order is preserved).
+    if (!batch && this.draining) batch = this.queue.flush();
     if (batch) {
       this.clearFlushTimer();
-      void this.run(batch);
+      void this.run(batch, false);
       return;
     }
     if (this.queue.size > 0 && this.flushTimer === null) {
@@ -146,15 +183,21 @@ export class TranslationRunner {
         this.flushTimer = null;
         if (this.running) return;
         const flushed = this.queue.flush();
-        if (flushed) void this.run(flushed);
+        if (flushed) void this.run(flushed, false);
       }, this.flushAfterMs);
     }
     this.settleIfIdle();
   }
 
-  private async run(batch: Sentence[]): Promise<void> {
+  private async run(batch: Sentence[], retranslate: boolean): Promise<void> {
     this.running = true;
     const ids = batch.map((s) => Number(s.id));
+    // Move this batch's ids from pending to in-flight so a duplicate enqueue/
+    // retranslate arriving while it runs is coalesced, not double-dispatched (#139).
+    for (const id of ids) {
+      this.pendingIds.delete(id);
+      this.inFlightIds.add(id);
+    }
     try {
       let finalText = "";
       // Snapshot the rolling pairs: the live array mutates as batches finish,
@@ -184,7 +227,7 @@ export class TranslationRunner {
       // local tier's stripNonTranslation can itself drop an empty line and
       // shift alignment — the same count check catches it).
       if (ids.length > 1 && countOutputLines(finalText) !== ids.length) {
-        await this.runOneToOne(batch);
+        await this.runOneToOne(batch, retranslate);
         return;
       }
       const mapped = assignLines(ids, finalText);
@@ -194,16 +237,21 @@ export class TranslationRunner {
         .slice()
         .sort((a, b) => a.seq - b.seq)
         .map((s) => ({ id: Number(s.id), source: s.text, text: textById.get(Number(s.id)) ?? "" }));
-      for (const result of results) {
-        if (result.text !== "") this.pairs.push({ source: result.source, target: result.text });
+      // A retranslate is a HISTORICAL sentence — keep its pairing OUT of the live
+      // rolling context so it can't bias the next live batch (#139).
+      if (!retranslate) {
+        for (const result of results) {
+          if (result.text !== "") this.pairs.push({ source: result.source, target: result.text });
+        }
+        if (this.pairs.length > this.maxPairs) this.pairs = this.pairs.slice(-this.maxPairs);
       }
-      if (this.pairs.length > this.maxPairs) this.pairs = this.pairs.slice(-this.maxPairs);
       this.callbacks.onBatchDone(results);
     } catch (error) {
       // Engine errors are content-free by contract (#23); forward the message.
       this.callbacks.onFailed(ids, error instanceof Error ? error.message : String(error));
     } finally {
       this.running = false;
+      for (const id of ids) this.inFlightIds.delete(id);
       this.pump();
     }
   }
@@ -217,7 +265,7 @@ export class TranslationRunner {
    * shown under the wrong id. Runs inside run()'s `running` slot, so no other
    * batch starts meanwhile; single-sentence turns never re-enter this guard.
    */
-  private async runOneToOne(batch: Sentence[]): Promise<void> {
+  private async runOneToOne(batch: Sentence[], retranslate: boolean): Promise<void> {
     const results: RunnerResult[] = [];
     // Spoken order keeps the archive chronological and the rolling context
     // coherent (each turn sees the prior sentences' freshly-added pairs).
@@ -230,8 +278,11 @@ export class TranslationRunner {
           this.callbacks.onSnapshot(assignLines([id], snapshot.text), snapshot.done);
         }
         const finalText = assignLines([id], text)[0]?.text ?? "";
-        if (finalText !== "") this.pairs.push({ source: sentence.text, target: finalText });
-        if (this.pairs.length > this.maxPairs) this.pairs = this.pairs.slice(-this.maxPairs);
+        // Historical retranslate results stay out of the live rolling context (#139).
+        if (!retranslate && finalText !== "") {
+          this.pairs.push({ source: sentence.text, target: finalText });
+          if (this.pairs.length > this.maxPairs) this.pairs = this.pairs.slice(-this.maxPairs);
+        }
         results.push({ id, source: sentence.text, text: finalText });
       } catch (error) {
         // Content-free by contract (#23); the host preserves the source and a
@@ -251,6 +302,7 @@ export class TranslationRunner {
 
   private settleIfIdle(): void {
     if (!this.busy && this.idleWaiters.length > 0) {
+      this.draining = false;
       for (const resolve of this.idleWaiters.splice(0)) resolve();
     }
   }

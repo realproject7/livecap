@@ -99,6 +99,19 @@ function errorDetail(error: unknown): string {
   return error instanceof Error ? `${error.name}: ${error.message}` : String(error);
 }
 
+/**
+ * Merge a (re)translation result into an already-archived entry, in place.
+ * A FAILED or empty result (`text === ""`) is IGNORED so a failed retranslate
+ * never erases a previously-good archived target (#139) — the archive keeps the
+ * good value while the UI shows "failed". Returns true when the entry actually
+ * changed, so the caller re-persists the brief only on a real rewrite.
+ */
+export function applyRetranslation(existing: CaptionEntry, text: string): boolean {
+  if (text === "") return false;
+  existing.target = text;
+  return true;
+}
+
 export class HostSession {
   private engine: TranslationEngine | null = null;
   private router: FallbackRouter | null = null;
@@ -421,9 +434,10 @@ export class HostSession {
     for (const result of results.slice().sort((a, b) => a.id - b.id)) {
       const existing = this.entriesById.get(result.id);
       if (existing) {
-        // Retranslation: update in place; the next brief rewrite persists it.
-        existing.target = result.text;
-        rewroteExisting = true;
+        // Retranslation: update in place; a failed/empty result is ignored so it
+        // never erases a good archived target (#139). The next brief rewrite
+        // persists a real change.
+        if (applyRetranslation(existing, result.text)) rewroteExisting = true;
         continue;
       }
       const meta = this.metaById.get(result.id);
@@ -458,7 +472,9 @@ export class HostSession {
   private onRetranslate(id: number): void {
     const meta = this.metaById.get(id);
     if (!meta || !this.runner || this.stopping) return;
-    this.runner.enqueue({ id, text: meta.text });
+    // User "fix this line" gesture: jump the live queue, dedup against any
+    // still-pending original, and keep the result out of live context (#139).
+    this.runner.retranslate({ id, text: meta.text });
   }
 
   private async onQuickTranslate(id: number, text: string): Promise<void> {
