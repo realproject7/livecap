@@ -35,16 +35,29 @@ export interface ArchiveFs {
   touch(path: string): void;
 }
 
+// Owner-only permissions for the archive (#148, N-6): transcripts hold private
+// meeting content, so on a shared/group-synced Mac they must not be world- or
+// group-readable. Applied at creation — new files/dirs are restricted; umask can
+// only remove further bits, never widen these.
+const DIR_MODE = 0o700;
+const FILE_MODE = 0o600;
+
 /** A node-backed ArchiveFs for production use (the consumer wires this in). */
 export function nodeArchiveFs(): ArchiveFs {
   return {
     sep: path.sep,
     join: (...segments) => path.join(...segments),
     resolve: (p) => path.resolve(p),
-    mkdirp: (dir) => void fs.mkdirSync(dir, { recursive: true }),
+    mkdirp: (dir) => void fs.mkdirSync(dir, { recursive: true, mode: DIR_MODE }),
     exists: (p) => fs.existsSync(p),
-    writeFile: (p, data) => fs.writeFileSync(p, data, "utf8"),
-    appendFile: (p, data) => fs.appendFileSync(p, data, "utf8"),
+    writeFile: (p, data) => {
+      fs.writeFileSync(p, data, { encoding: "utf8", mode: FILE_MODE });
+      // `mode` above only takes effect when the file is created; the writer's
+      // atomic write can overwrite a stale `.tmp` left by a crash, so enforce
+      // owner-only unconditionally before it is renamed into place.
+      fs.chmodSync(p, FILE_MODE);
+    },
+    appendFile: (p, data) => fs.appendFileSync(p, data, { encoding: "utf8", mode: FILE_MODE }),
     rename: (from, to) => fs.renameSync(from, to),
     readFile: (p) => fs.readFileSync(p, "utf8"),
     unlink: (p) => fs.unlinkSync(p),
