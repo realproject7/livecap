@@ -33,8 +33,8 @@ export { findCliBins, probeCapabilities, DEFAULT_CLI_NAMES } from "./detect";
 export type { FindCliOptions, CommandRunner, CommandResult, Capabilities } from "./detect";
 export { TranslationQueue } from "./queue";
 export type { QueueOptions } from "./queue";
-export { ClaudeCliEngine, EngineTurnError } from "./claude-cli-engine";
-export type { ClaudeCliEngineConfig } from "./claude-cli-engine";
+export { ClaudeCliEngine, EngineTurnError, EngineTimeoutError } from "./claude-cli-engine";
+export type { ClaudeCliEngineConfig, EngineHealthEvent } from "./claude-cli-engine";
 
 // Issue #6 — local LLM fallback tier (PROPOSAL §4 tier 2).
 export { LocalLlmEngine } from "./local-llm-engine";

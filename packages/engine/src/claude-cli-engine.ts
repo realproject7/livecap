@@ -58,10 +58,27 @@ export interface ClaudeCliEngineConfig {
   contextPairs?: number;
   /** Resume a prior session by id after a crash, instead of starting fresh. */
   resume?: string;
+  /**
+   * Per-turn idle watchdog (#135): if a turn produces no event for this long
+   * (hang, network stall, no `turn_end`), the turn aborts with a content-free
+   * {@link EngineTimeoutError} and the hung child is killed so the next turn
+   * respawns. Mirrors the local tier's 30s request timeout. Default 30s.
+   */
+  turnTimeoutMs?: number;
+  /**
+   * After this many consecutive turn timeouts/crashes, a single `degraded`
+   * health event fires so the host can drive #7 fallback to the local tier
+   * alongside the credit path. Reset by any healthy turn. Default 3.
+   */
+  maxTurnFailures?: number;
 }
 
 /** Cap on the retained stderr tail used only to derive a non-content hash (chars). */
 const MAX_STDERR_TAIL = 2000;
+/** Default per-turn idle watchdog window — mirrors the local tier's 30s (#135). */
+const DEFAULT_TURN_TIMEOUT = 30_000;
+/** Consecutive turn failures before a `degraded` event drives auto-fallback (#135). */
+const DEFAULT_MAX_TURN_FAILURES = 3;
 
 /** Thrown when a turn ends with an error result (e.g. invalid model → 404). */
 export class EngineTurnError extends Error {
@@ -73,6 +90,23 @@ export class EngineTurnError extends Error {
     this.name = "EngineTurnError";
   }
 }
+
+/** Thrown when a turn produces no event within the watchdog window and is
+ *  aborted (#135). Content-free by construction — carries only the timeout. */
+export class EngineTimeoutError extends Error {
+  constructor(readonly timeoutMs: number) {
+    super(`translation turn timed out (${timeoutMs}ms without a response)`);
+    this.name = "EngineTimeoutError";
+  }
+}
+
+/**
+ * A content-free health signal from the CLI tier (#135). `respawned`: the CLI
+ * process crashed and was restarted (conversation resumed by id). `degraded`:
+ * repeated turn timeouts/crashes — the host should drive #7 fallback to the
+ * local tier. Neither carries any caption/model text.
+ */
+export type EngineHealthEvent = { kind: "respawned" } | { kind: "degraded" };
 
 /** Content-free turn-failure message — never includes the model's result text,
  *  which can echo prompt/caption content (#23). */
@@ -87,8 +121,17 @@ export class ClaudeCliEngine implements TranslationEngine {
   private readonly parser = new StreamJsonParser();
   private readonly turnMutex = new Mutex();
   private readonly usageListeners = new Set<(usage: Usage) => void>();
+  private readonly healthListeners = new Set<(event: EngineHealthEvent) => void>();
+  private readonly turnTimeoutMs: number;
+  private readonly maxTurnFailures: number;
 
   private child: ChildProcessWithoutNullStreams | null = null;
+  /** True between start() and stop(); gates crash respawn + health accounting. */
+  private hasStarted = false;
+  /** Consecutive turn timeouts/crashes; reset by any healthy turn (#135). */
+  private consecutiveFailures = 0;
+  /** Latch so the `degraded` event fires once per unhealthy streak (#135). */
+  private degradedNotified = false;
   private stdoutBuffer = "";
   /** Capped tail of child stderr — used ONLY to derive a non-content hash. */
   private stderrTail = "";
@@ -107,6 +150,8 @@ export class ClaudeCliEngine implements TranslationEngine {
 
   constructor(config: ClaudeCliEngineConfig) {
     this.config = config;
+    this.turnTimeoutMs = config.turnTimeoutMs ?? DEFAULT_TURN_TIMEOUT;
+    this.maxTurnFailures = config.maxTurnFailures ?? DEFAULT_MAX_TURN_FAILURES;
     this.sessionId = config.sessionId ?? randomUUID();
     // The system prompt goes on argv (--system-prompt), so it must stay static
     // and content-free of user data: the glossary is bootstrapped over stdin in
@@ -123,18 +168,54 @@ export class ClaudeCliEngine implements TranslationEngine {
     return () => this.usageListeners.delete(listener);
   }
 
+  /** Subscribe to content-free health events (respawn / degraded, #135).
+   *  Returns an unsubscribe function, mirroring {@link onUsage}. */
+  onHealthEvent(listener: (event: EngineHealthEvent) => void): () => void {
+    this.healthListeners.add(listener);
+    return () => this.healthListeners.delete(listener);
+  }
+
+  private emitHealthEvent(event: EngineHealthEvent): void {
+    for (const listener of this.healthListeners) listener(event);
+  }
+
   async start(): Promise<void> {
     if (this.child) return;
     this.statusValue = { status: "starting" };
+    await this.spawnSession(this.config.resume);
+    this.hasStarted = true;
+    this.statusValue = { status: "ready" };
 
+    // Bootstrap the user glossary over stdin (never argv). Best-effort: a failed
+    // setup turn must not block the session.
+    const glossary = this.config.glossary;
+    if (glossary && Object.keys(glossary).length > 0) {
+      try {
+        await this.runTextTurn(asTaskMessage(buildGlossarySetupMessage(glossary)), "glossary-setup");
+      } catch {
+        // glossary is best-effort; the session still translates without it
+      }
+    }
+  }
+
+  /**
+   * Spawn the CLI child and wire its stdio; shared by start() and respawn. On
+   * respawn `resume` is this session's id, so the crashed conversation continues
+   * from history (#135). Rejects if the process fails to spawn.
+   */
+  private async spawnSession(resume: string | undefined): Promise<ChildProcessWithoutNullStreams> {
     const args = buildClaudeArgs({
       sessionId: this.sessionId,
       systemPrompt: this.systemPrompt,
       includePartialMessages: this.config.includePartialMessages,
       model: this.config.model,
-      resume: this.config.resume,
+      resume,
     });
     const env = sanitizeChildEnv(this.config.env);
+    // A crashed session may have left a partial line buffered and the parser
+    // mid-message; start clean so the fresh process's stream parses correctly.
+    this.stdoutBuffer = "";
+    this.parser.reset();
 
     const child = spawn(this.config.bin, args, {
       cwd: this.config.cwd,
@@ -158,6 +239,12 @@ export class ClaudeCliEngine implements TranslationEngine {
       child.once("error", onError);
     });
 
+    this.wireChild(child);
+    return child;
+  }
+
+  /** Attach stdout/stderr/exit handlers to a freshly spawned child. */
+  private wireChild(child: ChildProcessWithoutNullStreams): void {
     child.stdout.setEncoding("utf8");
     child.stdout.on("data", (chunk: string) => this.onStdout(chunk));
     // Drain stderr: an unread stderr pipe fills its ~64KB kernel buffer and
@@ -171,29 +258,39 @@ export class ClaudeCliEngine implements TranslationEngine {
       this.stderrBytes += Buffer.byteLength(chunk, "utf8");
       this.stderrTail = (this.stderrTail + chunk).slice(-MAX_STDERR_TAIL);
     });
-    child.once("exit", (code, signal) => this.onExit(code, signal));
+    // Bind the child to its own exit handler: after a respawn the previous
+    // child's late exit must not tear down the new one (#135).
+    child.once("exit", (code, signal) => this.onExit(child, code, signal));
+  }
 
-    this.statusValue = { status: "ready" };
-
-    // Bootstrap the user glossary over stdin (never argv). Best-effort: a failed
-    // setup turn must not block the session.
-    const glossary = this.config.glossary;
-    if (glossary && Object.keys(glossary).length > 0) {
-      try {
-        await this.runTextTurn(asTaskMessage(buildGlossarySetupMessage(glossary)), "glossary-setup");
-      } catch {
-        // glossary is best-effort; the session still translates without it
-      }
+  /**
+   * Restart a crashed CLI session, resuming the prior conversation by id so
+   * context/continuity survive the crash (#135). Emits a `respawned` health
+   * event on success; returns null (staying in error) if the spawn fails.
+   */
+  private async respawn(): Promise<ChildProcessWithoutNullStreams | null> {
+    this.statusValue = { status: "starting" };
+    try {
+      const child = await this.spawnSession(this.sessionId);
+      this.statusValue = { status: "ready" };
+      this.emitHealthEvent({ kind: "respawned" });
+      return child;
+    } catch {
+      // spawnSession already recorded the error status/detail.
+      return null;
     }
   }
 
   async stop(): Promise<void> {
+    this.hasStarted = false;
+    this.consecutiveFailures = 0;
+    this.degradedNotified = false;
     const child = this.child;
-    if (!child) return;
     this.child = null;
     this.statusValue = { status: "stopped" };
     this.currentTurn?.end(new Error("engine stopped"));
     this.currentTurn = null;
+    if (!child) return;
     try {
       child.stdin.end();
     } catch {
@@ -262,25 +359,93 @@ export class ClaudeCliEngine implements TranslationEngine {
     return text.trim();
   }
 
-  /** Run a single turn: write one stdin line, stream its events until turn_end. */
+  /**
+   * Run a single turn: write one stdin line, stream its events until turn_end.
+   * A per-turn idle watchdog aborts a hung turn with a content-free error, and a
+   * child that crashed on a prior turn is respawned (resumed by id) so this and
+   * later turns recover instead of throwing forever (#135).
+   */
   private async *runTurn(line: string): AsyncGenerator<ParsedEvent> {
     const release = await this.turnMutex.acquire();
-    const child = this.child;
+    let child = this.child;
+    if (!child && this.hasStarted) {
+      // The CLI crashed on a prior turn (onExit nulled the child). Respawn a
+      // fresh session before this turn so translation recovers.
+      child = await this.respawn();
+    }
     if (!child) {
+      this.recordTurnOutcome(false);
       release();
       throw new Error("engine not started");
     }
     const channel = new AsyncChannel<ParsedEvent>();
     this.currentTurn = channel;
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    // Re-arm on every event → the watchdog measures the GAP between events, so a
+    // slow-but-progressing stream is never cut, only a genuinely stalled one.
+    const arm = () => {
+      if (timer) clearTimeout(timer);
+      timer = setTimeout(() => {
+        // No event for turnTimeoutMs: abort with a content-free error and kill
+        // the hung child so its (possibly late) output can't desync the next
+        // turn; the next runTurn respawns.
+        this.statusValue = { status: "error", detail: `turn timed out after ${this.turnTimeoutMs}ms` };
+        channel.end(new EngineTimeoutError(this.turnTimeoutMs));
+        this.killChild();
+      }, this.turnTimeoutMs);
+    };
+    let threw = false;
     try {
+      arm();
       child.stdin.write(line);
       for await (const event of channel) {
+        arm();
         yield event;
         if (event.kind === "turn_end") break;
       }
+    } catch (err) {
+      threw = true;
+      throw err;
     } finally {
+      if (timer) clearTimeout(timer);
       this.currentTurn = null;
+      // Healthy = the CLI responded (turn_end reached, even an error result) or
+      // the channel closed cleanly. A consumer that throws on an error result
+      // injects a return() at the turn_end yield without tripping `threw`, so
+      // api-error turns stay "healthy" (the CLI is responsive). Unhealthy only
+      // when the channel THREW — a watchdog timeout or a mid-turn crash (#135).
+      this.recordTurnOutcome(!threw);
       release();
+    }
+  }
+
+  /** Kill the current child (watchdog timeout). Nulls it first so a concurrent
+   *  next-turn never writes to the dying process; onExit then no-ops on it. */
+  private killChild(): void {
+    const child = this.child;
+    this.child = null;
+    if (!child) return;
+    try {
+      child.stdin.end();
+    } catch {
+      // stdin may already be closed.
+    }
+    child.kill();
+  }
+
+  /** Track consecutive turn failures; fire a one-shot `degraded` event once the
+   *  streak reaches maxTurnFailures so the host can drive #7 fallback (#135). */
+  private recordTurnOutcome(healthy: boolean): void {
+    if (!this.hasStarted) return; // stopped / never started — nothing to account
+    if (healthy) {
+      this.consecutiveFailures = 0;
+      this.degradedNotified = false;
+      return;
+    }
+    this.consecutiveFailures += 1;
+    if (this.consecutiveFailures >= this.maxTurnFailures && !this.degradedNotified) {
+      this.degradedNotified = true;
+      this.emitHealthEvent({ kind: "degraded" });
     }
   }
 
@@ -297,7 +462,11 @@ export class ClaudeCliEngine implements TranslationEngine {
     }
   }
 
-  private onExit(code: number | null, signal: string | null): void {
+  private onExit(child: ChildProcessWithoutNullStreams, code: number | null, signal: string | null): void {
+    // Ignore a previous child's late exit after a respawn/watchdog-kill already
+    // moved on (this.child now points elsewhere or is null) — otherwise it would
+    // null the new child or clobber its status (#135).
+    if (this.child !== child) return;
     this.child = null;
     const detail = `cli exited (code=${code ?? "null"}, signal=${signal ?? "null"}); ${stderrDigest(this.stderrBytes, this.stderrTail)}`;
     if (this.statusValue.status !== "stopped") {

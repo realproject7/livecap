@@ -11,6 +11,16 @@
 //     `result` event) to stdout
 //
 // When turns are exhausted it stays quiet (the engine will have what it needs).
+//
+// Failure-injection modes exercise the #135 watchdog/respawn path:
+//   - LIVECAP_FAKE_HANG_ALWAYS=1     — every process hangs every turn (no event,
+//                                      no exit), so each turn trips the watchdog.
+//   - LIVECAP_FAKE_HANG_ONCE=<file>  — ONLY the first process hangs; a respawn
+//                                      (second process) serves normally.
+//   - LIVECAP_FAKE_CRASH_ONCE=<file> — ONLY the first process exits(1) mid-turn;
+//                                      a respawn serves normally.
+// The "_ONCE" marker file is created atomically by the first process, so a
+// respawn sees it present and behaves normally — modeling crash→respawn recovery.
 
 import { readFileSync, writeFileSync } from "node:fs";
 import { createInterface } from "node:readline";
@@ -26,13 +36,26 @@ if (argvOut) writeFileSync(argvOut, JSON.stringify(process.argv));
 const stderrNoise = process.env.LIVECAP_FAKE_STDERR;
 if (stderrNoise) process.stderr.write(stderrNoise + "\n");
 
-// Echo mode: instead of replaying a fixture, parse each stdin user message and
-// emit a stream-json turn that echoes its text back. Lets a test assert what the
-// adapter actually sent (e.g. the [TASK] marker on complete()/summarize()).
+// Atomically claim "first process" via a marker file: exactly one process across
+// a spawn→respawn sequence gets `true` (the create-if-absent write succeeds).
+function claimFirst(markerPath) {
+  try {
+    writeFileSync(markerPath, "1", { flag: "wx" });
+    return true;
+  } catch {
+    return false; // a prior process already created the marker
+  }
+}
+const hangAlways = process.env.LIVECAP_FAKE_HANG_ALWAYS === "1";
+const isFirstHang = process.env.LIVECAP_FAKE_HANG_ONCE ? claimFirst(process.env.LIVECAP_FAKE_HANG_ONCE) : false;
+const isFirstCrash = process.env.LIVECAP_FAKE_CRASH_ONCE ? claimFirst(process.env.LIVECAP_FAKE_CRASH_ONCE) : false;
+
+// Base "serve one turn" behavior (echo or fixture replay), used when this
+// process is NOT injecting a failure for the current turn.
 const echoMode = process.env.LIVECAP_FAKE_ECHO === "1";
+let serveTurn;
 if (echoMode) {
-  const rl = createInterface({ input: process.stdin });
-  rl.on("line", (line) => {
+  serveTurn = (line) => {
     let text = "";
     try {
       text = JSON.parse(line).message.content[0].text;
@@ -54,42 +77,45 @@ if (echoMode) {
     };
     process.stdout.write(JSON.stringify(assistant) + "\n");
     process.stdout.write(JSON.stringify(result) + "\n");
-  });
+  };
 } else {
+  const fixturePath = process.env.LIVECAP_FAKE_FIXTURE;
+  if (!fixturePath) {
+    process.stderr.write("fake-cli: LIVECAP_FAKE_FIXTURE not set\n");
+    process.exit(1);
+  }
+  // Split the recording into per-turn blocks: every line up to and including the
+  // next `result` event belongs to one turn.
+  const lines = readFileSync(fixturePath, "utf8").split("\n").filter((l) => l.trim() !== "");
+  const blocks = [];
+  let current = [];
+  for (const line of lines) {
+    current.push(line);
+    let type;
+    try {
+      type = JSON.parse(line).type;
+    } catch {
+      type = undefined;
+    }
+    if (type === "result") {
+      blocks.push(current);
+      current = [];
+    }
+  }
+  if (current.length > 0) blocks.push(current);
 
-const fixturePath = process.env.LIVECAP_FAKE_FIXTURE;
-if (!fixturePath) {
-  process.stderr.write("fake-cli: LIVECAP_FAKE_FIXTURE not set\n");
-  process.exit(1);
+  let turn = 0;
+  serveTurn = () => {
+    const block = blocks[turn];
+    turn += 1;
+    if (!block) return;
+    for (const line of block) process.stdout.write(line + "\n");
+  };
 }
 
-// Split the recording into per-turn blocks: every line up to and including the
-// next `result` event belongs to one turn.
-const lines = readFileSync(fixturePath, "utf8").split("\n").filter((l) => l.trim() !== "");
-const blocks = [];
-let current = [];
-for (const line of lines) {
-  current.push(line);
-  let type;
-  try {
-    type = JSON.parse(line).type;
-  } catch {
-    type = undefined;
-  }
-  if (type === "result") {
-    blocks.push(current);
-    current = [];
-  }
-}
-if (current.length > 0) blocks.push(current);
-
-let turn = 0;
 const rl = createInterface({ input: process.stdin });
-rl.on("line", () => {
-  const block = blocks[turn];
-  turn += 1;
-  if (!block) return;
-  for (const line of block) process.stdout.write(line + "\n");
+rl.on("line", (line) => {
+  if (hangAlways || isFirstHang) return; // no event, no exit → trips the watchdog
+  if (isFirstCrash) process.exit(1); // die mid-turn, before any result
+  serveTurn(line);
 });
-
-}

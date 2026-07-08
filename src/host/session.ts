@@ -19,6 +19,7 @@ import {
   SummaryCadence,
 } from "@livecap/engine";
 import type {
+  EngineHealthEvent,
   FinalizedRecord,
   GaugeState,
   MeetingMetrics,
@@ -125,6 +126,9 @@ export class HostSession {
   private intervals: ReturnType<typeof setInterval>[] = [];
   private stopping = false;
   private started = false;
+  /** §8.7 auto-switch toggle: gates both the credit- and health-driven (#135)
+   *  fallback to the local tier. */
+  private autoSwitch = false;
   /** Archive folder for the periodic orphan-adoption pass (#69). */
   private archiveDir = "";
 
@@ -175,6 +179,7 @@ export class HostSession {
     // Settings → subsystem mapping (#12): language names, gauge config,
     // router default, archive policy.
     const resolved = resolveStartConfig(config);
+    this.autoSwitch = resolved.autoSwitch;
 
     const accountant = new CreditAccountant({
       fs: nodeLedgerFs(),
@@ -206,6 +211,10 @@ export class HostSession {
         includePartialMessages: cli.includePartialMessages,
         targetLanguage: resolved.targetLanguage,
       });
+      // Health/error-driven recovery (#135): a respawn surfaces a content-free
+      // status; a `degraded` streak drives fallback to local, alongside the
+      // credit-threshold path wired below.
+      primary.onHealthEvent((event) => this.onEngineHealthEvent(event));
       this.router = new FallbackRouter({
         primary,
         fallback: local,
@@ -358,6 +367,24 @@ export class HostSession {
   private emitGauge(): void {
     if (!this.accountant) return;
     this.emit({ type: "gauge", gauge: this.withExtrasBudget(this.accountant.gauge()) });
+  }
+
+  /** Content-free CLI health signals (#135). A `respawned` event surfaces a
+   *  single status so the user knows translation blipped and recovered; a
+   *  `degraded` event (repeated timeouts/crashes) falls back to the local tier,
+   *  gated by the same §8.7 auto-switch toggle as the credit path. */
+  private onEngineHealthEvent(event: EngineHealthEvent): void {
+    if (this.stopping) return;
+    if (event.kind === "respawned") {
+      this.emit({ type: "status", detail: "translation engine restarted" });
+      return;
+    }
+    // degraded
+    if (this.autoSwitch) {
+      this.switchToLocal();
+    } else {
+      this.emit({ type: "status", detail: "translation engine unresponsive" });
+    }
   }
 
   private switchToLocal(): void {
