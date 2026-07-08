@@ -107,10 +107,11 @@ describe("countOutputLines", () => {
 });
 
 describe("TranslationRunner", () => {
-  it("releases a normal batch at minBatch (2) and streams progressive snapshots", async () => {
+  it("releases a normal batch at minBatch (2) and never caption-binds interim text (#137)", async () => {
     const calls: Call[] = [];
     const { callbacks, recorded } = recorder();
     const timers = manualTimers();
+    // fakeEngine yields a non-done interim snapshot before the done one.
     const runner = new TranslationRunner({
       engine: fakeEngine(calls, (batch) => batch.map((s) => `tr-${s.id}`).join("\n")),
       callbacks,
@@ -124,10 +125,33 @@ describe("TranslationRunner", () => {
 
     expect(calls).toHaveLength(1);
     expect(calls[0].batch.map((s) => s.seq)).toEqual([1, 2]);
-    // At least one non-done snapshot arrived before the done one.
-    expect(recorded.snapshots.some((s) => !s.done)).toBe(true);
+    // Multi-sentence: NO interim caption-bound snapshot — the engine's non-done
+    // snapshot is suppressed, so no caption ever briefly shows another's text.
+    // The validated done mapping is the first (and only) thing these ids show.
+    expect(recorded.snapshots.every((s) => s.done)).toBe(true);
     expect(recorded.snapshots.at(-1)?.done).toBe(true);
     expect(recorded.batches[0].map((r) => r.text)).toEqual(["tr-1", "tr-2"]);
+  });
+
+  it("still streams progressive in-progress snapshots for a single-sentence batch", async () => {
+    const calls: Call[] = [];
+    const { callbacks, recorded } = recorder();
+    const timers = manualTimers();
+    const runner = new TranslationRunner({
+      engine: fakeEngine(calls, (batch) => batch.map((s) => `tr-${s.id}`).join("\n")),
+      callbacks,
+      schedule: timers.schedule,
+      cancel: timers.cancel,
+    });
+
+    runner.enqueue({ id: 1, text: "lone sentence" });
+    timers.fire(); // release the below-minBatch sentence after the idle window
+    await runner.drain();
+
+    // A lone id can't be mis-mapped, so live streaming is preserved (<1.5s display).
+    expect(recorded.snapshots.some((s) => !s.done)).toBe(true);
+    expect(recorded.snapshots.at(-1)?.done).toBe(true);
+    expect(recorded.batches[0]).toEqual([{ id: 1, source: "lone sentence", text: "tr-1" }]);
   });
 
   it("flushes a lone sentence after the idle window (display must not wait for a batch)", async () => {
@@ -270,6 +294,8 @@ describe("TranslationRunner", () => {
         if (batch.length > 1) {
           // The model MERGED two fragments into a single output line: 1 line for
           // 2 ids. A positional map would shift id 2 onto nothing (or a neighbor).
+          // Emit a non-done interim too, to prove it is never bound to a caption.
+          yield { sentenceIds, text: "merged-one", done: false };
           yield { sentenceIds, text: "merged-one-two", done: true };
           return;
         }
@@ -292,8 +318,8 @@ describe("TranslationRunner", () => {
         { id: 2, source: "two", text: "tr-2" },
       ],
     ]);
-    // No finalized (done) snapshot ever carried a shifted positional mapping.
-    for (const snap of recorded.snapshots.filter((s) => s.done)) {
+    // No snapshot — interim OR done — ever bound the merged line to a caption.
+    for (const snap of recorded.snapshots) {
       expect(snap.items.every((it) => it.text === "" || it.text === `tr-${it.id}`)).toBe(true);
     }
     expect(recorded.failures).toEqual([]);

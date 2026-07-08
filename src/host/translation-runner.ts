@@ -150,12 +150,20 @@ export class TranslationRunner {
     try {
       let finalText = "";
       // Snapshot the rolling pairs: the live array mutates as batches finish,
-      // and the engine streams against this context asynchronously. Stream only
-      // the in-progress snapshots positionally; the FINAL/done mapping is held
-      // back until the line-count guard below validates it (#137).
+      // and the engine streams against this context asynchronously.
+      //
+      // Stream in-progress snapshots ONLY for a single-sentence batch — a lone id
+      // can't be mis-mapped (all output folds into it). For a MULTI-sentence
+      // batch, bind NOTHING to captions until the line-count guard below
+      // validates the finalized mapping (#137): a positional interim snapshot
+      // could briefly render one caption's translation under another id before
+      // the guard corrects it. The validated `done` mapping (or the 1:1-corrected
+      // one) is the first thing these captions ever show.
       for await (const snapshot of this.engine.translate(batch, { pairs: this.pairs.slice() })) {
         finalText = snapshot.text;
-        if (!snapshot.done) this.callbacks.onSnapshot(assignLines(ids, snapshot.text), false);
+        if (!snapshot.done && ids.length === 1) {
+          this.callbacks.onSnapshot(assignLines(ids, snapshot.text), false);
+        }
       }
       // Line-mapping guard (#137): the prompt contract is one output line per
       // input sentence, in order. If the model MERGED fragments (an 800ms
