@@ -65,6 +65,24 @@ export function sanitizeInline(text: string): string {
   return LEADING_STRUCTURAL.test(collapsed) ? ` ${collapsed}` : collapsed;
 }
 
+/**
+ * Neutralize a field whose newlines are MEANINGFUL and must survive round-trip
+ * (#113 coaching `better`/`explanation` render multi-line, #148). Collapsing
+ * would corrupt those rewrites, so instead space-prefix each line that begins
+ * with a structural token: a continuation line like `## Transcript` then no
+ * longer matches the section header grammar, so it cannot re-open a real section
+ * bucket in the parser (which reuses a `## Section` by name) and smuggle forged
+ * entries/board lines into it. A space-prefixed line parses back as an ordinary
+ * continuation line, so the multi-line field still round-trips. Identity on text
+ * whose lines don't start with `# > - *` (existing coaching output unchanged).
+ */
+export function sanitizeBlock(text: string): string {
+  return text
+    .split(/\r?\n/)
+    .map((line) => (LEADING_STRUCTURAL.test(line) ? ` ${line}` : line))
+    .join("\n");
+}
+
 /** Render one entry's two lines (header line + `>` translation), trailing \n. */
 export function renderEntryBody(e: CaptionEntry): string {
   const pin = e.pinned ? "📌 " : "";
@@ -103,19 +121,28 @@ export const COACHING_CHANGE_SEP = " · ";
 /** Render one coached "me" entry as a `### (timestamp · k)` block (#113). The
  *  heading echoes the source text as an advisory redundancy check; empty
  *  `changes`/`explanation` omit their line so absence round-trips to the
- *  default. `better` may span multiple lines and is rendered verbatim. */
+ *  default. `better` may span multiple lines. Every field here is adversarial
+ *  LLM output and is sanitized (#148, N-2): the multi-line `better`/`explanation`
+ *  per-line (newlines preserved), the single-line `changes` edits inline. */
 function renderCoachingEntry(e: CaptionEntry, occurrence: number, coaching: NonNullable<CaptionEntry["coaching"]>): string {
   // The heading echoes the (adversarial) source as an advisory redundancy check;
-  // sanitize it the same way as the transcript so it cannot forge a coaching
-  // heading/label line either (#148). The echo is not parsed back into data, so
-  // this can't affect coaching round-trip.
+  // sanitize it like the transcript so it cannot forge a coaching heading/label
+  // line. The echo is not parsed back into data, so this can't affect round-trip.
   let out = `### (${e.timestamp} · ${occurrence}) — ${sanitizeInline(e.source)}\n`;
-  out += `**Better:** ${coaching.better}\n`;
+  // `better`/`explanation` are multi-line LLM output: a continuation line like
+  // `## Transcript` would otherwise re-open the real section bucket in the parser
+  // and smuggle forged entries/board lines into it (#148). sanitizeBlock keeps
+  // the newlines but defuses each structural line-start.
+  out += `**Better:** ${sanitizeBlock(coaching.better)}\n`;
   if (coaching.changes.length > 0) {
-    const list = coaching.changes.map((c) => `${c.from}${COACHING_ARROW}${c.to}`).join(COACHING_CHANGE_SEP);
+    // Each edit is single-line; sanitizeInline collapses any injected newline so
+    // a `from`/`to` cannot spill onto a new structural line.
+    const list = coaching.changes
+      .map((c) => `${sanitizeInline(c.from)}${COACHING_ARROW}${sanitizeInline(c.to)}`)
+      .join(COACHING_CHANGE_SEP);
     out += `**Changes:** ${list}\n`;
   }
-  if (coaching.explanation !== "") out += `**Explanation:** ${coaching.explanation}\n`;
+  if (coaching.explanation !== "") out += `**Explanation:** ${sanitizeBlock(coaching.explanation)}\n`;
   return out;
 }
 
