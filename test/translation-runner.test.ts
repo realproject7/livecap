@@ -442,4 +442,119 @@ describe("TranslationRunner", () => {
     expect(recorded.failures).toEqual([{ ids: [2], detail: "translation turn failed (api_error_status=500)" }]);
     expect(recorded.batches).toEqual([[{ id: 1, source: "one", text: "tr-1" }]]);
   });
+
+  it("dedups an id already pending — it can't appear twice in one batch (#139)", async () => {
+    const calls: Call[] = [];
+    const { callbacks, recorded } = recorder();
+    const timers = manualTimers();
+    const runner = new TranslationRunner({
+      engine: fakeEngine(calls, (batch) => batch.map((s) => `tr-${s.id}`).join("\n")),
+      callbacks,
+      schedule: timers.schedule,
+      cancel: timers.cancel,
+    });
+
+    runner.enqueue({ id: 1, text: "one" }); // below minBatch — waits in the queue
+    runner.enqueue({ id: 1, text: "one dup" }); // same id still pending → coalesced
+    runner.enqueue({ id: 2, text: "two" }); // now [1,2] releases
+    await runner.drain();
+
+    expect(calls).toHaveLength(1);
+    expect(calls[0].batch.map((s) => Number(s.id))).toEqual([1, 2]); // no second 1
+    expect(recorded.batches[0]).toEqual([
+      { id: 1, source: "one", text: "tr-1" },
+      { id: 2, source: "two", text: "tr-2" },
+    ]);
+  });
+
+  it("dispatches a user retranslate ahead of queued live captions (#139)", async () => {
+    const calls: Call[] = [];
+    const { callbacks } = recorder();
+    const timers = manualTimers();
+    const runner = new TranslationRunner({
+      engine: fakeEngine(calls, (batch) => batch.map((s) => `tr-${s.id}`).join("\n")),
+      callbacks,
+      schedule: timers.schedule,
+      cancel: timers.cancel,
+    });
+
+    runner.enqueue({ id: 1, text: "live caption" }); // below minBatch — queued, waiting
+    runner.retranslate({ id: 99, text: "fix this old line" }); // jumps the queue
+    await runner.drain();
+
+    // The retranslate goes out FIRST, ahead of the queued live caption.
+    expect(calls[0].batch.map((s) => Number(s.id))).toEqual([99]);
+    expect(calls.some((c) => c.batch.some((s) => Number(s.id) === 1))).toBe(true);
+  });
+
+  it("coalesces a retranslate of an id whose original is still pending (#139)", async () => {
+    const calls: Call[] = [];
+    const { callbacks } = recorder();
+    const timers = manualTimers();
+    const runner = new TranslationRunner({
+      engine: fakeEngine(calls, (batch) => batch.map((s) => `tr-${s.id}`).join("\n")),
+      callbacks,
+      schedule: timers.schedule,
+      cancel: timers.cancel,
+    });
+
+    runner.enqueue({ id: 1, text: "orig" }); // queued, still pending
+    runner.retranslate({ id: 1, text: "orig" }); // id 1 already pending → coalesced, no priority dispatch
+    runner.enqueue({ id: 2, text: "two" }); // releases [1,2]
+    await runner.drain();
+
+    const allIds = calls.flatMap((c) => c.batch.map((s) => Number(s.id)));
+    expect(allIds.filter((id) => id === 1)).toHaveLength(1); // id 1 dispatched exactly once
+  });
+
+  it("keeps a retranslate result out of the live rolling context (#139)", async () => {
+    const calls: Call[] = [];
+    const { callbacks } = recorder();
+    const timers = manualTimers();
+    const runner = new TranslationRunner({
+      engine: fakeEngine(calls, (batch) => batch.map((s) => `tr-${s.id}`).join("\n")),
+      callbacks,
+      schedule: timers.schedule,
+      cancel: timers.cancel,
+    });
+
+    runner.retranslate({ id: 99, text: "historical line" });
+    await runner.drain();
+    runner.enqueue({ id: 1, text: "one" });
+    runner.enqueue({ id: 2, text: "two" });
+    await runner.drain();
+
+    // The live batch sees NO context from the historical retranslate (its pairing
+    // was never pushed into the rolling window).
+    const liveCall = calls.find((c) => c.batch.some((s) => Number(s.id) === 1));
+    expect(liveCall?.ctx.pairs).toEqual([]);
+  });
+
+  it("feeds NORMAL completed pairs into context but not retranslate results (#139)", async () => {
+    const calls: Call[] = [];
+    const { callbacks } = recorder();
+    const timers = manualTimers();
+    const runner = new TranslationRunner({
+      engine: fakeEngine(calls, (batch) => batch.map((s) => `tr-${s.id}`).join("\n")),
+      callbacks,
+      schedule: timers.schedule,
+      cancel: timers.cancel,
+    });
+
+    runner.enqueue({ id: 1, text: "one" });
+    runner.enqueue({ id: 2, text: "two" });
+    await runner.drain();
+    runner.retranslate({ id: 99, text: "old" }); // must NOT enter context
+    await runner.drain();
+    runner.enqueue({ id: 3, text: "three" });
+    runner.enqueue({ id: 4, text: "four" });
+    await runner.drain();
+
+    // Live pairs carry the first live batch, never the retranslate.
+    const lastLive = calls.find((c) => c.batch.some((s) => Number(s.id) === 3));
+    expect(lastLive?.ctx.pairs).toEqual([
+      { source: "one", target: "tr-1" },
+      { source: "two", target: "tr-2" },
+    ]);
+  });
 });
