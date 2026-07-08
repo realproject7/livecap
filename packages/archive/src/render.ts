@@ -42,12 +42,35 @@ function renderBoard(board: BoardData): string {
   return out;
 }
 
+// The line-start markdown tokens the parser keys on (parse.ts): `**Me**/**Them**`
+// entry headers, `> ` translation lines, `## ` sections, `- ` summary bullets,
+// and `**Label** —` board lines all begin with one of `# > - *`.
+const LEADING_STRUCTURAL = /^(?:#|>|-|\*)/;
+
+/**
+ * Neutralize adversarial free text before it is written into the line-oriented
+ * transcript (#148, N-2). `source` (whatever a participant speaks) and `target`
+ * (LLM output, susceptible to spoken prompt-injection) are attacker-influenceable;
+ * written verbatim, a value carrying a newline — or, defensively, a leading
+ * structural token — could forge a fake `**Me**` utterance, a `> ` line, or a
+ * board/section line in the saved, searchable record. Collapse newlines to
+ * spaces (the value can then never begin a new line) and space-prefix a leading
+ * structural token. The parser captures source/target to end-of-line and never
+ * unescapes, so existing files parse exactly as before and the writer's output
+ * still round-trips. Idempotent, and identity on ordinary text (so every
+ * newline-free, non-structural caption renders byte-for-byte as today).
+ */
+export function sanitizeInline(text: string): string {
+  const collapsed = text.replace(/[\r\n]+/g, " ");
+  return LEADING_STRUCTURAL.test(collapsed) ? ` ${collapsed}` : collapsed;
+}
+
 /** Render one entry's two lines (header line + `>` translation), trailing \n. */
 export function renderEntryBody(e: CaptionEntry): string {
   const pin = e.pinned ? "📌 " : "";
   const speaker = e.speaker === "me" ? "Me" : "Them";
   const confidence = e.lowConfidence ? " (?)" : "";
-  return `${pin}**${speaker}** (${e.timestamp}) — ${e.source}${confidence}\n> ${e.target}\n`;
+  return `${pin}**${speaker}** (${e.timestamp}) — ${sanitizeInline(e.source)}${confidence}\n> ${sanitizeInline(e.target)}\n`;
 }
 
 /**
@@ -82,7 +105,11 @@ export const COACHING_CHANGE_SEP = " · ";
  *  `changes`/`explanation` omit their line so absence round-trips to the
  *  default. `better` may span multiple lines and is rendered verbatim. */
 function renderCoachingEntry(e: CaptionEntry, occurrence: number, coaching: NonNullable<CaptionEntry["coaching"]>): string {
-  let out = `### (${e.timestamp} · ${occurrence}) — ${e.source}\n`;
+  // The heading echoes the (adversarial) source as an advisory redundancy check;
+  // sanitize it the same way as the transcript so it cannot forge a coaching
+  // heading/label line either (#148). The echo is not parsed back into data, so
+  // this can't affect coaching round-trip.
+  let out = `### (${e.timestamp} · ${occurrence}) — ${sanitizeInline(e.source)}\n`;
   out += `**Better:** ${coaching.better}\n`;
   if (coaching.changes.length > 0) {
     const list = coaching.changes.map((c) => `${c.from}${COACHING_ARROW}${c.to}`).join(COACHING_CHANGE_SEP);
