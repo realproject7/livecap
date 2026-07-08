@@ -4,6 +4,7 @@
 // content-free `degraded` signal so the host can fall back to the local tier.
 //
 // Real spawn/stdio against fake-cli's failure-injection modes — no mocks.
+import { readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -130,6 +131,39 @@ describe("ClaudeCliEngine — per-turn watchdog, respawn, and degraded fallback 
       // Latched: a third consecutive failure does not re-fire.
       await expect(drain(engine)).rejects.toThrow(); // failure 3
       expect(events.filter((e) => e.kind === "degraded")).toHaveLength(1);
+    } finally {
+      await engine.stop();
+    }
+  });
+
+  it("respawns resuming the external resume id, not a fresh unused session id (#135)", async () => {
+    // Started with an external `resume` id, so `sessionId` is a fresh UUID that
+    // was never used with --session-id. A respawn must resume the ORIGINAL
+    // conversation (continuity), not fork into that unused id.
+    const argvFile = marker("resume-argv");
+    const engine = new ClaudeCliEngine({
+      bin: FAKE_CLI,
+      cwd: tmpdir(),
+      env: {
+        ...process.env,
+        LIVECAP_FAKE_ECHO: "1",
+        LIVECAP_FAKE_CRASH_ONCE: marker("crash-resume"),
+        LIVECAP_FAKE_ARGV_OUT: argvFile, // each process rewrites this with its argv
+      },
+      includePartialMessages: false,
+      sessionId: "SID-fresh-unused",
+      resume: "RESUME-original-convo",
+    });
+    await engine.start();
+    try {
+      await expect(drain(engine)).rejects.toThrow(); // turn 1 crashes mid-turn
+      await drain(engine); // turn 2 respawns → argvFile now holds the respawn's argv
+      const argv: string[] = JSON.parse(readFileSync(argvFile, "utf8"));
+      expect(argv).toContain("--resume");
+      expect(argv[argv.indexOf("--resume") + 1]).toBe("RESUME-original-convo");
+      // The unused session id must never reach the respawn command line.
+      expect(argv).not.toContain("SID-fresh-unused");
+      expect(argv).not.toContain("--session-id");
     } finally {
       await engine.stop();
     }

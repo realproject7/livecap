@@ -117,6 +117,11 @@ function turnErrorMessage(kind: string, apiErrorStatus: number | null): string {
 export class ClaudeCliEngine implements TranslationEngine {
   private readonly config: ClaudeCliEngineConfig;
   private readonly sessionId: string;
+  /** Id of the live conversation to resume after a crash (#135): the external
+   *  `resume` id when start() resumed an existing session, else this session's
+   *  own id (used with --session-id). Using `sessionId` unconditionally would
+   *  fork a resumed conversation into a fresh, unused session on the next crash. */
+  private readonly resumeId: string;
   private readonly systemPrompt: string;
   private readonly parser = new StreamJsonParser();
   private readonly turnMutex = new Mutex();
@@ -153,6 +158,7 @@ export class ClaudeCliEngine implements TranslationEngine {
     this.turnTimeoutMs = config.turnTimeoutMs ?? DEFAULT_TURN_TIMEOUT;
     this.maxTurnFailures = config.maxTurnFailures ?? DEFAULT_MAX_TURN_FAILURES;
     this.sessionId = config.sessionId ?? randomUUID();
+    this.resumeId = config.resume ?? this.sessionId;
     // The system prompt goes on argv (--system-prompt), so it must stay static
     // and content-free of user data: the glossary is bootstrapped over stdin in
     // start() instead (#26 — argv is world-readable via ps / /proc).
@@ -271,7 +277,7 @@ export class ClaudeCliEngine implements TranslationEngine {
   private async respawn(): Promise<ChildProcessWithoutNullStreams | null> {
     this.statusValue = { status: "starting" };
     try {
-      const child = await this.spawnSession(this.sessionId);
+      const child = await this.spawnSession(this.resumeId);
       this.statusValue = { status: "ready" };
       this.emitHealthEvent({ kind: "respawned" });
       return child;
