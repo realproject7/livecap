@@ -91,6 +91,21 @@ describe("assignLines", () => {
   it("folds surplus lines into the last sentence", () => {
     expect(assignLines([1], "한 줄\n두 줄")).toEqual([{ id: 1, text: "한 줄 두 줄" }]);
   });
+
+  it("drops internal blank lines so they never shift the mapping (#137)", () => {
+    // 3 real translations with a spurious internal blank line: split("\n") would
+    // be length 4 and fold/shift, but the blank is not a mapping unit.
+    expect(assignLines([1, 2, 3], "tr-1\n\ntr-2\ntr-3")).toEqual([
+      { id: 1, text: "tr-1" },
+      { id: 2, text: "tr-2" },
+      { id: 3, text: "tr-3" },
+    ]);
+    // Leading/trailing blanks are ignored too.
+    expect(assignLines([1, 2], "\ntr-1\ntr-2\n")).toEqual([
+      { id: 1, text: "tr-1" },
+      { id: 2, text: "tr-2" },
+    ]);
+  });
 });
 
 describe("countOutputLines", () => {
@@ -353,6 +368,50 @@ describe("TranslationRunner", () => {
         { id: 1, source: "one", text: "tr-1" },
         { id: 2, source: "two", text: "tr-2" },
       ],
+    ]);
+  });
+
+  it("does not persist a shifted map when a >=3-sentence batch has internal blank lines (#137)", async () => {
+    const calls: Call[] = [];
+    const { callbacks, recorded } = recorder();
+    let release: () => void = () => undefined;
+    const gate = new Promise<void>((resolve) => (release = resolve));
+    const engine = {
+      async *translate(batch: Sentence[], ctx: RollingContext): AsyncIterable<Translation> {
+        calls.push({ batch, ctx });
+        const sentenceIds = batch.map((s) => s.id);
+        if (calls.length === 1) {
+          await gate; // hold [1,2] so the backlog merges into one >=3 batch
+          yield { sentenceIds, text: "tr-1\ntr-2", done: true };
+          return;
+        }
+        // The merged 3-sentence backlog: one line per sentence (in the sent,
+        // newest-first order) with a spurious internal blank line injected.
+        const text = batch.map((s) => `tr-${s.id}`).join("\n").replace("\n", "\n\n");
+        yield { sentenceIds, text, done: true };
+      },
+    };
+    const timers = manualTimers();
+    const runner = new TranslationRunner({ engine, callbacks, schedule: timers.schedule, cancel: timers.cancel });
+
+    runner.enqueue({ id: 1, text: "one" });
+    runner.enqueue({ id: 2, text: "two" });
+    await tick(); // batch [1,2] in flight, gated
+    runner.enqueue({ id: 3, text: "three" });
+    runner.enqueue({ id: 4, text: "four" });
+    runner.enqueue({ id: 5, text: "five" });
+    release();
+    await runner.drain();
+
+    // The internal blank made split("\n") length 4 for 3 ids — pre-fix this
+    // folded/shifted while the count guard still read "matched" (3 non-empty ==
+    // 3). Each caption must map to its OWN translation; nothing shifted, nothing
+    // persisted under the wrong id, and no 1:1 re-request was needed.
+    expect(calls).toHaveLength(2);
+    expect(recorded.batches[1]).toEqual([
+      { id: 3, source: "three", text: "tr-3" },
+      { id: 4, source: "four", text: "tr-4" },
+      { id: 5, source: "five", text: "tr-5" },
     ]);
   });
 

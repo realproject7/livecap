@@ -53,15 +53,21 @@ export interface RunnerOptions {
  * Map a whole-batch translation snapshot onto its sentences: the prompt
  * contract is one output line per input sentence, in input order. Extra lines
  * beyond the batch are folded into the last sentence.
+ *
+ * Blank lines are dropped BEFORE mapping (#137): they carry no translation and
+ * are not a mapping unit, so the positional map uses the SAME non-empty lines
+ * {@link countOutputLines} counts. Otherwise an internal blank line makes
+ * split("\n") longer than the id count and folds/shifts later captions while the
+ * count guard still reads "matched" — persisting a mis-attributed mapping.
  */
 export function assignLines(ids: number[], text: string): RunnerItem[] {
   if (ids.length === 0) return [];
-  const lines = text.split("\n").map((line) => line.trim());
+  const lines = text
+    .split("\n")
+    .map((line) => line.trim())
+    .filter((line) => line !== "");
   if (lines.length > ids.length) {
-    const folded = lines
-      .splice(ids.length - 1)
-      .filter((line) => line !== "")
-      .join(" ");
+    const folded = lines.splice(ids.length - 1).join(" ");
     lines[ids.length - 1] = folded;
   }
   return ids.map((id, i) => ({ id, text: lines[i] ?? "" }));
@@ -69,10 +75,12 @@ export function assignLines(ids: number[], text: string): RunnerItem[] {
 
 /**
  * Count the model's actual output lines — the unit {@link assignLines} maps
- * positionally onto sentence ids. Blank lines carry no translation, so they are
- * excluded. A count that differs from the batch size means the model merged
- * fragments or emitted an extra preamble/blank line, which would shift every
- * subsequent caption's mapping — so positional attribution is unsafe (#137).
+ * positionally onto sentence ids. Blank lines carry no translation and are
+ * excluded, matching the same lines assignLines maps (blanks can't shift the
+ * map — they are dropped there too). A count that differs from the batch size
+ * means the model merged fragments (fewer lines) or emitted an extra non-blank
+ * preamble line (more), which WOULD shift every subsequent caption's mapping —
+ * so positional attribution is unsafe and the batch is re-translated 1:1 (#137).
  */
 export function countOutputLines(text: string): number {
   return text.split("\n").reduce((n, line) => (line.trim() === "" ? n : n + 1), 0);
