@@ -6,6 +6,7 @@ import { describe, expect, it } from "vitest";
 import type { RollingContext, Sentence, Translation } from "@livecap/engine";
 import {
   assignLines,
+  countOutputLines,
   TranslationRunner,
   type RunnerCallbacks,
   type RunnerItem,
@@ -89,6 +90,19 @@ describe("assignLines", () => {
 
   it("folds surplus lines into the last sentence", () => {
     expect(assignLines([1], "한 줄\n두 줄")).toEqual([{ id: 1, text: "한 줄 두 줄" }]);
+  });
+});
+
+describe("countOutputLines", () => {
+  it("counts non-empty trimmed lines", () => {
+    expect(countOutputLines("a\nb\nc")).toBe(3);
+    expect(countOutputLines("a")).toBe(1);
+  });
+
+  it("ignores blank and whitespace-only lines", () => {
+    expect(countOutputLines("a\n\nb\n   \nc")).toBe(3);
+    expect(countOutputLines("")).toBe(0);
+    expect(countOutputLines("   ")).toBe(0);
   });
 });
 
@@ -220,5 +234,127 @@ describe("TranslationRunner", () => {
     timers.fire();
     await runner.drain();
     expect(recorded.batches.at(-1)?.[0]).toEqual({ id: 3, source: "works", text: "ok" });
+  });
+
+  it("does not re-translate when the output line count matches the batch (#137)", async () => {
+    const calls: Call[] = [];
+    const { callbacks, recorded } = recorder();
+    const timers = manualTimers();
+    const runner = new TranslationRunner({
+      engine: fakeEngine(calls, (batch) => batch.map((s) => `tr-${s.id}`).join("\n")),
+      callbacks,
+      schedule: timers.schedule,
+      cancel: timers.cancel,
+    });
+
+    runner.enqueue({ id: 1, text: "one" });
+    runner.enqueue({ id: 2, text: "two" });
+    await runner.drain();
+
+    // Counts match → the positional map is used; no 1:1 re-request.
+    expect(calls).toHaveLength(1);
+    expect(recorded.batches[0]).toEqual([
+      { id: 1, source: "one", text: "tr-1" },
+      { id: 2, source: "two", text: "tr-2" },
+    ]);
+  });
+
+  it("re-translates 1:1 when the model returns fewer lines than the batch — no caption shows another's (#137)", async () => {
+    const calls: Call[] = [];
+    const { callbacks, recorded } = recorder();
+    const timers = manualTimers();
+    const engine = {
+      async *translate(batch: Sentence[], ctx: RollingContext): AsyncIterable<Translation> {
+        calls.push({ batch, ctx });
+        const sentenceIds = batch.map((s) => s.id);
+        if (batch.length > 1) {
+          // The model MERGED two fragments into a single output line: 1 line for
+          // 2 ids. A positional map would shift id 2 onto nothing (or a neighbor).
+          yield { sentenceIds, text: "merged-one-two", done: true };
+          return;
+        }
+        yield { sentenceIds, text: `tr-${batch[0].id}`, done: true };
+      },
+    };
+    const runner = new TranslationRunner({ engine, callbacks, schedule: timers.schedule, cancel: timers.cancel });
+
+    runner.enqueue({ id: 1, text: "one" });
+    runner.enqueue({ id: 2, text: "two" });
+    await runner.drain();
+
+    // The 2-batch mismatched, so each sentence was re-requested 1:1.
+    expect(calls.map((c) => c.batch.length)).toEqual([2, 1, 1]);
+    // Each caption is attributed to its OWN translation — never a neighbor's, and
+    // the merged line is never persisted under any id.
+    expect(recorded.batches).toEqual([
+      [
+        { id: 1, source: "one", text: "tr-1" },
+        { id: 2, source: "two", text: "tr-2" },
+      ],
+    ]);
+    // No finalized (done) snapshot ever carried a shifted positional mapping.
+    for (const snap of recorded.snapshots.filter((s) => s.done)) {
+      expect(snap.items.every((it) => it.text === "" || it.text === `tr-${it.id}`)).toBe(true);
+    }
+    expect(recorded.failures).toEqual([]);
+  });
+
+  it("re-translates 1:1 when the model prepends an extra preamble line (#137)", async () => {
+    const calls: Call[] = [];
+    const { callbacks, recorded } = recorder();
+    const timers = manualTimers();
+    const engine = {
+      async *translate(batch: Sentence[], ctx: RollingContext): AsyncIterable<Translation> {
+        calls.push({ batch, ctx });
+        const sentenceIds = batch.map((s) => s.id);
+        if (batch.length > 1) {
+          // A preamble line before the two translations: 3 lines for 2 ids.
+          yield { sentenceIds, text: "Here is the translation:\ntr-1\ntr-2", done: true };
+          return;
+        }
+        yield { sentenceIds, text: `tr-${batch[0].id}`, done: true };
+      },
+    };
+    const runner = new TranslationRunner({ engine, callbacks, schedule: timers.schedule, cancel: timers.cancel });
+
+    runner.enqueue({ id: 1, text: "one" });
+    runner.enqueue({ id: 2, text: "two" });
+    await runner.drain();
+
+    expect(calls.map((c) => c.batch.length)).toEqual([2, 1, 1]);
+    expect(recorded.batches).toEqual([
+      [
+        { id: 1, source: "one", text: "tr-1" },
+        { id: 2, source: "two", text: "tr-2" },
+      ],
+    ]);
+  });
+
+  it("marks an un-mappable id failed when its 1:1 re-translation throws; source preserved (#137)", async () => {
+    const calls: Call[] = [];
+    const { callbacks, recorded } = recorder();
+    const timers = manualTimers();
+    const engine = {
+      async *translate(batch: Sentence[], ctx: RollingContext): AsyncIterable<Translation> {
+        calls.push({ batch, ctx });
+        const sentenceIds = batch.map((s) => s.id);
+        if (batch.length > 1) {
+          yield { sentenceIds, text: "only-one-line", done: true }; // 1 line, 2 ids → mismatch
+          return;
+        }
+        if (Number(batch[0].id) === 2) throw new Error("translation turn failed (api_error_status=500)");
+        yield { sentenceIds, text: `tr-${batch[0].id}`, done: true };
+      },
+    };
+    const runner = new TranslationRunner({ engine, callbacks, schedule: timers.schedule, cancel: timers.cancel });
+
+    runner.enqueue({ id: 1, text: "one" });
+    runner.enqueue({ id: 2, text: "two" });
+    await runner.drain();
+
+    // id 2's re-translation failed → reported failed (host preserves its source);
+    // id 1 succeeded and is persisted. Neither is shown under the wrong id.
+    expect(recorded.failures).toEqual([{ ids: [2], detail: "translation turn failed (api_error_status=500)" }]);
+    expect(recorded.batches).toEqual([[{ id: 1, source: "one", text: "tr-1" }]]);
   });
 });
