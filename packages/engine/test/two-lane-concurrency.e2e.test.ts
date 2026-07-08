@@ -29,12 +29,18 @@ async function drain(engine: ClaudeCliEngine): Promise<Translation[]> {
 
 describe("two-lane concurrency (#142)", () => {
   it("a hung summary turn on the extras lane does not block live translation on the other lane", async () => {
-    // Extras lane: every turn hangs (models a long/awaited summary turn). A short
-    // watchdog keeps the test from lingering if cleanup is ever skipped.
+    // Extras lane: every turn hangs (models a long/awaited summary turn) — the
+    // fake-cli serves nothing and does not exit. The fixture is still required so
+    // the process starts normally (no-fixture makes it exit at spawn); HANG_ALWAYS
+    // then holds the turn open. A short watchdog bounds the turn if cleanup slips.
     const extras = new ClaudeCliEngine({
       bin: FAKE_CLI,
       cwd: tmpdir(),
-      env: { ...process.env, LIVECAP_FAKE_HANG_ALWAYS: "1" },
+      env: {
+        ...process.env,
+        LIVECAP_FAKE_FIXTURE: fixturePath("session-without-partials.jsonl"),
+        LIVECAP_FAKE_HANG_ALWAYS: "1",
+      },
       includePartialMessages: false,
       turnTimeoutMs: 10_000,
     });
