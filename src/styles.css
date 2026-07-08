@@ -441,7 +441,18 @@ body[data-phase="paused"] #summary .lbl {
 }
 .cap[data-state="pending"] .tr {
   color: var(--text-meta); /* state 2: subtle ellipsis shimmer */
+}
+/* #143: cap concurrent shimmers — only the latest pending block (JS toggles
+   .shimmering) animates. A translation batch leaves many blocks pending at once;
+   without the cap each ran its own infinite animation. */
+.cap[data-state="pending"].shimmering .tr {
   animation: shimmer 1.2s ease-in-out infinite;
+}
+/* #143: respect the OS reduced-motion preference (none existed in src/ before). */
+@media (prefers-reduced-motion: reduce) {
+  .cap[data-state="pending"].shimmering .tr {
+    animation: none;
+  }
 }
 .cap[data-state="failed"] .tr {
   color: var(--text-meta);
@@ -537,13 +548,16 @@ body[data-phase="paused"] #summary .lbl {
   font-size: 11px;
   color: var(--text-original);
   background: var(--surface-4);
-  backdrop-filter: blur(8px);
   cursor: pointer;
   opacity: 0;
   pointer-events: none;
   transition: opacity var(--fade) ease;
 }
+/* #143: the blur layer lives only on the visible chip. Kept on the base rule it
+   stayed alive at opacity:0, forcing the live feed beneath to re-filter on every
+   caption update. */
 #live-chip.visible {
+  backdrop-filter: blur(8px);
   opacity: 1;
   pointer-events: auto;
 }

@@ -18,6 +18,7 @@ import { bootstrap } from "./bootstrap";
 import { buildDashboard, loadArchivedSessions, type DashboardSurface } from "./dashboard";
 import { LANGUAGES, SOURCE_AUTO_CODE, SOURCE_LANGUAGES, languageByCode } from "./languages";
 import { FeedState, type CaptionBlock } from "./feed-state";
+import { FeedCoalescer, applyShimmerCap } from "./feed-coalescer";
 import {
   buildReview,
   type CoachingCard,
@@ -475,13 +476,43 @@ function snapToLive(): void {
 
 liveChip.addEventListener("click", snapToLive);
 
-function afterFeedChange(appended: boolean): void {
+// #143 rAF-coalesced feed flush: caption + translation-snapshot handlers queue
+// their changes here instead of writing the DOM and reading `scrollHeight`
+// (a forced sync reflow) per event. One frame absorbs a whole burst — the
+// deduped block writes plus a SINGLE scroll-stick read/write — killing the
+// per-event reflow the unthrottled translation stream was causing.
+const feedCoalescer = new FeedCoalescer<CaptionBlock>();
+let feedFlushScheduled = false;
+
+function scheduleFeedFlush(): void {
+  if (feedFlushScheduled) return;
+  feedFlushScheduled = true;
+  requestAnimationFrame(flushFeed);
+}
+
+function flushFeed(): void {
+  feedFlushScheduled = false;
+  const { dirty, appended } = feedCoalescer.drain();
+  // Batch the accumulated content writes with no interleaved layout read.
+  for (const block of dirty) updateBlockEl(block);
+  updateShimmer();
+  // One scroll-stick read+write for the whole frame (was per-event).
   if (atBottom) {
     feedWrap.scrollTop = feedWrap.scrollHeight;
   } else if (appended) {
     liveChip.classList.add("visible");
   }
   syncMiniViews();
+}
+
+// #143: cap the pending-translation shimmer to the single latest pending block.
+// A translation batch leaves many blocks pending at once; without a cap each ran
+// its own infinite animation. Only the newest pending block (nearest the live
+// edge) animates; the CSS gates it behind prefers-reduced-motion.
+let shimmerEl: HTMLElement | null = null;
+
+function updateShimmer(): void {
+  shimmerEl = applyShimmerCap(feed.blocks, (key) => blockEls.get(key), shimmerEl);
 }
 
 /* ---- pinned dock (state 5: held above the input row until unpinned) ---- */
@@ -539,7 +570,9 @@ function retranslate(key: string): void {
   const block = feed.blocks.find((b) => b.key === key);
   if (!block || block.id === null || !sessionRunning()) return;
   feed.markRetranslating(block.id);
-  updateBlockEl(block);
+  // Route through the frame flush so the pending state + shimmer cap update (#143).
+  feedCoalescer.markDirty(block);
+  scheduleFeedFlush();
   void hostRequest({ type: "retranslate", id: block.id });
 }
 
@@ -901,37 +934,46 @@ void listen<CaptionBridgeEvent>("caption://event", (event) => {
     if (gone) {
       blockEls.get(gone.key)?.remove();
       blockEls.delete(gone.key);
-      afterFeedChange(false);
+      feedCoalescer.drop(gone.key);
+      scheduleFeedFlush();
     }
     return;
   }
   const block = feed.applyCaption(event.payload);
   const isNew = !blockEls.has(block.key);
   const el = blockEl(block);
-  if (isNew) feedEl.appendChild(el);
-  updateBlockEl(block);
+  // Structural inserts stay synchronous (creating a node forces no reflow); the
+  // content write is deferred to the frame flush (#143).
+  if (isNew) {
+    feedEl.appendChild(el);
+    feedCoalescer.markAppended();
+  }
+  feedCoalescer.markDirty(block);
   // #57: keep the DOM windowed — evicted blocks leave the feed (they remain
   // in the archive); scrolling above the window meets the history notice.
   for (const gone of feed.evictOverflow()) {
     blockEls.get(gone.key)?.remove();
     blockEls.delete(gone.key);
+    feedCoalescer.drop(gone.key);
   }
   feedNote.classList.toggle("visible", feed.evictedCount > 0);
-  afterFeedChange(isNew);
+  scheduleFeedFlush();
 });
 
 void listen<HostOutbound>("host://event", (event) => {
   const message = event.payload;
   switch (message.type) {
     case "translation": {
-      for (const block of feed.applyTranslation(message.items, message.done)) updateBlockEl(block);
+      // The unthrottled snapshot burst (#143): queue each changed block and let
+      // one rAF flush apply them, deduped, with a single scroll-stick write.
+      for (const block of feed.applyTranslation(message.items, message.done)) feedCoalescer.markDirty(block);
       renderPinnedIfAffected(message.items.map((item) => item.id));
-      afterFeedChange(false);
+      scheduleFeedFlush();
       break;
     }
     case "translationFailed": {
-      for (const block of feed.applyFailed(message.ids)) updateBlockEl(block);
-      afterFeedChange(false);
+      for (const block of feed.applyFailed(message.ids)) feedCoalescer.markDirty(block);
+      scheduleFeedFlush();
       break;
     }
     case "summary":
