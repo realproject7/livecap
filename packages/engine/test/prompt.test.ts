@@ -3,6 +3,7 @@ import { describe, it, expect } from "vitest";
 import {
   asTaskMessage,
   buildGlossarySetupMessage,
+  buildReseedMessage,
   buildSystemPrompt,
   buildTranslateMessage,
   formatUserMessageLine,
@@ -70,6 +71,46 @@ describe("buildTranslateMessage", () => {
     const msg = buildTranslateMessage(batch, { pairs: [] });
     expect(msg).not.toContain("Recent context");
     expect(msg.startsWith("Translate, one line per sentence:")).toBe(true);
+  });
+
+  it("keeps per-turn input bounded regardless of how many pairs accumulate — CLI trim (#136)", () => {
+    // The CLI tier passes a small contextPairs (the persistent session remembers
+    // prior turns), so a long meeting's growing pair history never inflates the
+    // per-turn message beyond the trimmed window.
+    const many: RollingContext = {
+      pairs: Array.from({ length: 500 }, (_, i) => ({ source: `en${i}`, target: `ko${i}` })),
+    };
+    const one = buildTranslateMessage(batch, many, 1);
+    // Only the single most-recent pair survives — 499 older pairs are dropped, so
+    // the per-turn message can't grow with the meeting's accumulating history.
+    expect(one).toContain("en499");
+    expect(one).not.toContain("en498");
+    expect(one).not.toContain("en0");
+    const none = buildTranslateMessage(batch, many, 0);
+    expect(none).not.toContain("Recent context"); // 0 → no context block at all
+  });
+});
+
+describe("buildReseedMessage (#136)", () => {
+  it("carries the glossary and running summary so terminology survives a rollover", () => {
+    const msg = buildReseedMessage({ FOMC: "연방공개시장위원회" }, "The Fed held rates and stayed data-dependent.");
+    expect(msg).toContain("FOMC → 연방공개시장위원회");
+    expect(msg).toContain("The Fed held rates and stayed data-dependent.");
+    // Marked as context, not something to translate/echo.
+    expect(msg?.toLowerCase()).toContain("do not translate");
+    // Wrapped as a [TASK] override so the fresh session treats it as an instruction.
+    expect(asTaskMessage(msg ?? "").startsWith(TASK_MARKER)).toBe(true);
+  });
+
+  it("works with only a summary (no glossary configured — the common CLI case)", () => {
+    const msg = buildReseedMessage(undefined, "Quarterly review of the roadmap.");
+    expect(msg).toContain("Quarterly review of the roadmap.");
+    expect(msg).not.toContain("Preferred term translations");
+  });
+
+  it("returns undefined when there is nothing to seed (no reseed turn is sent)", () => {
+    expect(buildReseedMessage(undefined, undefined)).toBeUndefined();
+    expect(buildReseedMessage({}, "   ")).toBeUndefined(); // empty glossary + blank summary
   });
 });
 

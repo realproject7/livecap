@@ -88,6 +88,28 @@ describe("LocalLlmEngine — real spawn + HTTP (fake llama-server)", () => {
     }
   });
 
+  it("still sends recent-context pairs — the stateless local tier keeps its window (#136)", async () => {
+    // #136 trims the redundant context pairs on the CLI tier only (its session
+    // remembers prior turns). The local tier is stateless per request, so it must
+    // keep receiving the pairs — LazyLocalEngine passes no contextPairs, so the
+    // engine uses the full default window.
+    const engine = await makeEngine();
+    await engine.start();
+    try {
+      const port = (engine as unknown as { config: { port: number } }).config.port;
+      const ctx = { pairs: [{ source: "dual mandate", target: "이중 위임" }] };
+      const out = [];
+      for await (const t of engine.translate(batch, ctx)) out.push(t);
+      const res = await fetch(`http://127.0.0.1:${port}/last-request`);
+      const sent = (await res.json()) as { messages?: { role: string; content: string }[] };
+      const userMessage = sent.messages?.find((m) => m.role === "user")?.content ?? "";
+      expect(userMessage).toContain("Recent context");
+      expect(userMessage).toContain("dual mandate");
+    } finally {
+      await engine.stop();
+    }
+  });
+
   it("waits through a slow /health before reporting ready", async () => {
     const engine = await makeEngine({
       env: { ...process.env, LLAMA_FAKE_HEALTH_DELAY_MS: "300" },

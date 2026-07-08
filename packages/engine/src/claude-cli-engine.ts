@@ -18,6 +18,7 @@ import { stderrDigest } from "./internal/redact";
 import {
   asTaskMessage,
   buildGlossarySetupMessage,
+  buildReseedMessage,
   buildSummaryMessage,
   buildSystemPrompt,
   buildTranslateMessage,
@@ -71,6 +72,24 @@ export interface ClaudeCliEngineConfig {
    * alongside the credit path. Reset by any healthy turn. Default 3.
    */
   maxTurnFailures?: number;
+  /**
+   * Session-rollover threshold (#136): when a turn reports at least this many
+   * `cacheReadInputTokens` — the cached conversation prefix, which climbs
+   * linearly as the persistent session accumulates history — the NEXT turn
+   * starts a FRESH `claude -p` session (dropping the history) and reseeds
+   * continuity, so a long meeting never walks into the ~2h context cliff.
+   * Undefined disables rollover (the default; the session grows unbounded as
+   * before). Data-driven: the signal is already parsed per turn.
+   */
+  rolloverAfterCacheReadTokens?: number;
+  /**
+   * Continuity seed pulled at rollover time (#136): returns the running meeting
+   * summary (or undefined) so the fresh session reseeds terminology context it
+   * would otherwise have lost with the dropped history. Pulled lazily so it
+   * always reflects the latest summary. Best-effort — a failed/empty seed just
+   * means the fresh session starts without it.
+   */
+  continuitySeed?: () => string | undefined;
 }
 
 /** Cap on the retained stderr tail used only to derive a non-content hash (chars). */
@@ -101,12 +120,14 @@ export class EngineTimeoutError extends Error {
 }
 
 /**
- * A content-free health signal from the CLI tier (#135). `respawned`: the CLI
- * process crashed and was restarted (conversation resumed by id). `degraded`:
- * repeated turn timeouts/crashes — the host should drive #7 fallback to the
- * local tier. Neither carries any caption/model text.
+ * A content-free health signal from the CLI tier. `respawned` (#135): the CLI
+ * process crashed and was restarted (conversation resumed by id). `degraded`
+ * (#135): repeated turn timeouts/crashes — the host should drive #7 fallback to
+ * the local tier. `rolledOver` (#136): the session was intentionally refreshed
+ * to a new `claude -p` session before the context cliff (history dropped,
+ * continuity reseeded). None carries any caption/model text.
  */
-export type EngineHealthEvent = { kind: "respawned" } | { kind: "degraded" };
+export type EngineHealthEvent = { kind: "respawned" } | { kind: "degraded" } | { kind: "rolledOver" };
 
 /** Content-free turn-failure message — never includes the model's result text,
  *  which can echo prompt/caption content (#23). */
@@ -116,12 +137,16 @@ function turnErrorMessage(kind: string, apiErrorStatus: number | null): string {
 
 export class ClaudeCliEngine implements TranslationEngine {
   private readonly config: ClaudeCliEngineConfig;
-  private readonly sessionId: string;
+  /** Current session id. Mutable so a rollover (#136) can mint a fresh one and
+   *  drop the accumulated conversation history. */
+  private sessionId: string;
   /** Id of the live conversation to resume after a crash (#135): the external
    *  `resume` id when start() resumed an existing session, else this session's
    *  own id (used with --session-id). Using `sessionId` unconditionally would
-   *  fork a resumed conversation into a fresh, unused session on the next crash. */
-  private readonly resumeId: string;
+   *  fork a resumed conversation into a fresh, unused session on the next crash.
+   *  A rollover (#136) re-points this at the fresh session so a later crash
+   *  resumes the rolled-over conversation, not the abandoned one. */
+  private resumeId: string;
   private readonly systemPrompt: string;
   private readonly parser = new StreamJsonParser();
   private readonly turnMutex = new Mutex();
@@ -144,7 +169,17 @@ export class ClaudeCliEngine implements TranslationEngine {
   private stderrBytes = 0;
   private currentTurn: AsyncChannel<ParsedEvent> | null = null;
   private statusValue: EngineHealth = { status: "stopped" };
-  private cumulativeCostUsd = 0;
+  /** The CURRENT session's last-seen cumulative cost (`total_cost_usd`), used
+   *  for the #24 monotonic per-turn delta. A rollover (#136) starts a fresh CLI
+   *  session whose cumulative resets to ~0, so this resets too and the prior
+   *  session's total is banked into {@link rolledOverCostUsd}. */
+  private sessionCumulativeCostUsd = 0;
+  /** Cost banked from sessions retired by earlier rollovers (#136), so the
+   *  reported cumulative keeps climbing across a rollover instead of regressing. */
+  private rolledOverCostUsd = 0;
+  /** Set when a turn's cache-read crossed the rollover threshold (#136); the
+   *  next turn refreshes the session before running. */
+  private rolloverPending = false;
   private latestUsage: Usage = {
     cumulativeCostUsd: 0,
     turnCostUsd: 0,
@@ -291,6 +326,7 @@ export class ClaudeCliEngine implements TranslationEngine {
     this.hasStarted = false;
     this.consecutiveFailures = 0;
     this.degradedNotified = false;
+    this.rolloverPending = false;
     const child = this.child;
     this.child = null;
     this.statusValue = { status: "stopped" };
@@ -369,21 +405,54 @@ export class ClaudeCliEngine implements TranslationEngine {
    * Run a single turn: write one stdin line, stream its events until turn_end.
    * A per-turn idle watchdog aborts a hung turn with a content-free error, and a
    * child that crashed on a prior turn is respawned (resumed by id) so this and
-   * later turns recover instead of throwing forever (#135).
+   * later turns recover instead of throwing forever (#135). Before running, if a
+   * prior turn crossed the rollover threshold, the session is refreshed (#136).
+   * Serializes turns through the mutex; {@link consumeTurn} does the streaming.
    */
   private async *runTurn(line: string): AsyncGenerator<ParsedEvent> {
     const release = await this.turnMutex.acquire();
-    let child = this.child;
-    if (!child && this.hasStarted) {
-      // The CLI crashed on a prior turn (onExit nulled the child). Respawn a
-      // fresh session before this turn so translation recovers.
-      child = await this.respawn();
-    }
-    if (!child) {
-      this.recordTurnOutcome(false);
+    let threw = false;
+    try {
+      let child = this.child;
+      if (!child && this.hasStarted) {
+        // The CLI crashed on a prior turn (onExit nulled the child). Respawn a
+        // fresh session before this turn so translation recovers.
+        child = await this.respawn();
+      }
+      // Session rollover (#136): a prior turn's cache-read crossed the threshold.
+      // Refresh to a fresh session (dropping history) + reseed continuity BEFORE
+      // this turn, so it runs against the small new session, not the huge old one.
+      if (child && this.hasStarted && this.rolloverPending) {
+        this.rolloverPending = false;
+        child = await this.performRollover(child);
+      }
+      if (!child) {
+        threw = true;
+        throw new Error("engine not started");
+      }
+      yield* this.consumeTurn(child, line);
+    } catch (err) {
+      threw = true;
+      throw err;
+    } finally {
+      // Healthy = the CLI responded (turn_end reached, even an error result) or
+      // the channel closed cleanly. A consumer that throws on an error result
+      // injects a return() at the turn_end yield without tripping `threw`, so
+      // api-error turns stay "healthy" (the CLI is responsive). Unhealthy only
+      // when the channel THREW — a watchdog timeout or a mid-turn crash (#135).
+      this.recordTurnOutcome(!threw);
       release();
-      throw new Error("engine not started");
     }
+  }
+
+  /**
+   * Stream ONE turn on `child`: write the line, yield events until turn_end,
+   * guarded by the per-turn idle watchdog (#135). Does NOT touch the turn mutex
+   * or turn-outcome accounting — the caller (runTurn) owns those. Reused by
+   * {@link performRollover} to drain the reseed turn without re-acquiring the
+   * mutex it already holds.
+   */
+  private async *consumeTurn(child: ChildProcessWithoutNullStreams, line: string): AsyncGenerator<ParsedEvent> {
     const channel = new AsyncChannel<ParsedEvent>();
     this.currentTurn = channel;
     let timer: ReturnType<typeof setTimeout> | null = null;
@@ -400,7 +469,6 @@ export class ClaudeCliEngine implements TranslationEngine {
         this.killChild();
       }, this.turnTimeoutMs);
     };
-    let threw = false;
     try {
       arm();
       child.stdin.write(line);
@@ -409,20 +477,64 @@ export class ClaudeCliEngine implements TranslationEngine {
         yield event;
         if (event.kind === "turn_end") break;
       }
-    } catch (err) {
-      threw = true;
-      throw err;
     } finally {
       if (timer) clearTimeout(timer);
       this.currentTurn = null;
-      // Healthy = the CLI responded (turn_end reached, even an error result) or
-      // the channel closed cleanly. A consumer that throws on an error result
-      // injects a return() at the turn_end yield without tripping `threw`, so
-      // api-error turns stay "healthy" (the CLI is responsive). Unhealthy only
-      // when the channel THREW — a watchdog timeout or a mid-turn crash (#135).
-      this.recordTurnOutcome(!threw);
-      release();
     }
+  }
+
+  /**
+   * Refresh the session before the context cliff (#136): kill the current child,
+   * mint a FRESH session id (dropping the accumulated conversation history), spawn
+   * a new `claude -p` session, and reseed it with the glossary + running summary
+   * so terminology stays consistent across the boundary. Runs inside the held turn
+   * mutex; the reseed turn is drained via {@link consumeTurn} (no re-acquire). The
+   * prior session's banked cost keeps the cumulative monotonic. Returns the fresh
+   * child, or null if the spawn/reseed failed (the caller then throws not-started
+   * and the next turn respawns). Emits a content-free `rolledOver` health event.
+   */
+  private async performRollover(current: ChildProcessWithoutNullStreams): Promise<ChildProcessWithoutNullStreams | null> {
+    // Drop the old child; its late exit is ignored (this.child no longer points
+    // to it, so onExit no-ops).
+    this.child = null;
+    try {
+      current.stdin.end();
+    } catch {
+      // stdin may already be closed.
+    }
+    current.kill();
+    // Bank the retired session's cost so the reported cumulative can't regress
+    // when the fresh session's total_cost_usd restarts near 0 (#136/#24).
+    this.rolledOverCostUsd += this.sessionCumulativeCostUsd;
+    this.sessionCumulativeCostUsd = 0;
+    // Fresh conversation id — history resets. resumeId follows it so a later
+    // crash resumes THIS session, not the abandoned one.
+    this.sessionId = randomUUID();
+    this.resumeId = this.sessionId;
+    let child: ChildProcessWithoutNullStreams;
+    try {
+      child = await this.spawnSession(undefined); // fresh — no --resume
+    } catch {
+      // spawnSession recorded the error status/detail; caller throws not-started.
+      return null;
+    }
+    this.emitHealthEvent({ kind: "rolledOver" });
+    // Reseed continuity best-effort: a compact glossary + the latest summary, so
+    // the fresh (history-less) session keeps terminology consistent. A failed or
+    // empty reseed never blocks the pending turn — the session still translates.
+    const reseed = buildReseedMessage(this.config.glossary, this.config.continuitySeed?.());
+    if (reseed) {
+      try {
+        for await (const event of this.consumeTurn(child, formatUserMessageLine(asTaskMessage(reseed)))) {
+          // Drain to turn_end; account the reseed's cost, discard its output.
+          if (event.kind === "usage") this.recordUsage(event);
+        }
+      } catch {
+        // A hung reseed trips the watchdog, which kills + nulls the child.
+      }
+    }
+    // this.child is the fresh child, or null if the reseed watchdog killed it.
+    return this.child;
   }
 
   /** Kill the current child (watchdog timeout). Nulls it first so a concurrent
@@ -483,17 +595,21 @@ export class ClaudeCliEngine implements TranslationEngine {
   }
 
   private recordUsage(event: Extract<ParsedEvent, { kind: "usage" }>): void {
-    // total_cost_usd is cumulative-per-session and must never regress: an error
-    // turn reports 0 (and the parser also defaults absent cost to 0). If we let
-    // that reset the running total, the NEXT turn's delta would re-count the
-    // whole session and CreditAccountant would double-charge (#24). Only advance
-    // on a strictly higher cumulative; report the monotonic running total.
-    const turnCostUsd = Math.max(0, event.cumulativeCostUsd - this.cumulativeCostUsd);
-    if (event.cumulativeCostUsd > this.cumulativeCostUsd) {
-      this.cumulativeCostUsd = event.cumulativeCostUsd;
+    // total_cost_usd is cumulative-per-session and must never regress WITHIN a
+    // session: an error turn reports 0 (and the parser also defaults absent cost
+    // to 0). If we let that reset the running total, the NEXT turn's delta would
+    // re-count the whole session and CreditAccountant would double-charge (#24).
+    // Only advance on a strictly higher cumulative; report the monotonic total.
+    const turnCostUsd = Math.max(0, event.cumulativeCostUsd - this.sessionCumulativeCostUsd);
+    if (event.cumulativeCostUsd > this.sessionCumulativeCostUsd) {
+      this.sessionCumulativeCostUsd = event.cumulativeCostUsd;
     }
     const usage: Usage = {
-      cumulativeCostUsd: this.cumulativeCostUsd,
+      // Reported cumulative spans sessions (#136): the current session's total
+      // plus the totals banked from sessions retired by earlier rollovers (whose
+      // fresh session's `total_cost_usd` restarts near 0), so it stays monotonic
+      // across a rollover instead of regressing.
+      cumulativeCostUsd: this.rolledOverCostUsd + this.sessionCumulativeCostUsd,
       turnCostUsd,
       inputTokens: event.inputTokens,
       outputTokens: event.outputTokens,
@@ -501,6 +617,13 @@ export class ClaudeCliEngine implements TranslationEngine {
     };
     this.latestUsage = usage;
     for (const listener of this.usageListeners) listener(usage);
+    // Session-rollover trigger (#136): the cached conversation prefix has grown
+    // past the threshold — refresh the session on the NEXT turn, before the
+    // ~2h context cliff turns every subsequent turn into "prompt too long".
+    const threshold = this.config.rolloverAfterCacheReadTokens;
+    if (threshold !== undefined && event.cacheReadInputTokens >= threshold) {
+      this.rolloverPending = true;
+    }
   }
 }
 

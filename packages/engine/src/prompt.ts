@@ -80,7 +80,9 @@ export function buildTranslateMessage(
     blocks.push(["Glossary for this request:", ...glossaryLines(ctx.glossary)].join("\n"));
   }
 
-  const recent = ctx.pairs.slice(-contextPairs);
+  // contextPairs <= 0 means "no recent-context block" (#136 CLI trim to 0). Guard
+  // it explicitly: slice(-0) is slice(0), which would (mis)include EVERY pair.
+  const recent = contextPairs > 0 ? ctx.pairs.slice(-contextPairs) : [];
   if (recent.length > 0) {
     const rendered = recent.map((p) => `Source: ${p.source}\nTranslation: ${p.target}`).join("\n");
     blocks.push(`Recent context (do not retranslate):\n${rendered}`);
@@ -90,6 +92,35 @@ export function buildTranslateMessage(
   blocks.push(`Translate, one line per sentence:\n${sentences}`);
 
   return blocks.join("\n\n");
+}
+
+/**
+ * Build the stdin message that reseeds a FRESH translation session after a
+ * rollover (#136): a compact glossary plus the running meeting summary, so
+ * terminology stays consistent across the session boundary even though the new
+ * `claude -p` process has none of the prior conversation history. Wrap with
+ * {@link asTaskMessage} before sending so the session treats it as context, not
+ * as sentences to translate. Returns undefined when there is nothing to seed
+ * (no glossary and no summary) — the caller then skips the reseed turn entirely.
+ */
+export function buildReseedMessage(
+  glossary: Record<string, string> | undefined,
+  summary: string | undefined,
+): string | undefined {
+  const trimmedSummary = summary?.trim() ?? "";
+  const hasGlossary = glossary !== undefined && Object.keys(glossary).length > 0;
+  if (!hasGlossary && trimmedSummary === "") return undefined;
+  const lines = [
+    "This session continues an in-progress meeting. Keep terminology consistent with the context below; do not translate or reply to this message.",
+  ];
+  if (glossary !== undefined && Object.keys(glossary).length > 0) {
+    lines.push("Preferred term translations:", ...glossaryLines(glossary));
+  }
+  if (trimmedSummary !== "") {
+    lines.push("Summary so far:", trimmedSummary);
+  }
+  lines.push("Acknowledge with an empty line.");
+  return lines.join("\n");
 }
 
 /** Build the stdin message for a summary/board request (PROPOSAL §8.4). */

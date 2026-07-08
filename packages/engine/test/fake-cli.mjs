@@ -73,7 +73,13 @@ if (echoMode) {
       total_cost_usd: 0.001,
       stop_reason: "end_turn",
       result: text,
-      usage: { input_tokens: 1, output_tokens: 1, cache_read_input_tokens: 0 },
+      // cache_read_input_tokens is fixed 0 unless LIVECAP_FAKE_CACHE_READ is set,
+      // which lets a test drive the #136 session-rollover threshold.
+      usage: {
+        input_tokens: 1,
+        output_tokens: 1,
+        cache_read_input_tokens: Number(process.env.LIVECAP_FAKE_CACHE_READ ?? 0),
+      },
     };
     process.stdout.write(JSON.stringify(assistant) + "\n");
     process.stdout.write(JSON.stringify(result) + "\n");
