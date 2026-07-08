@@ -36,6 +36,13 @@ export class StreamJsonParser {
   /** Whether any text_delta has been emitted for the current message. */
   private textEmittedForMessage = false;
 
+  /** Drop any in-flight per-message state. Called when the underlying process is
+   *  (re)spawned so a crash mid-message can't desync the fresh stream (#135). */
+  reset(): void {
+    this.currentMessageId = null;
+    this.textEmittedForMessage = false;
+  }
+
   /** Parse one raw JSONL line. */
   pushLine(line: string): ParsedEvent[] {
     const trimmed = line.trim();
