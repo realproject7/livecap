@@ -53,18 +53,37 @@ export interface RunnerOptions {
  * Map a whole-batch translation snapshot onto its sentences: the prompt
  * contract is one output line per input sentence, in input order. Extra lines
  * beyond the batch are folded into the last sentence.
+ *
+ * Blank lines are dropped BEFORE mapping (#137): they carry no translation and
+ * are not a mapping unit, so the positional map uses the SAME non-empty lines
+ * {@link countOutputLines} counts. Otherwise an internal blank line makes
+ * split("\n") longer than the id count and folds/shifts later captions while the
+ * count guard still reads "matched" — persisting a mis-attributed mapping.
  */
 export function assignLines(ids: number[], text: string): RunnerItem[] {
   if (ids.length === 0) return [];
-  const lines = text.split("\n").map((line) => line.trim());
+  const lines = text
+    .split("\n")
+    .map((line) => line.trim())
+    .filter((line) => line !== "");
   if (lines.length > ids.length) {
-    const folded = lines
-      .splice(ids.length - 1)
-      .filter((line) => line !== "")
-      .join(" ");
+    const folded = lines.splice(ids.length - 1).join(" ");
     lines[ids.length - 1] = folded;
   }
   return ids.map((id, i) => ({ id, text: lines[i] ?? "" }));
+}
+
+/**
+ * Count the model's actual output lines — the unit {@link assignLines} maps
+ * positionally onto sentence ids. Blank lines carry no translation and are
+ * excluded, matching the same lines assignLines maps (blanks can't shift the
+ * map — they are dropped there too). A count that differs from the batch size
+ * means the model merged fragments (fewer lines) or emitted an extra non-blank
+ * preamble line (more), which WOULD shift every subsequent caption's mapping —
+ * so positional attribution is unsafe and the batch is re-translated 1:1 (#137).
+ */
+export function countOutputLines(text: string): number {
+  return text.split("\n").reduce((n, line) => (line.trim() === "" ? n : n + 1), 0);
 }
 
 export class TranslationRunner {
@@ -140,11 +159,37 @@ export class TranslationRunner {
       let finalText = "";
       // Snapshot the rolling pairs: the live array mutates as batches finish,
       // and the engine streams against this context asynchronously.
+      //
+      // Stream in-progress snapshots ONLY for a single-sentence batch — a lone id
+      // can't be mis-mapped (all output folds into it). For a MULTI-sentence
+      // batch, bind NOTHING to captions until the line-count guard below
+      // validates the finalized mapping (#137): a positional interim snapshot
+      // could briefly render one caption's translation under another id before
+      // the guard corrects it. The validated `done` mapping (or the 1:1-corrected
+      // one) is the first thing these captions ever show.
       for await (const snapshot of this.engine.translate(batch, { pairs: this.pairs.slice() })) {
         finalText = snapshot.text;
-        this.callbacks.onSnapshot(assignLines(ids, snapshot.text), snapshot.done);
+        if (!snapshot.done && ids.length === 1) {
+          this.callbacks.onSnapshot(assignLines(ids, snapshot.text), false);
+        }
       }
-      const textById = new Map(assignLines(ids, finalText).map((item) => [item.id, item.text]));
+      // Line-mapping guard (#137): the prompt contract is one output line per
+      // input sentence, in order. If the model MERGED fragments (an 800ms
+      // redemption routinely splits a sentence) or emitted an extra preamble/
+      // blank line, the finalized line count != the id count and a positional
+      // map would render each caption under the WRONG id — and persist it that
+      // way. Never show/persist that: re-translate the batch as 1:1 single-
+      // sentence turns, where a lone id can't be mis-attributed. This guards
+      // BOTH tiers, since the runner sees each tier's final joined text (the
+      // local tier's stripNonTranslation can itself drop an empty line and
+      // shift alignment — the same count check catches it).
+      if (ids.length > 1 && countOutputLines(finalText) !== ids.length) {
+        await this.runOneToOne(batch);
+        return;
+      }
+      const mapped = assignLines(ids, finalText);
+      this.callbacks.onSnapshot(mapped, true);
+      const textById = new Map(mapped.map((item) => [item.id, item.text]));
       const results: RunnerResult[] = batch
         .slice()
         .sort((a, b) => a.seq - b.seq)
@@ -161,6 +206,40 @@ export class TranslationRunner {
       this.running = false;
       this.pump();
     }
+  }
+
+  /**
+   * Fallback for a batch whose finalized output line count didn't match its id
+   * count (#137): re-translate each sentence as its own single-sentence turn, so
+   * every caption is attributed to its own id (a lone id folds all output lines
+   * into itself — mis-attribution is impossible). A sentence whose re-translation
+   * throws is reported failed (its source is preserved by the host) rather than
+   * shown under the wrong id. Runs inside run()'s `running` slot, so no other
+   * batch starts meanwhile; single-sentence turns never re-enter this guard.
+   */
+  private async runOneToOne(batch: Sentence[]): Promise<void> {
+    const results: RunnerResult[] = [];
+    // Spoken order keeps the archive chronological and the rolling context
+    // coherent (each turn sees the prior sentences' freshly-added pairs).
+    for (const sentence of batch.slice().sort((a, b) => a.seq - b.seq)) {
+      const id = Number(sentence.id);
+      try {
+        let text = "";
+        for await (const snapshot of this.engine.translate([sentence], { pairs: this.pairs.slice() })) {
+          text = snapshot.text;
+          this.callbacks.onSnapshot(assignLines([id], snapshot.text), snapshot.done);
+        }
+        const finalText = assignLines([id], text)[0]?.text ?? "";
+        if (finalText !== "") this.pairs.push({ source: sentence.text, target: finalText });
+        if (this.pairs.length > this.maxPairs) this.pairs = this.pairs.slice(-this.maxPairs);
+        results.push({ id, source: sentence.text, text: finalText });
+      } catch (error) {
+        // Content-free by contract (#23); the host preserves the source and a
+        // later retranslate can fill the target — never a shifted mapping.
+        this.callbacks.onFailed([id], error instanceof Error ? error.message : String(error));
+      }
+    }
+    if (results.length > 0) this.callbacks.onBatchDone(results);
   }
 
   private clearFlushTimer(): void {

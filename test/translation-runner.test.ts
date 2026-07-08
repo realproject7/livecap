@@ -6,6 +6,7 @@ import { describe, expect, it } from "vitest";
 import type { RollingContext, Sentence, Translation } from "@livecap/engine";
 import {
   assignLines,
+  countOutputLines,
   TranslationRunner,
   type RunnerCallbacks,
   type RunnerItem,
@@ -90,13 +91,42 @@ describe("assignLines", () => {
   it("folds surplus lines into the last sentence", () => {
     expect(assignLines([1], "한 줄\n두 줄")).toEqual([{ id: 1, text: "한 줄 두 줄" }]);
   });
+
+  it("drops internal blank lines so they never shift the mapping (#137)", () => {
+    // 3 real translations with a spurious internal blank line: split("\n") would
+    // be length 4 and fold/shift, but the blank is not a mapping unit.
+    expect(assignLines([1, 2, 3], "tr-1\n\ntr-2\ntr-3")).toEqual([
+      { id: 1, text: "tr-1" },
+      { id: 2, text: "tr-2" },
+      { id: 3, text: "tr-3" },
+    ]);
+    // Leading/trailing blanks are ignored too.
+    expect(assignLines([1, 2], "\ntr-1\ntr-2\n")).toEqual([
+      { id: 1, text: "tr-1" },
+      { id: 2, text: "tr-2" },
+    ]);
+  });
+});
+
+describe("countOutputLines", () => {
+  it("counts non-empty trimmed lines", () => {
+    expect(countOutputLines("a\nb\nc")).toBe(3);
+    expect(countOutputLines("a")).toBe(1);
+  });
+
+  it("ignores blank and whitespace-only lines", () => {
+    expect(countOutputLines("a\n\nb\n   \nc")).toBe(3);
+    expect(countOutputLines("")).toBe(0);
+    expect(countOutputLines("   ")).toBe(0);
+  });
 });
 
 describe("TranslationRunner", () => {
-  it("releases a normal batch at minBatch (2) and streams progressive snapshots", async () => {
+  it("releases a normal batch at minBatch (2) and never caption-binds interim text (#137)", async () => {
     const calls: Call[] = [];
     const { callbacks, recorded } = recorder();
     const timers = manualTimers();
+    // fakeEngine yields a non-done interim snapshot before the done one.
     const runner = new TranslationRunner({
       engine: fakeEngine(calls, (batch) => batch.map((s) => `tr-${s.id}`).join("\n")),
       callbacks,
@@ -110,10 +140,33 @@ describe("TranslationRunner", () => {
 
     expect(calls).toHaveLength(1);
     expect(calls[0].batch.map((s) => s.seq)).toEqual([1, 2]);
-    // At least one non-done snapshot arrived before the done one.
-    expect(recorded.snapshots.some((s) => !s.done)).toBe(true);
+    // Multi-sentence: NO interim caption-bound snapshot — the engine's non-done
+    // snapshot is suppressed, so no caption ever briefly shows another's text.
+    // The validated done mapping is the first (and only) thing these ids show.
+    expect(recorded.snapshots.every((s) => s.done)).toBe(true);
     expect(recorded.snapshots.at(-1)?.done).toBe(true);
     expect(recorded.batches[0].map((r) => r.text)).toEqual(["tr-1", "tr-2"]);
+  });
+
+  it("still streams progressive in-progress snapshots for a single-sentence batch", async () => {
+    const calls: Call[] = [];
+    const { callbacks, recorded } = recorder();
+    const timers = manualTimers();
+    const runner = new TranslationRunner({
+      engine: fakeEngine(calls, (batch) => batch.map((s) => `tr-${s.id}`).join("\n")),
+      callbacks,
+      schedule: timers.schedule,
+      cancel: timers.cancel,
+    });
+
+    runner.enqueue({ id: 1, text: "lone sentence" });
+    timers.fire(); // release the below-minBatch sentence after the idle window
+    await runner.drain();
+
+    // A lone id can't be mis-mapped, so live streaming is preserved (<1.5s display).
+    expect(recorded.snapshots.some((s) => !s.done)).toBe(true);
+    expect(recorded.snapshots.at(-1)?.done).toBe(true);
+    expect(recorded.batches[0]).toEqual([{ id: 1, source: "lone sentence", text: "tr-1" }]);
   });
 
   it("flushes a lone sentence after the idle window (display must not wait for a batch)", async () => {
@@ -220,5 +273,173 @@ describe("TranslationRunner", () => {
     timers.fire();
     await runner.drain();
     expect(recorded.batches.at(-1)?.[0]).toEqual({ id: 3, source: "works", text: "ok" });
+  });
+
+  it("does not re-translate when the output line count matches the batch (#137)", async () => {
+    const calls: Call[] = [];
+    const { callbacks, recorded } = recorder();
+    const timers = manualTimers();
+    const runner = new TranslationRunner({
+      engine: fakeEngine(calls, (batch) => batch.map((s) => `tr-${s.id}`).join("\n")),
+      callbacks,
+      schedule: timers.schedule,
+      cancel: timers.cancel,
+    });
+
+    runner.enqueue({ id: 1, text: "one" });
+    runner.enqueue({ id: 2, text: "two" });
+    await runner.drain();
+
+    // Counts match → the positional map is used; no 1:1 re-request.
+    expect(calls).toHaveLength(1);
+    expect(recorded.batches[0]).toEqual([
+      { id: 1, source: "one", text: "tr-1" },
+      { id: 2, source: "two", text: "tr-2" },
+    ]);
+  });
+
+  it("re-translates 1:1 when the model returns fewer lines than the batch — no caption shows another's (#137)", async () => {
+    const calls: Call[] = [];
+    const { callbacks, recorded } = recorder();
+    const timers = manualTimers();
+    const engine = {
+      async *translate(batch: Sentence[], ctx: RollingContext): AsyncIterable<Translation> {
+        calls.push({ batch, ctx });
+        const sentenceIds = batch.map((s) => s.id);
+        if (batch.length > 1) {
+          // The model MERGED two fragments into a single output line: 1 line for
+          // 2 ids. A positional map would shift id 2 onto nothing (or a neighbor).
+          // Emit a non-done interim too, to prove it is never bound to a caption.
+          yield { sentenceIds, text: "merged-one", done: false };
+          yield { sentenceIds, text: "merged-one-two", done: true };
+          return;
+        }
+        yield { sentenceIds, text: `tr-${batch[0].id}`, done: true };
+      },
+    };
+    const runner = new TranslationRunner({ engine, callbacks, schedule: timers.schedule, cancel: timers.cancel });
+
+    runner.enqueue({ id: 1, text: "one" });
+    runner.enqueue({ id: 2, text: "two" });
+    await runner.drain();
+
+    // The 2-batch mismatched, so each sentence was re-requested 1:1.
+    expect(calls.map((c) => c.batch.length)).toEqual([2, 1, 1]);
+    // Each caption is attributed to its OWN translation — never a neighbor's, and
+    // the merged line is never persisted under any id.
+    expect(recorded.batches).toEqual([
+      [
+        { id: 1, source: "one", text: "tr-1" },
+        { id: 2, source: "two", text: "tr-2" },
+      ],
+    ]);
+    // No snapshot — interim OR done — ever bound the merged line to a caption.
+    for (const snap of recorded.snapshots) {
+      expect(snap.items.every((it) => it.text === "" || it.text === `tr-${it.id}`)).toBe(true);
+    }
+    expect(recorded.failures).toEqual([]);
+  });
+
+  it("re-translates 1:1 when the model prepends an extra preamble line (#137)", async () => {
+    const calls: Call[] = [];
+    const { callbacks, recorded } = recorder();
+    const timers = manualTimers();
+    const engine = {
+      async *translate(batch: Sentence[], ctx: RollingContext): AsyncIterable<Translation> {
+        calls.push({ batch, ctx });
+        const sentenceIds = batch.map((s) => s.id);
+        if (batch.length > 1) {
+          // A preamble line before the two translations: 3 lines for 2 ids.
+          yield { sentenceIds, text: "Here is the translation:\ntr-1\ntr-2", done: true };
+          return;
+        }
+        yield { sentenceIds, text: `tr-${batch[0].id}`, done: true };
+      },
+    };
+    const runner = new TranslationRunner({ engine, callbacks, schedule: timers.schedule, cancel: timers.cancel });
+
+    runner.enqueue({ id: 1, text: "one" });
+    runner.enqueue({ id: 2, text: "two" });
+    await runner.drain();
+
+    expect(calls.map((c) => c.batch.length)).toEqual([2, 1, 1]);
+    expect(recorded.batches).toEqual([
+      [
+        { id: 1, source: "one", text: "tr-1" },
+        { id: 2, source: "two", text: "tr-2" },
+      ],
+    ]);
+  });
+
+  it("does not persist a shifted map when a >=3-sentence batch has internal blank lines (#137)", async () => {
+    const calls: Call[] = [];
+    const { callbacks, recorded } = recorder();
+    let release: () => void = () => undefined;
+    const gate = new Promise<void>((resolve) => (release = resolve));
+    const engine = {
+      async *translate(batch: Sentence[], ctx: RollingContext): AsyncIterable<Translation> {
+        calls.push({ batch, ctx });
+        const sentenceIds = batch.map((s) => s.id);
+        if (calls.length === 1) {
+          await gate; // hold [1,2] so the backlog merges into one >=3 batch
+          yield { sentenceIds, text: "tr-1\ntr-2", done: true };
+          return;
+        }
+        // The merged 3-sentence backlog: one line per sentence (in the sent,
+        // newest-first order) with a spurious internal blank line injected.
+        const text = batch.map((s) => `tr-${s.id}`).join("\n").replace("\n", "\n\n");
+        yield { sentenceIds, text, done: true };
+      },
+    };
+    const timers = manualTimers();
+    const runner = new TranslationRunner({ engine, callbacks, schedule: timers.schedule, cancel: timers.cancel });
+
+    runner.enqueue({ id: 1, text: "one" });
+    runner.enqueue({ id: 2, text: "two" });
+    await tick(); // batch [1,2] in flight, gated
+    runner.enqueue({ id: 3, text: "three" });
+    runner.enqueue({ id: 4, text: "four" });
+    runner.enqueue({ id: 5, text: "five" });
+    release();
+    await runner.drain();
+
+    // The internal blank made split("\n") length 4 for 3 ids — pre-fix this
+    // folded/shifted while the count guard still read "matched" (3 non-empty ==
+    // 3). Each caption must map to its OWN translation; nothing shifted, nothing
+    // persisted under the wrong id, and no 1:1 re-request was needed.
+    expect(calls).toHaveLength(2);
+    expect(recorded.batches[1]).toEqual([
+      { id: 3, source: "three", text: "tr-3" },
+      { id: 4, source: "four", text: "tr-4" },
+      { id: 5, source: "five", text: "tr-5" },
+    ]);
+  });
+
+  it("marks an un-mappable id failed when its 1:1 re-translation throws; source preserved (#137)", async () => {
+    const calls: Call[] = [];
+    const { callbacks, recorded } = recorder();
+    const timers = manualTimers();
+    const engine = {
+      async *translate(batch: Sentence[], ctx: RollingContext): AsyncIterable<Translation> {
+        calls.push({ batch, ctx });
+        const sentenceIds = batch.map((s) => s.id);
+        if (batch.length > 1) {
+          yield { sentenceIds, text: "only-one-line", done: true }; // 1 line, 2 ids → mismatch
+          return;
+        }
+        if (Number(batch[0].id) === 2) throw new Error("translation turn failed (api_error_status=500)");
+        yield { sentenceIds, text: `tr-${batch[0].id}`, done: true };
+      },
+    };
+    const runner = new TranslationRunner({ engine, callbacks, schedule: timers.schedule, cancel: timers.cancel });
+
+    runner.enqueue({ id: 1, text: "one" });
+    runner.enqueue({ id: 2, text: "two" });
+    await runner.drain();
+
+    // id 2's re-translation failed → reported failed (host preserves its source);
+    // id 1 succeeded and is persisted. Neither is shown under the wrong id.
+    expect(recorded.failures).toEqual([{ ids: [2], detail: "translation turn failed (api_error_status=500)" }]);
+    expect(recorded.batches).toEqual([[{ id: 1, source: "one", text: "tr-1" }]]);
   });
 });
