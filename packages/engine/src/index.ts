@@ -18,7 +18,7 @@ export type {
 } from "./types";
 
 export { StreamJsonParser } from "./stream-parser";
-export { sanitizeChildEnv } from "./env";
+export { sanitizeChildEnv, detectProxy } from "./env";
 export { buildClaudeArgs, ISOLATION_ARGS, DEFAULT_MODEL } from "./args";
 export type { ClaudeArgsOptions } from "./args";
 export {

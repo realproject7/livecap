@@ -11,6 +11,7 @@ import {
   ClaudeCliEngine,
   computeMeetingMetrics,
   CreditAccountant,
+  detectProxy,
   ExtrasBudget,
   ExtrasBudgetExceededError,
   ExtrasPipeline,
@@ -311,6 +312,17 @@ export class HostSession {
       // once, so its usage isn't summed twice across the two lanes (#142).
       metered.push(translationPrimary, extrasPrimary, local);
       engineLabel = CLI_ENGINE_LABEL;
+      // Proxy discipline (#145): both CLI children inherit process.env (proxies
+      // are detected, never stripped), so an active HTTP(S)/ALL proxy would route
+      // every translation to Anthropic through a third party. Surface it ONCE per
+      // session (here, not per engine) so the routing is a conscious choice; the
+      // notice is content-free and carries only the safe host, never the full
+      // value (which may embed credentials). The on-device local tier never
+      // egresses, so this lives on the CLI path only.
+      const proxyHost = detectProxy(process.env);
+      if (proxyHost) {
+        this.emit({ type: "status", detail: `translation traffic is routing through a proxy: ${proxyHost}` });
+      }
     } else {
       if (resolved.enginePref === "cli") {
         this.emit({ type: "status", detail: "no Claude CLI found — using the local model" });
