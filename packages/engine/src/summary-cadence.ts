@@ -15,21 +15,35 @@ export interface SummaryCadenceOptions {
   maxMs?: number;
   /** Multiplier applied each time the transcript is unchanged. Default 2. */
   backoffFactor?: number;
+  /**
+   * Minimum age of the transcript before the FIRST summary is allowed to fire
+   * (ms). Default 45_000 (#142). Without it the first summary fires on the very
+   * first non-empty transcript — ~5s into the meeting on the summary poll — the
+   * worst possible moment, colliding with the first live captions. Deferring it
+   * keeps the opening seconds clear so the first captions translate promptly.
+   * Set to 0 to keep the legacy "first transcript is immediately due" behaviour.
+   */
+  firstDelayMs?: number;
 }
 
 export class SummaryCadence {
   private readonly baseMs: number;
   private readonly maxMs: number;
   private readonly backoffFactor: number;
+  private readonly firstDelayMs: number;
 
   private lastRunAt: number | null = null;
   private lastTranscript: string | null = null;
   private intervalMs: number;
+  /** When the first non-empty transcript was seen — the anchor for the first-run
+   *  deferral (#142). Null until the first non-empty poll. */
+  private firstSeenAt: number | null = null;
 
   constructor(options: SummaryCadenceOptions = {}) {
     this.baseMs = options.baseMs ?? 120_000;
     this.maxMs = options.maxMs ?? 300_000;
     this.backoffFactor = options.backoffFactor ?? 2;
+    this.firstDelayMs = options.firstDelayMs ?? 45_000;
     this.intervalMs = this.baseMs;
   }
 
@@ -46,10 +60,15 @@ export class SummaryCadence {
    */
   shouldRun(nowMs: number, transcript: string): boolean {
     if (transcript.trim() === "") return false;
-    // First attempt: pace it (record the attempt) so a run that THROWS — the
-    // consumer never reaches markRun — still backs off to the base cadence
-    // instead of returning true on every poll tick (#39).
     if (this.lastRunAt === null) {
+      // Defer the first summary (#142): anchor on when the transcript first
+      // appeared and hold off until it is at least `firstDelayMs` old, so the
+      // opening captions translate without the first summary turn contending.
+      if (this.firstSeenAt === null) this.firstSeenAt = nowMs;
+      if (nowMs - this.firstSeenAt < this.firstDelayMs) return false;
+      // First attempt is now due: pace it (record the attempt) so a run that
+      // THROWS — the consumer never reaches markRun — still backs off to the base
+      // cadence instead of returning true on every poll tick (#39).
       this.lastRunAt = nowMs;
       return true;
     }

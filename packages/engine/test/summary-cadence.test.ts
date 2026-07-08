@@ -11,8 +11,18 @@ describe("SummaryCadence", () => {
     expect(c.shouldRun(T0, "   ")).toBe(false);
   });
 
-  it("runs the first non-empty transcript immediately", () => {
-    const c = new SummaryCadence();
+  it("defers the first summary until the transcript is firstDelayMs old (#142)", () => {
+    // The first summary otherwise fires on the very first transcript (~5s into the
+    // meeting on the poll), colliding with the first live captions. It must hold
+    // off until the transcript is at least firstDelayMs old.
+    const c = new SummaryCadence({ firstDelayMs: 45_000 });
+    expect(c.shouldRun(T0, "hello")).toBe(false); // first seen — not old enough yet
+    expect(c.shouldRun(T0 + 30_000, "hello more")).toBe(false); // still within the delay
+    expect(c.shouldRun(T0 + 45_000, "hello more still")).toBe(true); // now due
+  });
+
+  it("runs the first non-empty transcript immediately when firstDelayMs is 0", () => {
+    const c = new SummaryCadence({ firstDelayMs: 0 });
     expect(c.shouldRun(T0, "hello")).toBe(true);
   });
 
@@ -66,7 +76,9 @@ describe("SummaryCadence", () => {
   });
 
   it("paces retries when a run fails (no markRun) — not every poll tick (#39)", () => {
-    const c = new SummaryCadence({ baseMs: MIN });
+    // firstDelayMs: 0 so the first attempt is due at T0 — this test exercises the
+    // post-first-attempt retry pacing, independent of the #142 first-run deferral.
+    const c = new SummaryCadence({ baseMs: MIN, firstDelayMs: 0 });
     // First attempt is due; the consumer's engine call THROWS, so markRun is
     // never reached. The transcript keeps changing (live meeting).
     expect(c.shouldRun(T0, "live")).toBe(true);
