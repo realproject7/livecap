@@ -47,6 +47,15 @@ import { TranslationRunner } from "./translation-runner.ts";
 
 const CLI_ENGINE_LABEL = "Claude CLI";
 const LOCAL_ENGINE_LABEL = "Local (Qwen3 4B)";
+/** CLI-tier recent-context pairs (#136): the persistent `claude -p` session
+ *  already remembers prior turns, so the redundant explicit pairs are trimmed to
+ *  a single light terminology anchor (which also steadies the first turn after a
+ *  rollover). The stateless local tier keeps its full default window. */
+const CLI_CONTEXT_PAIRS = 1;
+/** Roll the CLI session over once a turn's cached prefix reaches this many
+ *  `cacheReadInputTokens` (#136) — a conservative fraction of the model context
+ *  window, far below the ~2h "prompt too long" cliff, with ample headroom. */
+const CLI_ROLLOVER_CACHE_READ_TOKENS = 120_000;
 const SUMMARY_TICK_MS = 5_000;
 /** Recent transcript lines fed as context to a targeted analysis (#80). */
 const ANALYZE_CONTEXT_LINES = 10;
@@ -268,10 +277,24 @@ export class HostSession {
         env: process.env,
         includePartialMessages: cli.includePartialMessages,
         targetLanguage: resolved.targetLanguage,
+        // Bound the translate session's per-turn input (#136): trim the redundant
+        // recent-context pairs (the persistent session remembers them) via the
+        // per-engine knob — NOT shared buildTranslateMessage, so local keeps its
+        // full window. And refresh the session before the ~2h context cliff.
+        contextPairs: CLI_CONTEXT_PAIRS,
+        rolloverAfterCacheReadTokens: CLI_ROLLOVER_CACHE_READ_TOKENS,
       };
       // Each ClaudeCliEngine mints its own session id (config.sessionId omitted),
       // so the two persistent `claude -p` conversations stay independent.
-      const translationPrimary = new ClaudeCliEngine(engineConfig);
+      const translationPrimary = new ClaudeCliEngine({
+        ...engineConfig,
+        // On rollover, reseed the fresh translation session with the latest
+        // summary so terminology stays consistent across the boundary (#136).
+        // Pulled lazily → always the newest summary (produced on the extras lane).
+        continuitySeed: () => this.lastSummary?.summary.join(" "),
+      });
+      // The extras/summary session's incremental prompts already re-send the
+      // prior summary + board each turn (#55), so its rollover needs no reseed.
       const extrasPrimary = new ClaudeCliEngine(engineConfig);
       // Health/error-driven recovery (#135) preserved on BOTH lanes: a respawn
       // surfaces a content-free status; a `degraded` streak drives fallback to
@@ -454,14 +477,21 @@ export class HostSession {
     this.emit({ type: "gauge", gauge: this.withExtrasBudget(this.accountant.gauge()) });
   }
 
-  /** Content-free CLI health signals (#135). A `respawned` event surfaces a
+  /** Content-free CLI health signals. A `respawned` event (#135) surfaces a
    *  single status so the user knows translation blipped and recovered; a
-   *  `degraded` event (repeated timeouts/crashes) falls back to the local tier,
-   *  gated by the same §8.7 auto-switch toggle as the credit path. */
+   *  `rolledOver` event (#136) notes a pre-cliff session refresh; a `degraded`
+   *  event (#135, repeated timeouts/crashes) falls back to the local tier, gated
+   *  by the same §8.7 auto-switch toggle as the credit path. */
   private onEngineHealthEvent(event: EngineHealthEvent): void {
     if (this.stopping) return;
     if (event.kind === "respawned") {
       this.emit({ type: "status", detail: "translation engine restarted" });
+      return;
+    }
+    if (event.kind === "rolledOver") {
+      // #136: the CLI session was refreshed before the context cliff. Content-free
+      // notice — never any caption/summary text (the reseed lives in the engine).
+      this.emit({ type: "status", detail: "translation session refreshed" });
       return;
     }
     // degraded
