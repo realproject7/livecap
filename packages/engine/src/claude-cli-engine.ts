@@ -486,12 +486,15 @@ export class ClaudeCliEngine implements TranslationEngine {
   /**
    * Refresh the session before the context cliff (#136): kill the current child,
    * mint a FRESH session id (dropping the accumulated conversation history), spawn
-   * a new `claude -p` session, and reseed it with the glossary + running summary
-   * so terminology stays consistent across the boundary. Runs inside the held turn
-   * mutex; the reseed turn is drained via {@link consumeTurn} (no re-acquire). The
-   * prior session's banked cost keeps the cumulative monotonic. Returns the fresh
-   * child, or null if the spawn/reseed failed (the caller then throws not-started
-   * and the next turn respawns). Emits a content-free `rolledOver` health event.
+   * a new `claude -p` session, and reseed it with the running summary (plus the
+   * session glossary when one is configured — the same optional channel start()'s
+   * glossary bootstrap uses; the host wires none today, so in practice this is the
+   * summary) so terminology stays consistent across the boundary. Runs inside the
+   * held turn mutex; the reseed turn is drained via {@link consumeTurn} (no
+   * re-acquire). The prior session's banked cost keeps the cumulative monotonic.
+   * Returns the fresh child, or null if the spawn/reseed failed (the caller then
+   * throws not-started and the next turn respawns). Emits a content-free
+   * `rolledOver` health event.
    */
   private async performRollover(current: ChildProcessWithoutNullStreams): Promise<ChildProcessWithoutNullStreams | null> {
     // Drop the old child; its late exit is ignored (this.child no longer points
@@ -519,9 +522,10 @@ export class ClaudeCliEngine implements TranslationEngine {
       return null;
     }
     this.emitHealthEvent({ kind: "rolledOver" });
-    // Reseed continuity best-effort: a compact glossary + the latest summary, so
-    // the fresh (history-less) session keeps terminology consistent. A failed or
-    // empty reseed never blocks the pending turn — the session still translates.
+    // Reseed continuity best-effort: the latest summary (and the session glossary
+    // if one is configured — the host wires none, so this is the summary), so the
+    // fresh, history-less session keeps terminology consistent. A failed or empty
+    // reseed never blocks the pending turn — the session still translates.
     const reseed = buildReseedMessage(this.config.glossary, this.config.continuitySeed?.());
     if (reseed) {
       try {

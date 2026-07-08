@@ -154,6 +154,31 @@ describe("FallbackRouter", () => {
     expect(fallback.startCalls).toBe(0);
   });
 
+  it("a fallback SHARED by two routers stays lazy on start when neither begins on fallback (#136/#142 two-lane)", async () => {
+    // The dedicated-lane wiring (#142) starts two routers that share ONE local
+    // fallback. Starting both must NOT eagerly start the shared local while the
+    // CLI primaries are healthy and there's budget — it stays lazy until a real
+    // fallback (below-threshold-at-launch or a mid-session switch).
+    const shared = new StubEngine("local");
+    const translation = new FallbackRouter({ primary: new StubEngine("tP"), fallback: shared, startOnFallback: () => false });
+    const extras = new FallbackRouter({ primary: new StubEngine("eP"), fallback: shared, startOnFallback: () => false });
+    await Promise.all([translation, extras].map((r) => r.start()));
+    expect(shared.startCalls).toBe(0); // never materialized
+    expect(translation.onFallback).toBe(false);
+    expect(extras.onFallback).toBe(false);
+  });
+
+  it("a fallback SHARED by two routers is started exactly once when both begin on fallback (below-threshold launch)", async () => {
+    const shared = new StubEngine("local");
+    const translation = new FallbackRouter({ primary: new StubEngine("tP"), fallback: shared, startOnFallback: () => true });
+    const extras = new FallbackRouter({ primary: new StubEngine("eP"), fallback: shared, startOnFallback: () => true });
+    await Promise.all([translation, extras].map((r) => r.start()));
+    // Both converge on the one shared local; StubEngine.start is idempotent-safe,
+    // and the health()==="ready" guard means the second switch skips re-starting.
+    expect(shared.startCalls).toBe(1);
+    expect(translation.onFallback && extras.onFallback).toBe(true);
+  });
+
   it("switchToFallback is idempotent", async () => {
     const primary = new StubEngine("primary");
     const fallback = new StubEngine("fallback");
