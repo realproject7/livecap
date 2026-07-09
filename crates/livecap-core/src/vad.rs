@@ -135,6 +135,20 @@ impl ContinuousVadProcessor {
         let ms_per_sample = 1000.0 / VAD_SAMPLE_RATE as f64;
         let start_ms = self.speech_start_sample as f64 * ms_per_sample;
         let end_ms = (self.processed_samples as f64 * ms_per_sample).max(start_ms);
+
+        // Advance Silero's OWN accumulated buffer up to "now" so the utterance
+        // it eventually emits on SpeechEnd starts AFTER this force-cut. Without
+        // this, Silero keeps `session_audio` from the original speech start, and
+        // the final SpeechEnd `samples` re-contain everything finalized here —
+        // so any utterance longer than `max_utterance_ms` emits DUPLICATE
+        // captions and hands a 60s+ input to a single whisper call, exactly when
+        // the pipeline is most loaded (#138). We keep our own `current_speech`
+        // as the returned segment (the transcribed audio is unchanged);
+        // take_until's return is discarded — it only moves Silero's internal
+        // speech-start marker forward and drops the consumed samples.
+        let now = self.session.session_time();
+        let _ = self.session.take_until(now);
+
         let segment = SpeechSegment {
             samples: std::mem::take(&mut self.current_speech),
             start_timestamp_ms: start_ms,
@@ -421,5 +435,44 @@ mod tests {
             // version; the API contract still holds:
             assert!(p.take_current_speech().is_none());
         }
+    }
+
+    #[test]
+    fn force_cut_does_not_duplicate_audio_on_speech_end() {
+        // #138: a force-cut mid-utterance must advance Silero's internal buffer
+        // so the eventual SpeechEnd does not re-emit the already-finalized
+        // audio. Sum ALL finalized samples across the whole run and assert the
+        // total stays close to the input — before the fix, the force-cut
+        // segment plus the SpeechEnd (which re-contained it) roughly DOUBLED it.
+        let mut p = ContinuousVadProcessor::new(16000, 800).unwrap();
+        let speech: Vec<f32> = generate_test_audio_with_speech(3.0, 16000);
+
+        let mut finalized = 0usize;
+        for seg in p.process_audio(&speech).unwrap() {
+            finalized += seg.samples.len();
+        }
+        if !p.in_speech() {
+            return; // synthetic signal not detected as speech on this Silero build
+        }
+        // Force-cut mid-utterance (what pipeline.rs does at max_utterance_ms).
+        finalized += p
+            .take_current_speech()
+            .expect("expected a forced segment")
+            .samples
+            .len();
+        // End the utterance: 1 s of silence >> redemption (800 ms) + post-pad.
+        for seg in p.process_audio(&vec![0.0f32; 16000]).unwrap() {
+            finalized += seg.samples.len();
+        }
+
+        // Total finalized audio must stay near the input length (allow ~1 s of
+        // pre/post-padding slack), NOT ~2× it.
+        assert!(
+            finalized <= speech.len() + 16000,
+            "force-cut + speech-end finalized {} samples for a {}-sample utterance \
+             — duplication regressed (#138)",
+            finalized,
+            speech.len()
+        );
     }
 }
