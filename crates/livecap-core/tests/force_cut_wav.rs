@@ -63,6 +63,9 @@ fn force_cut_midutterance_no_duplicate_no_panic() {
     const FORCE_CUT_THRESHOLD: usize = 16_000; // 1 s @ 16 kHz
     let mut finalized: usize = 0;
     let mut force_cuts: usize = 0;
+    // The end time of the most recent force-cut segment; the natural SpeechEnd
+    // tail must start at/after it (no timestamp overlap, #162).
+    let mut last_cut_end_ms: f64 = 0.0;
     for chunk in speech.chunks(1_600) {
         for seg in vad.process_audio(chunk).expect("process_audio") {
             finalized += seg.samples.len();
@@ -71,6 +74,7 @@ fn force_cut_midutterance_no_duplicate_no_panic() {
             if let Some(seg) = vad.take_current_speech() {
                 finalized += seg.samples.len();
                 force_cuts += 1;
+                last_cut_end_ms = seg.end_timestamp_ms;
             }
         }
     }
@@ -80,6 +84,16 @@ fn force_cut_midutterance_no_duplicate_no_panic() {
     // force-cut; reaching the assertions below proves it no longer does.
     for seg in vad.process_audio(&vec![0.0f32; 16_000]).expect("process silence") {
         finalized += seg.samples.len();
+        // The tail segment after a force-cut must start at/after the last cut —
+        // not back at the original speech start (#162). Allow a small slack for
+        // ms/sample rounding.
+        assert!(
+            seg.start_timestamp_ms + 100.0 >= last_cut_end_ms,
+            "post-force-cut tail segment starts at {:.0}ms, before the last cut ended at {:.0}ms \
+             — timestamp overlaps the already-finalized force-cut segment (#162)",
+            seg.start_timestamp_ms,
+            last_cut_end_ms
+        );
     }
 
     // Anti-tautology: real speech must have been detected AND force-cut, i.e.

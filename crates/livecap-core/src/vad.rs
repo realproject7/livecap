@@ -306,7 +306,8 @@ impl ContinuousVadProcessor {
                     // the tail since then, so use it instead. Otherwise prefer
                     // the transition samples (they carry Silero's pre/post
                     // padding); fall back to `current_speech` when empty.
-                    let speech_samples = if self.force_cut_pending {
+                    let was_force_cut = self.force_cut_pending;
+                    let speech_samples = if was_force_cut {
                         std::mem::take(&mut self.current_speech)
                     } else if !samples.is_empty() {
                         samples
@@ -316,16 +317,27 @@ impl ContinuousVadProcessor {
                     self.force_cut_pending = false;
 
                     if !speech_samples.is_empty() {
+                        // After a force-cut the tail audio starts at the cut
+                        // point, NOT Silero's original speech start — otherwise
+                        // this tail segment would overlap the already-finalized
+                        // force-cut segment in time and report an inflated
+                        // duration for only the tail (#162). `speech_start_sample`
+                        // was reset to the cut point in `take_current_speech`.
+                        let start_ms = if was_force_cut {
+                            self.speech_start_sample as f64 * 1000.0 / VAD_SAMPLE_RATE as f64
+                        } else {
+                            start_timestamp_ms as f64
+                        };
                         let segment = SpeechSegment {
                             samples: speech_samples,
-                            start_timestamp_ms: start_timestamp_ms as f64,
+                            start_timestamp_ms: start_ms,
                             end_timestamp_ms: end_timestamp_ms as f64,
                             confidence: 0.9, // VAD confidence
                         };
 
                         info!(
                             "VAD: completed speech segment: {:.1}ms duration, {} samples",
-                            end_timestamp_ms - start_timestamp_ms,
+                            end_timestamp_ms as f64 - start_ms,
                             segment.samples.len()
                         );
 
