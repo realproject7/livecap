@@ -7,9 +7,12 @@
 
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
+use std::sync::Mutex;
 
 use anyhow::{anyhow, Result};
-use whisper_rs::{FullParams, SamplingStrategy, WhisperContext, WhisperContextParameters};
+use whisper_rs::{
+    FullParams, SamplingStrategy, WhisperContext, WhisperContextParameters, WhisperState,
+};
 
 use super::acceleration::whisper_context_acceleration;
 
@@ -134,10 +137,22 @@ pub struct Utterance {
     pub confidence: f32,
 }
 
-/// A loaded whisper.cpp model. Cheap to share behind an `Arc`; create one
-/// `WhisperState` per transcription call (states are independent).
+/// A loaded whisper.cpp model. Cheap to share behind an `Arc`.
+///
+/// The `WhisperState` (KV caches, a ~93 MB logits buffer, the CoreML/Metal
+/// encoder binding) is created ONCE at load and reused across every call (#140)
+/// rather than re-allocated per transcription — a fresh state per call also
+/// re-initialised the Metal backend and re-attempted the CoreML load, ~180–450 MB
+/// of alloc/free plus tens–hundreds of ms of setup on EVERY partial. The
+/// transcribe worker serializes calls (`pipeline::transcribe_worker`), so the
+/// `Mutex` only provides interior mutability for `&self` + never actually
+/// contends.
+///
+/// The `WhisperContext` wrapper is dropped once the state exists: the state
+/// holds its own `Arc<WhisperInnerContext>` (from `create_state`), so the loaded
+/// model stays alive for the engine's lifetime and is freed after the state.
 pub struct WhisperEngine {
-    ctx: WhisperContext,
+    state: Mutex<WhisperState>,
     model_name: String,
 }
 
@@ -171,9 +186,17 @@ impl WhisperEngine {
         )
         .map_err(|e| anyhow!("Failed to load model {}: {}", model_name, e))?;
 
+        // Create the reusable state once (#140). `whisper_full` overwrites its
+        // results each call, so a single long-lived state serves every
+        // transcription; only the KV/logits buffers and encoder binding are
+        // amortised.
+        let state = ctx
+            .create_state()
+            .map_err(|e| anyhow!("Failed to create whisper state for {}: {}", model_name, e))?;
+
         log::info!("Whisper model '{}' loaded", model_name);
         Ok(Self {
-            ctx,
+            state: Mutex::new(state),
             model_name: model_name.to_string(),
         })
     }
@@ -184,17 +207,30 @@ impl WhisperEngine {
 
     /// Transcribe a 16 kHz mono segment. `language`: `None`/`"auto"` for
     /// per-utterance auto-detection, `"auto-translate"` to translate to
-    /// English, or an ISO-639-1 code to force a language.
+    /// English, or an ISO-639-1 code to force a language. `partial` marks a
+    /// throwaway preview transcription (superseded by the eventual final):
+    /// partials decode greedily and over a reduced audio context to cut cost,
+    /// finals keep beam search + the full 30 s window for best accuracy (#140).
     ///
     /// CPU/GPU-heavy and blocking — call via `spawn_blocking` from async code.
-    pub fn transcribe(&self, audio_16k: &[f32], language: Option<&str>) -> Result<Utterance> {
-        // Beam search with a small beam keeps latency low while beating
-        // greedy decoding on accuracy (Meetily sized the beam per hardware
-        // tier; live captioning favors the low end).
-        let mut params = FullParams::new(SamplingStrategy::BeamSearch {
-            beam_size: 2,
-            patience: 1.0,
-        });
+    pub fn transcribe(
+        &self,
+        audio_16k: &[f32],
+        language: Option<&str>,
+        partial: bool,
+    ) -> Result<Utterance> {
+        // Beam search beats greedy on accuracy and is used for FINALS (the
+        // archived/translated text). PARTIALS are superseded within ~1.2 s, so
+        // they decode greedily — roughly half the decode cost for a preview the
+        // final will replace (#140).
+        let mut params = if partial {
+            FullParams::new(SamplingStrategy::Greedy { best_of: 1 })
+        } else {
+            FullParams::new(SamplingStrategy::BeamSearch {
+                beam_size: 2,
+                patience: 1.0,
+            })
+        };
 
         let (language_code, should_translate) = match language {
             Some("auto") | None => (None, false),
@@ -241,7 +277,29 @@ impl WhisperEngine {
             audio_16k
         };
 
-        let mut state = self.ctx.create_state()?;
+        // Shrink the encoder's audio context for PARTIALS (#140). whisper's
+        // encoder always processes a fixed 1500-frame / 30 s window regardless
+        // of input length, so a 1.2 s partial otherwise costs the same encoder
+        // time as a 30 s final. Scale the context to the partial's own length
+        // (+ a small margin); finals leave it at 0 (the default full window) to
+        // protect accuracy. 20 ms per frame → 1500 frames = 30 s @ 16 kHz.
+        if partial {
+            const FULL_AUDIO_CTX: usize = 1500;
+            const WINDOW_SAMPLES: usize = 30 * 16000;
+            // ceil(len * 1500 / window) + a small margin, clamped to the full
+            // window. Manual ceil — signed `div_ceil` is still unstable.
+            let frames = (audio.len() * FULL_AUDIO_CTX).div_ceil(WINDOW_SAMPLES) + 32;
+            let audio_ctx = frames.clamp(1, FULL_AUDIO_CTX) as i32;
+            params.set_audio_ctx(audio_ctx);
+        }
+
+        // Reuse the long-lived state (#140). The transcribe worker is
+        // single-threaded so this lock never contends; `.full` overwrites the
+        // state's previous results.
+        let mut state = self
+            .state
+            .lock()
+            .map_err(|_| anyhow!("whisper state mutex poisoned"))?;
         state.full(params, audio)?;
 
         // Detected language for this utterance.

@@ -15,6 +15,7 @@
 //! WAV chunks through [`CaptionPipeline::feeder`], exactly like the capture
 //! threads do.
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Instant;
@@ -465,11 +466,25 @@ async fn transcribe_worker(
     suppressor: Arc<CrossChannelSuppressor>,
     start: Instant,
 ) {
+    // Per-channel language pinned for the in-progress utterance (#140, M1). In
+    // AUTO mode the first partial's detected language is pinned so subsequent
+    // PARTIALS skip whisper's extra per-call auto-detect encoder pass; the final
+    // always re-detects. Keyed by channel because mic and system utterances
+    // interleave through this one worker.
+    let mut pinned_lang: HashMap<Channel, String> = HashMap::new();
+    // AUTO mode = the session did not force a specific language. `with_source_
+    // language` normalises "auto"/"" to `None`; `"auto-translate"` is NOT auto
+    // (it force-translates) and must not be pinned.
+    let session_auto = matches!(language.as_deref(), None | Some("auto"));
+
     while let Some(req) = rx.recv().await {
         // A mic utterance was energy-gated as bleed after streaming partials:
         // cancel its orphaned streaming block on consumers (#62). Processed in
         // queue order, so it lands after the partials it cancels.
         if matches!(req.kind, RequestKind::DropPartial) {
+            // The utterance is abandoned — drop any pinned language so the next
+            // utterance on this channel auto-detects afresh (#140).
+            pinned_lang.remove(&req.channel);
             if events_tx
                 .send(CaptionEvent {
                     channel: req.channel,
@@ -489,11 +504,22 @@ async fn transcribe_worker(
             continue;
         }
 
+        let is_partial = matches!(req.kind, RequestKind::Partial);
+        // Language for THIS call (#140, M1): a forced language / auto-translate
+        // passes through unchanged; in auto mode a partial reuses the pinned
+        // detection (None on the first partial), and the final always re-detects.
+        let call_language: Option<String> = if !session_auto {
+            language.clone()
+        } else if is_partial {
+            pinned_lang.get(&req.channel).cloned()
+        } else {
+            None
+        };
+
         let task_engine = engine.clone();
-        let task_language = language.clone();
         let samples = req.samples;
         let result = tokio::task::spawn_blocking(move || {
-            task_engine.transcribe(&samples, task_language.as_deref())
+            task_engine.transcribe(&samples, call_language.as_deref(), is_partial)
         })
         .await;
 
@@ -508,6 +534,24 @@ async fn transcribe_worker(
                 continue;
             }
         };
+
+        // Maintain the per-channel language pin (#140, M1) — before the empty
+        // text check so a final ALWAYS clears its channel's pin. Auto mode only.
+        if session_auto {
+            match req.kind {
+                RequestKind::Partial => {
+                    if utterance.lang != "unknown" && !utterance.lang.is_empty() {
+                        pinned_lang
+                            .entry(req.channel)
+                            .or_insert_with(|| utterance.lang.clone());
+                    }
+                }
+                RequestKind::Finalized { .. } => {
+                    pinned_lang.remove(&req.channel);
+                }
+                RequestKind::DropPartial => {}
+            }
+        }
 
         if utterance.text.is_empty() {
             continue;
