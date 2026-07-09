@@ -5,14 +5,19 @@
 //! (`LIVECAP_CAPTURE_VISIBLE` / `LIVECAP_AUTOSTART`) still win over the file
 //! whenever they are set.
 //!
-//! The file is read ONLY in `#[cfg(debug_assertions)]` builds — release
-//! builds compile the file-reading code out entirely (the release
-//! `from_file` below is a constant), so the flags are unreachable in
-//! production by construction, not by a runtime check.
+//! Both the file AND the env vars are read ONLY in `#[cfg(debug_assertions)]`
+//! builds — release builds compile the file/env-reading code out entirely (the
+//! release `capture_visible` / `autostart` below are compile-time `false`
+//! constants), so the flags are unreachable in production by construction, not
+//! by a runtime check (#146: a shipped binary has no env path to disable
+//! capture exclusion).
 
 use tauri::AppHandle;
 
 /// Flags parsed from `dev-flags.json`. Everything defaults to off.
+/// Debug-only: release builds resolve the flags to compile-time `false`
+/// constants and never read the file, so this type is unreachable there (#146).
+#[cfg(debug_assertions)]
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 struct DevFlags {
     capture_visible: bool,
@@ -52,16 +57,10 @@ fn from_file(app: &AppHandle) -> DevFlags {
         .unwrap_or_default()
 }
 
-/// Release builds: no file access exists — the dev-flags file is ignored at
-/// compile time (#108 acceptance criterion).
-#[cfg(not(debug_assertions))]
-fn from_file(_app: &AppHandle) -> DevFlags {
-    DevFlags::default()
-}
-
 /// Precedence: a SET env var always wins ("1" = on, anything else = off,
 /// matching the historical `== Ok("1")` checks); only an UNSET env var falls
 /// through to the file flag.
+#[cfg(debug_assertions)]
 fn resolve(env: Option<&str>, file_flag: bool) -> bool {
     match env {
         Some(value) => value == "1",
@@ -71,6 +70,9 @@ fn resolve(env: Option<&str>, file_flag: bool) -> bool {
 
 /// Overlay stays visible to screen capture (disables BOTH exclusion
 /// mechanisms: Tauri content protection + NSWindow sharingType).
+///
+/// Debug builds: `LIVECAP_CAPTURE_VISIBLE=1` (env wins) or the file flag.
+#[cfg(debug_assertions)]
 pub fn capture_visible(app: &AppHandle) -> bool {
     resolve(
         std::env::var("LIVECAP_CAPTURE_VISIBLE").ok().as_deref(),
@@ -78,12 +80,29 @@ pub fn capture_visible(app: &AppHandle) -> bool {
     )
 }
 
+/// Release builds: no env or file path can disable capture exclusion — the
+/// value is a compile-time constant `false` (#146 privacy invariant).
+#[cfg(not(debug_assertions))]
+pub fn capture_visible(_app: &AppHandle) -> bool {
+    false
+}
+
 /// Start a captioning session at launch without any UI interaction.
+///
+/// Debug builds: `LIVECAP_AUTOSTART=1` (env wins) or the file flag.
+#[cfg(debug_assertions)]
 pub fn autostart(app: &AppHandle) -> bool {
     resolve(
         std::env::var("LIVECAP_AUTOSTART").ok().as_deref(),
         from_file(app).autostart,
     )
+}
+
+/// Release builds: no env or file path can trigger silent autostart — the
+/// value is a compile-time constant `false` (#146).
+#[cfg(not(debug_assertions))]
+pub fn autostart(_app: &AppHandle) -> bool {
+    false
 }
 
 #[cfg(test)]

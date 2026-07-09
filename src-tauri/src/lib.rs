@@ -388,7 +388,9 @@ pub fn run() {
             // snippet inside the webview every 3s that reports page state via
             // the ui_beat IPC command — works even when the app's own module
             // failed to evaluate. If no heartbeat file appears, IPC itself is
-            // broken (e.g. CSP).
+            // broken (e.g. CSP). Gated to debug builds (#146): a release binary
+            // compiles this env read + probe loop out entirely.
+            #[cfg(debug_assertions)]
             if std::env::var("LIVECAP_UI_PROBE").as_deref() == Ok("1") {
                 let probe_window = window.clone();
                 tauri::async_runtime::spawn(async move {
