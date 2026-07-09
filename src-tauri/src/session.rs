@@ -589,12 +589,19 @@ async fn start_inner(app: &AppHandle) -> Result<Option<String>, String> {
             // The RTF "falling behind" notice (#141) is a status, not a caption:
             // surface a content-free one-liner and move on. It is debounced in the
             // pipeline, so this fires at most once per falling-behind episode.
+            // Only emit while actually Live: during pause/stop the pipeline keeps
+            // draining queued finals, and a crossing on one of those must NOT
+            // stamp Phase::Live over the real Paused/Stopping phase in the UI.
             if matches!(event.kind, CaptionKind::FallingBehind) {
-                emit_status(
-                    &events_app,
-                    Phase::Live,
-                    Some("transcription is falling behind — a smaller model may keep up".into()),
-                );
+                if events_app.state::<SessionState>().phase() == Phase::Live {
+                    emit_status(
+                        &events_app,
+                        Phase::Live,
+                        Some(
+                            "transcription is falling behind — a smaller model may keep up".into(),
+                        ),
+                    );
+                }
                 continue;
             }
             let session = events_app.state::<SessionState>();
