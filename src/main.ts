@@ -919,7 +919,10 @@ startUiHeartbeat(() => {
   return {
     mode: state.mode,
     feedBlocks: feed.blocks.length,
-    domBlocks: feedEl.querySelectorAll(".cap").length,
+    // O(1) independent DOM-truth read (#147): count feed children minus the
+    // permanent #feed-note sentinel, instead of an O(n) querySelectorAll. Not a
+    // JS counter — this must observe the DOM directly to catch DOM/state drift.
+    domBlocks: Math.max(0, feedEl.childElementCount - 1),
     latestSource: latest?.source ?? "",
     latestTranslation: latest?.translation ?? "",
     capsuleText: capsuleTxt.textContent ?? "",
