@@ -519,7 +519,7 @@ async fn transcribe_worker(
         let task_engine = engine.clone();
         let samples = req.samples;
         let result = tokio::task::spawn_blocking(move || {
-            task_engine.transcribe(&samples, call_language.as_deref(), is_partial)
+            task_engine.transcribe(&samples, call_language.as_deref(), is_partial, session_auto)
         })
         .await;
 
@@ -527,10 +527,18 @@ async fn transcribe_worker(
             Ok(Ok(u)) => u,
             Ok(Err(e)) => {
                 log::error!("Transcription failed for {}: {e:#}", req.channel);
+                // A failed FINAL must still end its utterance's pin, or a stale
+                // language leaks into the next utterance's partials (#140, M1).
+                if matches!(req.kind, RequestKind::Finalized { .. }) {
+                    pinned_lang.remove(&req.channel);
+                }
                 continue;
             }
             Err(e) => {
                 log::error!("Transcription task panicked for {}: {e}", req.channel);
+                if matches!(req.kind, RequestKind::Finalized { .. }) {
+                    pinned_lang.remove(&req.channel);
+                }
                 continue;
             }
         };
