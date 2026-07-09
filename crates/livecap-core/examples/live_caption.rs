@@ -137,6 +137,9 @@ async fn main() -> anyhow::Result<()> {
                             "[{t:8.2}s] [{who}] ✓ ({lang}, conf {confidence:.2}, {start_ms}–{end_ms}ms) {text}"
                         );
                     }
+                    CaptionKind::FallingBehind => {
+                        println!("[{t:8.2}s] ⚠ transcription falling behind — a smaller model may keep up");
+                    }
                 }
             }
         }

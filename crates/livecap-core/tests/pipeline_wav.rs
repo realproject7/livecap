@@ -134,6 +134,8 @@ async fn wav_fixture_yields_finalized_text() {
             // A suppressed-bleed partial-clear (#62); not expected for this
             // single-channel mic fixture, but the match must be exhaustive.
             CaptionKind::PartialDropped => println!("partial dropped"),
+            // #141 RTF notice — not a caption; ignore in this fixture.
+            CaptionKind::FallingBehind => println!("falling behind"),
             CaptionKind::Finalized {
                 text,
                 lang,

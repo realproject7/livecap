@@ -43,6 +43,12 @@ pub enum CaptionKind {
         /// Utterance end, milliseconds since the channel started.
         end_ms: u64,
     },
+    /// Transcription is sustaining a real-time factor above the threshold — the
+    /// chosen model is too heavy for this Mac and captions are falling behind
+    /// (#141). Content-free: carries no caption text; the consumer surfaces a
+    /// one-line "consider a smaller model" notice. Emitted at most once per
+    /// falling-behind episode (debounced), not per utterance.
+    FallingBehind,
 }
 
 /// A caption event for one channel.
