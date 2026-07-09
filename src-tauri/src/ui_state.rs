@@ -44,10 +44,13 @@ fn now_ms() -> u64 {
 }
 
 /// Disk-mirror view of a beat (#147): the liveness/wedge detector only needs
-/// the counts and mode, never caption text. Persisting `latestSource`/
-/// `latestTranslation` would write caption content to app-data every 5s
-/// regardless of the user's auto-save setting — so they are omitted here. The
-/// full beat (with caption text) stays in memory for `ui_snapshot`.
+/// the counts and mode, never caption text. `latestSource`/`latestTranslation`
+/// AND `capsuleText` all carry caption content (the capsule line is the latest
+/// source/translation per the capsule-content setting), so NONE are persisted —
+/// writing them would mirror caption content to app-data every 5s regardless of
+/// the user's auto-save setting. The capsule is represented by a content-free
+/// `capsuleActive` liveness bool. The full beat (with caption text) stays in
+/// memory for `ui_snapshot`.
 #[derive(Serialize)]
 struct PersistedBeat<'a> {
     ts: u64,
@@ -56,8 +59,10 @@ struct PersistedBeat<'a> {
     feed_blocks: u64,
     #[serde(rename = "domBlocks")]
     dom_blocks: u64,
-    #[serde(rename = "capsuleText")]
-    capsule_text: &'a str,
+    /// Whether the capsule is showing a line — a liveness signal carrying no
+    /// caption text (#147).
+    #[serde(rename = "capsuleActive")]
+    capsule_active: bool,
     #[serde(rename = "bootError")]
     boot_error: Option<&'a str>,
 }
@@ -69,9 +74,39 @@ impl<'a> From<&'a UiBeat> for PersistedBeat<'a> {
             mode: &b.mode,
             feed_blocks: b.feed_blocks,
             dom_blocks: b.dom_blocks,
-            capsule_text: &b.capsule_text,
+            capsule_active: !b.capsule_text.is_empty(),
             boot_error: b.boot_error.as_deref(),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// #147 privacy guard: the persisted heartbeat JSON must NEVER contain
+    /// caption content — not the source, the translation, or the capsule line.
+    #[test]
+    fn persisted_beat_never_contains_caption_content() {
+        let beat = UiBeat {
+            ts: 5000,
+            mode: "capsule".into(),
+            feed_blocks: 3,
+            dom_blocks: 3,
+            latest_source: "SECRET_SOURCE_LINE".into(),
+            latest_translation: "SECRET_TRANSLATION_LINE".into(),
+            capsule_text: "SECRET_CAPSULE_LINE".into(),
+            boot_error: None,
+        };
+        let json = serde_json::to_string(&PersistedBeat::from(&beat)).unwrap();
+        assert!(!json.contains("SECRET_SOURCE_LINE"), "leaked source: {json}");
+        assert!(
+            !json.contains("SECRET_TRANSLATION_LINE"),
+            "leaked translation: {json}"
+        );
+        assert!(!json.contains("SECRET_CAPSULE_LINE"), "leaked capsule: {json}");
+        // The content-free liveness bool is present and true (capsule non-empty).
+        assert!(json.contains("\"capsuleActive\":true"), "missing liveness: {json}");
     }
 }
 
