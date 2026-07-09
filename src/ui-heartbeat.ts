@@ -17,7 +17,14 @@ export interface UiBeat {
   bootError: string | null;
 }
 
+// Active cadence keeps verification/wedge detection responsive; when the
+// webview is hidden (#147) the beat slows to a keepalive — still frequent
+// enough to catch a wedge, but no per-second DOM read + IPC while idle.
+const ACTIVE_MS = 1000;
+const IDLE_MS = 4000;
+
 export function startUiHeartbeat(collect: () => Omit<UiBeat, "ts" | "bootError">): void {
+  let timer: ReturnType<typeof setTimeout> | undefined;
   const send = () => {
     const beat: UiBeat = {
       ts: Date.now(),
@@ -27,7 +34,15 @@ export function startUiHeartbeat(collect: () => Omit<UiBeat, "ts" | "bootError">
     void invoke("ui_beat", { beat }).catch(() => {
       /* command not ready during teardown — the next beat retries */
     });
+    timer = setTimeout(send, document.hidden ? IDLE_MS : ACTIVE_MS);
   };
+  // A visibility change to "visible" should resume the active cadence promptly
+  // rather than waiting out a pending idle interval.
+  document.addEventListener("visibilitychange", () => {
+    if (!document.hidden && timer !== undefined) {
+      clearTimeout(timer);
+      send();
+    }
+  });
   send();
-  setInterval(send, 1000);
 }
