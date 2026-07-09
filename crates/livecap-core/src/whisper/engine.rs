@@ -160,14 +160,21 @@ impl WhisperEngine {
     /// Load a ggml/gguf model from `model_path`. Blocking and slow (seconds)
     /// — call from a blocking context.
     pub fn load(model_path: &Path, model_name: &str) -> Result<Self> {
-        // Suppress verbose whisper.cpp / Metal C-library logs that bypass
-        // Rust logging.
-        std::env::set_var("GGML_METAL_LOG_LEVEL", "1"); // 0=off, 1=error
-        std::env::set_var("WHISPER_LOG_LEVEL", "1");
+        // Route whisper.cpp / ggml C-library logs into the Rust `log` crate
+        // (#141). The old `GGML_METAL_LOG_LEVEL`/`WHISPER_LOG_LEVEL` env vars were
+        // placebos — neither is read by the vendored whisper.cpp — so real errors
+        // (and, crucially, the backend-init line that reports whether Metal
+        // ACTUALLY engaged vs a silent CPU fallback) were lost to stderr. The
+        // trampoline is process-global and idempotent; installing it before
+        // context creation means whisper.cpp's own "using Metal backend" init log
+        // is the runtime truth, not the compile-time `cfg!` guess below.
+        whisper_rs::install_whisper_log_trampoline();
 
+        // `status_label()` is the COMPILE-TIME backend guess. The routed
+        // whisper.cpp init logs above report what actually loaded.
         let acceleration = whisper_context_acceleration();
         log::info!(
-            "Loading whisper model '{}' from {} with {}",
+            "Loading whisper model '{}' from {} — compiled for {} (see whisper.cpp init logs for the runtime backend)",
             model_name,
             model_path.display(),
             acceleration.status_label()

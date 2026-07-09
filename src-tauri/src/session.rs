@@ -18,7 +18,7 @@ use std::sync::{Arc, Mutex as StdMutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use livecap_core::model::DEFAULT_MODEL;
-use livecap_core::{CaptionPipeline, ModelManager, PipelineConfig};
+use livecap_core::{CaptionKind, CaptionPipeline, ModelManager, PipelineConfig};
 use serde::Serialize;
 use tauri::{AppHandle, Emitter, Manager, State};
 
@@ -586,12 +586,25 @@ async fn start_inner(app: &AppHandle) -> Result<Option<String>, String> {
     let host_stdin = host.stdin.clone();
     let events_task = tauri::async_runtime::spawn(async move {
         while let Some(event) = events_rx.recv().await {
+            // The RTF "falling behind" notice (#141) is a status, not a caption:
+            // surface a content-free one-liner and move on. It is debounced in the
+            // pipeline, so this fires at most once per falling-behind episode.
+            if matches!(event.kind, CaptionKind::FallingBehind) {
+                emit_status(
+                    &events_app,
+                    Phase::Live,
+                    Some("transcription is falling behind — a smaller model may keep up".into()),
+                );
+                continue;
+            }
             let session = events_app.state::<SessionState>();
-            let mapped = BridgeCaption::from_event(
+            let Some(mapped) = BridgeCaption::from_event(
                 event,
                 || session.next_caption_id.fetch_add(1, Ordering::Relaxed) + 1,
                 now_epoch_ms(),
-            );
+            ) else {
+                continue;
+            };
             let _ = events_app.emit("caption://event", &mapped);
             if let Some(message) = mapped.host_message() {
                 let _ = write_host_line(&host_stdin, &message);

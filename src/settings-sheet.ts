@@ -57,7 +57,10 @@ export function createSettingsSheet(options: SettingsSheetOptions): SettingsShee
     '<option value="custom">Custom…</option>';
   // #110: whisper model picker — same segmented control as the engine picker.
   const sttChoices = STT_MODELS.map(
-    (m) => `<button class="sh-seg-btn" data-stt="${m.value}">${m.label} · ${m.size}</button>`,
+    (m) =>
+      `<button class="sh-seg-btn" data-stt="${m.value}">${m.label} · ${m.size}${
+        m.note ? ` · ${m.note}` : ""
+      }</button>`,
   ).join("");
 
   host.innerHTML = `

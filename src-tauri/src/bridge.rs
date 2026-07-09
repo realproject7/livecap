@@ -45,20 +45,26 @@ pub enum BridgeCaption {
 }
 
 impl BridgeCaption {
-    /// Map a pipeline event. `next_id` is consulted only for finalized
-    /// events (ids are per-session monotonic and double as queue sequence).
-    pub fn from_event(event: CaptionEvent, next_id: impl FnOnce() -> u64, epoch_ms: u64) -> Self {
+    /// Map a pipeline event to a caption for the webview. `next_id` is consulted
+    /// only for finalized events (ids are per-session monotonic and double as
+    /// queue sequence). Returns `None` for non-caption signals (e.g. the #141
+    /// `FallingBehind` notice), which the caller surfaces as a status instead.
+    pub fn from_event(
+        event: CaptionEvent,
+        next_id: impl FnOnce() -> u64,
+        epoch_ms: u64,
+    ) -> Option<Self> {
         let channel = channel_label(event.channel);
         match event.kind {
-            CaptionKind::Partial(text) => BridgeCaption::Partial { channel, text },
-            CaptionKind::PartialDropped => BridgeCaption::Cleared { channel },
+            CaptionKind::Partial(text) => Some(BridgeCaption::Partial { channel, text }),
+            CaptionKind::PartialDropped => Some(BridgeCaption::Cleared { channel }),
             CaptionKind::Finalized {
                 text,
                 lang,
                 confidence,
                 start_ms,
                 end_ms,
-            } => BridgeCaption::Finalized {
+            } => Some(BridgeCaption::Finalized {
                 id: next_id(),
                 channel,
                 text,
@@ -68,7 +74,9 @@ impl BridgeCaption {
                 // Spoken duration; saturating so a malformed (end < start) span
                 // never underflows into a huge u64.
                 duration_ms: end_ms.saturating_sub(start_ms),
-            },
+            }),
+            // Not a caption — surfaced as a session status by the events task.
+            CaptionKind::FallingBehind => None,
         }
     }
 
@@ -127,7 +135,7 @@ mod tests {
             channel: Channel::System,
             kind: CaptionKind::Partial("and I had, um".into()),
         };
-        let mapped = BridgeCaption::from_event(event, || panic!("partial must not take an id"), 1);
+        let mapped = BridgeCaption::from_event(event, || panic!("partial must not take an id"), 1).unwrap();
         let json = serde_json::to_value(&mapped).unwrap();
         assert_eq!(json["type"], "partial");
         assert_eq!(json["channel"], "them");
@@ -142,7 +150,7 @@ mod tests {
             kind: CaptionKind::PartialDropped,
         };
         let mapped =
-            BridgeCaption::from_event(event, || panic!("cleared must not take an id"), 1);
+            BridgeCaption::from_event(event, || panic!("cleared must not take an id"), 1).unwrap();
         let json = serde_json::to_value(&mapped).unwrap();
         assert_eq!(json["type"], "cleared");
         assert_eq!(json["channel"], "me");
@@ -152,7 +160,7 @@ mod tests {
 
     #[test]
     fn finalized_maps_with_id_lang_and_confidence_flag() {
-        let mapped = BridgeCaption::from_event(finalized(Channel::Mic, 0.9), || 7, 1234);
+        let mapped = BridgeCaption::from_event(finalized(Channel::Mic, 0.9), || 7, 1234).unwrap();
         let json = serde_json::to_value(&mapped).unwrap();
         assert_eq!(json["type"], "finalized");
         assert_eq!(json["id"], 7);
@@ -177,22 +185,22 @@ mod tests {
                 end_ms: 100,
             },
         };
-        let mapped = BridgeCaption::from_event(event, || 1, 0);
+        let mapped = BridgeCaption::from_event(event, || 1, 0).unwrap();
         let json = serde_json::to_value(&mapped).unwrap();
         assert_eq!(json["durationMs"], 0);
     }
 
     #[test]
     fn low_confidence_threshold_flags_uncertain_captions() {
-        let low = BridgeCaption::from_event(finalized(Channel::System, 0.3), || 1, 0);
-        let high = BridgeCaption::from_event(finalized(Channel::System, 0.6), || 2, 0);
+        let low = BridgeCaption::from_event(finalized(Channel::System, 0.3), || 1, 0).unwrap();
+        let high = BridgeCaption::from_event(finalized(Channel::System, 0.6), || 2, 0).unwrap();
         assert_eq!(serde_json::to_value(&low).unwrap()["lowConfidence"], true);
         assert_eq!(serde_json::to_value(&high).unwrap()["lowConfidence"], false);
     }
 
     #[test]
     fn host_message_mirrors_the_finalized_wire_shape() {
-        let mapped = BridgeCaption::from_event(finalized(Channel::System, 0.2), || 3, 99);
+        let mapped = BridgeCaption::from_event(finalized(Channel::System, 0.2), || 3, 99).unwrap();
         let msg = mapped.host_message().unwrap();
         assert_eq!(msg["type"], "caption");
         assert_eq!(msg["id"], 3);
@@ -201,5 +209,16 @@ mod tests {
         assert_eq!(msg["lowConfidence"], true);
         assert_eq!(msg["epochMs"], 99);
         assert_eq!(msg["durationMs"], 900);
+    }
+
+    #[test]
+    fn falling_behind_is_not_a_caption() {
+        // #141: the RTF notice is a status, not a caption — from_event returns
+        // None so the events task surfaces it via session status instead.
+        let event = CaptionEvent {
+            channel: Channel::System,
+            kind: CaptionKind::FallingBehind,
+        };
+        assert!(BridgeCaption::from_event(event, || panic!("no id for a non-caption"), 1).is_none());
     }
 }

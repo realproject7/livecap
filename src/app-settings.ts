@@ -33,9 +33,13 @@ export interface AppSettings {
 
 /** Curated whisper model picks (#110); values mirror the Rust sanitizer's
  *  STT_MODELS. Size hints show in the Settings sheet copy. */
-export const STT_MODELS: { value: string; label: string; size: string }[] = [
+export const STT_MODELS: { value: string; label: string; size: string; note?: string }[] = [
   { value: "small", label: "Small", size: "~466 MB" },
-  { value: "medium", label: "Medium", size: "~1.5 GB" },
+  // #141: de-emphasize Medium — Large v3 Turbo is the same encoder class with a
+  // lighter decoder, so it is faster AND more accurate at a similar size. The
+  // note (kept out of `size`, which stays a pure size string) is shown in the
+  // picker copy.
+  { value: "medium", label: "Medium", size: "~1.5 GB", note: "Turbo is faster & better" },
   { value: "large-v3-turbo", label: "Large v3 Turbo", size: "~1.6 GB" },
 ];
 

@@ -456,6 +456,50 @@ async fn channel_worker_inner(
     Ok(())
 }
 
+/// Rolling real-time-factor watch over FINALS (#141). `record_final(rtf)` returns
+/// true EXACTLY ONCE per "falling behind" episode: when the mean RTF over the
+/// last `WINDOW` finals first crosses `FALLING_BEHIND`. It re-arms only after the
+/// mean drops back below `RECOVERED` (hysteresis), so a session that hovers near
+/// the threshold does not spam the notice.
+struct RtfWatch {
+    recent: std::collections::VecDeque<f64>,
+    notified: bool,
+}
+
+impl RtfWatch {
+    const WINDOW: usize = 5;
+    const FALLING_BEHIND: f64 = 0.7;
+    const RECOVERED: f64 = 0.5;
+
+    fn new() -> Self {
+        Self {
+            recent: std::collections::VecDeque::with_capacity(Self::WINDOW),
+            notified: false,
+        }
+    }
+
+    /// Record one final's real-time factor; returns true iff this is the crossing
+    /// that should emit the notice.
+    fn record_final(&mut self, rtf: f64) -> bool {
+        if self.recent.len() == Self::WINDOW {
+            self.recent.pop_front();
+        }
+        self.recent.push_back(rtf);
+        if self.recent.len() < Self::WINDOW {
+            return false;
+        }
+        let mean = self.recent.iter().sum::<f64>() / Self::WINDOW as f64;
+        if !self.notified && mean > Self::FALLING_BEHIND {
+            self.notified = true;
+            return true;
+        }
+        if self.notified && mean < Self::RECOVERED {
+            self.notified = false; // recovered — re-arm for a new episode
+        }
+        false
+    }
+}
+
 /// Shared transcription worker: serializes whisper calls (one context, one
 /// state at a time) so mic and system channels never contend on the GPU.
 async fn transcribe_worker(
@@ -476,6 +520,12 @@ async fn transcribe_worker(
     // language` normalises "auto"/"" to `None`; `"auto-translate"` is NOT auto
     // (it force-translates) and must not be pinned.
     let session_auto = matches!(language.as_deref(), None | Some("auto"));
+
+    // Rolling real-time-factor watch over FINALS (#141): a sustained mean RTF
+    // above the threshold means the model is too heavy for this Mac and captions
+    // are falling behind. Read-only — surfaces a content-free notice, does NOT
+    // change queue behavior or switch models (that is the post-MVP #164).
+    let mut rtf_watch = RtfWatch::new();
 
     while let Some(req) = rx.recv().await {
         // A mic utterance was energy-gated as bleed after streaming partials:
@@ -518,10 +568,13 @@ async fn transcribe_worker(
 
         let task_engine = engine.clone();
         let samples = req.samples;
+        let audio_samples = samples.len(); // captured before the move (#141 RTF)
+        let transcribe_started = Instant::now();
         let result = tokio::task::spawn_blocking(move || {
             task_engine.transcribe(&samples, call_language.as_deref(), is_partial, session_auto)
         })
         .await;
+        let transcribe_wall_ms = transcribe_started.elapsed().as_secs_f64() * 1000.0;
 
         let utterance = match result {
             Ok(Ok(u)) => u,
@@ -558,6 +611,25 @@ async fn transcribe_worker(
                     pinned_lang.remove(&req.channel);
                 }
                 RequestKind::DropPartial => {}
+            }
+        }
+
+        // Real-time-factor tracking for FINALS (#141) — before the empty-text
+        // continue, so a slow low-confidence-dropped final still counts. Partials
+        // are excluded (they decode greedily and get shed). Emits ONE content-free
+        // notice per falling-behind episode.
+        if matches!(req.kind, RequestKind::Finalized { .. }) && audio_samples > 0 {
+            let audio_ms = audio_samples as f64 / VAD_SAMPLE_RATE as f64 * 1000.0;
+            let rtf = transcribe_wall_ms / audio_ms;
+            if rtf_watch.record_final(rtf) {
+                log::warn!(
+                    "transcription falling behind: mean RTF over recent finals crossed the threshold on model '{}' — a smaller model may keep up",
+                    engine.model_name()
+                );
+                let _ = events_tx.send(CaptionEvent {
+                    channel: req.channel,
+                    kind: CaptionKind::FallingBehind,
+                });
             }
         }
 
@@ -636,6 +708,57 @@ async fn transcribe_worker(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn rtf_watch_stays_quiet_below_the_window_and_when_fast() {
+        let mut w = RtfWatch::new();
+        // Fewer than WINDOW finals: never fires, even if slow.
+        for _ in 0..RtfWatch::WINDOW - 1 {
+            assert!(!w.record_final(2.0));
+        }
+        // A full window of FAST finals: never fires.
+        let mut w = RtfWatch::new();
+        for _ in 0..RtfWatch::WINDOW * 2 {
+            assert!(!w.record_final(0.2));
+        }
+    }
+
+    #[test]
+    fn rtf_watch_fires_once_per_falling_behind_episode() {
+        let mut w = RtfWatch::new();
+        // Fill the window with slow finals; the fire happens on the crossing.
+        let mut fires = 0;
+        for _ in 0..RtfWatch::WINDOW {
+            if w.record_final(1.5) {
+                fires += 1;
+            }
+        }
+        assert_eq!(fires, 1, "should notify exactly once when it first crosses");
+        // Still slow → debounced, no repeat.
+        for _ in 0..RtfWatch::WINDOW {
+            assert!(!w.record_final(1.5), "must not re-fire while still notified");
+        }
+    }
+
+    #[test]
+    fn rtf_watch_rearms_after_recovery() {
+        let mut w = RtfWatch::new();
+        for _ in 0..RtfWatch::WINDOW {
+            w.record_final(1.5);
+        }
+        // Recover: a window of fast finals drops the mean below RECOVERED.
+        for _ in 0..RtfWatch::WINDOW {
+            w.record_final(0.1);
+        }
+        // A new slow episode fires again.
+        let mut refires = 0;
+        for _ in 0..RtfWatch::WINDOW {
+            if w.record_final(1.5) {
+                refires += 1;
+            }
+        }
+        assert_eq!(refires, 1, "should re-fire after recovering and falling behind again");
+    }
 
     #[test]
     fn source_language_auto_maps_to_none() {
