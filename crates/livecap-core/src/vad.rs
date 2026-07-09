@@ -35,6 +35,15 @@ pub struct ContinuousVadProcessor {
     in_speech: bool,
     processed_samples: usize,
     speech_start_sample: usize,
+    // A force-cut happened during the current speech run (#138/#162): Silero
+    // keeps accumulating `session_audio` from the ORIGINAL speech start, so the
+    // eventual SpeechEnd transition re-contains the audio we already finalized.
+    // When this is set we use our own post-cut `current_speech` for the final
+    // segment instead, avoiding both the duplicate captions AND the
+    // channel-killing panic that draining Silero's buffer would cause (this
+    // Silero rev's SpeechEnd reads a state-enum start_ms that `take_until`
+    // cannot advance).
+    force_cut_pending: bool,
     // State tracking for smart logging
     last_logged_state: bool,
 }
@@ -79,6 +88,7 @@ impl ContinuousVadProcessor {
             in_speech: false,
             processed_samples: 0,
             speech_start_sample: 0,
+            force_cut_pending: false,
             last_logged_state: false,
         })
     }
@@ -136,19 +146,15 @@ impl ContinuousVadProcessor {
         let start_ms = self.speech_start_sample as f64 * ms_per_sample;
         let end_ms = (self.processed_samples as f64 * ms_per_sample).max(start_ms);
 
-        // Advance Silero's OWN accumulated buffer up to "now" so the utterance
-        // it eventually emits on SpeechEnd starts AFTER this force-cut. Without
-        // this, Silero keeps `session_audio` from the original speech start, and
-        // the final SpeechEnd `samples` re-contain everything finalized here —
-        // so any utterance longer than `max_utterance_ms` emits DUPLICATE
-        // captions and hands a 60s+ input to a single whisper call, exactly when
-        // the pipeline is most loaded (#138). We keep our own `current_speech`
-        // as the returned segment (the transcribed audio is unchanged);
-        // take_until's return is discarded — it only moves Silero's internal
-        // speech-start marker forward and drops the consumed samples.
-        let now = self.session.session_time();
-        let _ = self.session.take_until(now);
-
+        // Return our own post-cut accumulation and reset it; mark that a
+        // force-cut happened so the eventual SpeechEnd uses `current_speech`
+        // (the tail since this cut) rather than Silero's transition `samples`,
+        // which re-contain everything from the original speech start (#138/#162).
+        // We deliberately do NOT drain Silero's internal buffer: this Silero rev
+        // emits SpeechEnd against a state-enum `start_ms` that `take_until`
+        // cannot advance, so draining makes the next SpeechEnd PANIC (crashing
+        // the channel worker — strictly worse than the duplication it fixed).
+        self.force_cut_pending = true;
         let segment = SpeechSegment {
             samples: std::mem::take(&mut self.current_speech),
             start_timestamp_ms: start_ms,
@@ -275,6 +281,8 @@ impl ContinuousVadProcessor {
                     // produced inflated start timestamps on forced ends).
                     self.speech_start_sample = timestamp_ms * VAD_SAMPLE_RATE as usize / 1000;
                     self.current_speech.clear();
+                    // Fresh utterance — no force-cut has happened for it yet.
+                    self.force_cut_pending = false;
                 }
                 VadTransition::SpeechEnd {
                     start_timestamp_ms,
@@ -291,26 +299,45 @@ impl ContinuousVadProcessor {
                     }
                     self.in_speech = false;
 
-                    // Use samples from the VAD transition if available
-                    // (includes pre/post padding), otherwise the accumulated
-                    // buffer.
-                    let speech_samples = if !samples.is_empty() {
+                    // After a force-cut, Silero's transition `samples` re-contain
+                    // the audio already finalized by the cut(s) — using them
+                    // would duplicate captions (#138/#162). Our own
+                    // `current_speech` was reset at the last cut and holds only
+                    // the tail since then, so use it instead. Otherwise prefer
+                    // the transition samples (they carry Silero's pre/post
+                    // padding); fall back to `current_speech` when empty.
+                    let was_force_cut = self.force_cut_pending;
+                    let speech_samples = if was_force_cut {
+                        std::mem::take(&mut self.current_speech)
+                    } else if !samples.is_empty() {
                         samples
                     } else {
                         self.current_speech.clone()
                     };
+                    self.force_cut_pending = false;
 
                     if !speech_samples.is_empty() {
+                        // After a force-cut the tail audio starts at the cut
+                        // point, NOT Silero's original speech start — otherwise
+                        // this tail segment would overlap the already-finalized
+                        // force-cut segment in time and report an inflated
+                        // duration for only the tail (#162). `speech_start_sample`
+                        // was reset to the cut point in `take_current_speech`.
+                        let start_ms = if was_force_cut {
+                            self.speech_start_sample as f64 * 1000.0 / VAD_SAMPLE_RATE as f64
+                        } else {
+                            start_timestamp_ms as f64
+                        };
                         let segment = SpeechSegment {
                             samples: speech_samples,
-                            start_timestamp_ms: start_timestamp_ms as f64,
+                            start_timestamp_ms: start_ms,
                             end_timestamp_ms: end_timestamp_ms as f64,
                             confidence: 0.9, // VAD confidence
                         };
 
                         info!(
                             "VAD: completed speech segment: {:.1}ms duration, {} samples",
-                            end_timestamp_ms - start_timestamp_ms,
+                            end_timestamp_ms as f64 - start_ms,
                             segment.samples.len()
                         );
 
@@ -437,42 +464,10 @@ mod tests {
         }
     }
 
-    #[test]
-    fn force_cut_does_not_duplicate_audio_on_speech_end() {
-        // #138: a force-cut mid-utterance must advance Silero's internal buffer
-        // so the eventual SpeechEnd does not re-emit the already-finalized
-        // audio. Sum ALL finalized samples across the whole run and assert the
-        // total stays close to the input — before the fix, the force-cut
-        // segment plus the SpeechEnd (which re-contained it) roughly DOUBLED it.
-        let mut p = ContinuousVadProcessor::new(16000, 800).unwrap();
-        let speech: Vec<f32> = generate_test_audio_with_speech(3.0, 16000);
-
-        let mut finalized = 0usize;
-        for seg in p.process_audio(&speech).unwrap() {
-            finalized += seg.samples.len();
-        }
-        if !p.in_speech() {
-            return; // synthetic signal not detected as speech on this Silero build
-        }
-        // Force-cut mid-utterance (what pipeline.rs does at max_utterance_ms).
-        finalized += p
-            .take_current_speech()
-            .expect("expected a forced segment")
-            .samples
-            .len();
-        // End the utterance: 1 s of silence >> redemption (800 ms) + post-pad.
-        for seg in p.process_audio(&vec![0.0f32; 16000]).unwrap() {
-            finalized += seg.samples.len();
-        }
-
-        // Total finalized audio must stay near the input length (allow ~1 s of
-        // pre/post-padding slack), NOT ~2× it.
-        assert!(
-            finalized <= speech.len() + 16000,
-            "force-cut + speech-end finalized {} samples for a {}-sample utterance \
-             — duplication regressed (#138)",
-            finalized,
-            speech.len()
-        );
-    }
+    // NOTE: the force-cut → SpeechEnd no-duplication / no-panic invariant (#138/
+    // #162) is covered by the REAL-SPEECH integration test in
+    // `tests/force_cut_wav.rs`. A synthetic-harmonic unit test cannot exercise
+    // it: this Silero build never classifies the generator's output as speech,
+    // so the force-cut path is never entered (the earlier synthetic test was
+    // vacuous and gave false confidence).
 }
