@@ -12,6 +12,10 @@
 //! confidence, and timestamps.
 
 pub mod audio;
+// Debug-only raw-WAV fixture dump (#64); its sole consumer in `pipeline` is
+// gated to debug builds, so the whole module is compiled out of release
+// binaries — no env path to raw-audio capture ships in release (#161).
+#[cfg(debug_assertions)]
 mod debug_dump;
 pub mod error;
 pub mod event;
