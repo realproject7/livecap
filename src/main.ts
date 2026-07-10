@@ -15,7 +15,13 @@ import {
   type AppSettings,
 } from "./app-settings";
 import { bootstrap } from "./bootstrap";
-import { buildDashboard, loadArchivedSessions, type DashboardSurface } from "./dashboard";
+import {
+  buildDashboard,
+  loadArchivedSession,
+  loadArchivedSessions,
+  loadSessionIndex,
+  type DashboardSurface,
+} from "./dashboard";
 import { LANGUAGES, SOURCE_AUTO_CODE, SOURCE_LANGUAGES, languageByCode } from "./languages";
 import { FeedState, type CaptionBlock } from "./feed-state";
 import { FeedCoalescer, applyShimmerCap } from "./feed-coalescer";
@@ -803,7 +809,9 @@ $<HTMLDivElement>("review-mount").appendChild(review.el);
 /* ---- #90 session dashboard (src/dashboard.ts) ---- */
 
 const dashboard: DashboardSurface = buildDashboard({
-  load: loadArchivedSessions,
+  loadIndex: loadSessionIndex,
+  loadSession: loadArchivedSession,
+  loadAll: loadArchivedSessions,
   onClose: () => {
     dashboard.close();
     // Closing returns the idle Panel to whatever it was showing (Start screen).

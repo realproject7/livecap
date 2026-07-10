@@ -30,22 +30,44 @@ import type { CaptionEntry } from "@livecap/archive/src/types.ts";
 // rewrites look the same here as they did when generated (#114).
 import { renderBetter } from "./review";
 
-/** One saved session as handed over by the Rust `list_archived_sessions`
- *  command: a file name + the raw Markdown to parse. */
+/** One saved session's FULL document as handed over by the Rust
+ *  `list_archived_sessions` / `read_archived_session` commands: a file name +
+ *  the raw Markdown to parse. Loaded lazily (detail open) or on demand (search),
+ *  never eagerly for the whole archive (#144). */
 export interface ArchivedSession {
   name: string;
   markdown: string;
 }
 
+/** One saved session's lightweight index row from the Rust `list_session_index`
+ *  command (#144): a file name + only the document FRONT MATTER (up to
+ *  `## Transcript`) — the H1 title, meta line, and Summary/Board/Metrics — which
+ *  is all `parseSession` + `aggregateSessions` need for the history + stats. The
+ *  transcript/coaching bodies are omitted so open time is bounded. */
+export interface SessionHeader {
+  name: string;
+  markdown: string;
+}
+
+/** A header-parsed session paired with its file name so a history row can lazily
+ *  load its full body on click (#144). The parse is FRONT-MATTER-ONLY: `.entries`
+ *  is empty here — the transcript loads when the detail opens. */
+export interface IndexedSession {
+  /** File name, the key for the lazy full-body load (`read_archived_session`). */
+  name: string;
+  /** Front-matter parse: meta/summary/board/metrics populated, entries empty. */
+  session: ParsedSession;
+}
+
 /** A parsed session paired with the dashboard index entry derived from it, so a
- *  history row can map straight back to the full {@link ParsedSession} on click.
- *  The index order (chronological, from `aggregateSessions`) is authoritative. */
+ *  history row can map straight back on click. The index order (chronological,
+ *  from `aggregateSessions`) is authoritative. */
 export interface DashboardModel {
   stats: DashboardStats;
-  /** Parsed sessions keyed by the same identity used in the index, newest first
-   *  (the reverse of the chronological index). Excludes the in-progress
-   *  recording so the dashboard only shows finished sessions. */
-  sessions: ParsedSession[];
+  /** Header-parsed sessions (newest first, reverse of the chronological index),
+   *  each carrying its file name for the lazy detail load. Excludes the
+   *  in-progress recording so the dashboard only shows finished sessions. */
+  sessions: IndexedSession[];
 }
 
 const CLOSE_ICON =
@@ -54,17 +76,24 @@ const BACK_ICON =
   '<svg viewBox="0 0 12 12" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" fill="none" aria-hidden="true"><path d="M7 2.5 3.5 6 7 9.5"/></svg>';
 
 /**
- * Build the dashboard model from the raw archived sessions (pure, testable):
- * parse each file, drop the in-progress recording, aggregate the rest into
- * stats, and keep the parsed sessions newest-first to back the history list.
+ * Build the dashboard model from the lightweight session index (pure, testable):
+ * parse each session's FRONT MATTER, drop the in-progress recording, aggregate
+ * the rest into stats, and keep the header-parsed sessions newest-first — each
+ * carrying its file name — to back the history list and the lazy detail load
+ * (#144). Reuses the exact same `parseSession`/`aggregateSessions` as before; the
+ * only difference is the input is front matter, not full bodies, so `.entries`
+ * is empty (the transcript loads on click) while stats stay complete because
+ * metrics live in the front matter.
  */
-export function buildDashboardModel(archived: readonly ArchivedSession[]): DashboardModel {
-  const parsed = archived.map((a) => parseSession(a.markdown)).filter((s) => !s.isRecording);
-  const stats = aggregateSessions(parsed);
+export function buildDashboardModel(index: readonly SessionHeader[]): DashboardModel {
+  const parsed = index
+    .map((h) => ({ name: h.name, session: parseSession(h.markdown) }))
+    .filter((p) => !p.session.isRecording);
+  const stats = aggregateSessions(parsed.map((p) => p.session));
   // `stats.index` is chronological (oldest first); the history list shows newest
   // first. Sort the parsed sessions the same way the aggregator orders the index
   // so a row's position maps to the same session.
-  const sessions = [...parsed].sort((a, b) => compareChronological(b, a));
+  const sessions = [...parsed].sort((a, b) => compareChronological(b.session, a.session));
   return { stats, sessions };
 }
 
@@ -209,13 +238,31 @@ export interface DashboardSurface {
 }
 
 export interface DashboardCallbacks {
-  /** Load the saved sessions from disk (the Rust `list_archived_sessions`). */
-  load: () => Promise<ArchivedSession[]>;
+  /** Load the lightweight session index for the overview + history list — front
+   *  matter only, bounded regardless of archive size (Rust `list_session_index`). */
+  loadIndex: () => Promise<SessionHeader[]>;
+  /** Load ONE session's full Markdown by name, lazily when its detail opens
+   *  (Rust `read_archived_session`). */
+  loadSession: (name: string) => Promise<string>;
+  /** Load every session's full body, on demand, to back the complete
+   *  transcript-body search (#131) without regressing it (Rust
+   *  `list_archived_sessions`). Called only when the user searches. */
+  loadAll: () => Promise<ArchivedSession[]>;
   /** Close the dashboard (back to the previous view). */
   onClose: () => void;
 }
 
-/** Default loader: the Rust command that lists + reads the archive folder. */
+/** Default loader: the Rust command returning the lightweight session index. */
+export function loadSessionIndex(): Promise<SessionHeader[]> {
+  return invoke<SessionHeader[]>("list_session_index");
+}
+
+/** Default loader: the Rust command returning ONE session's full Markdown. */
+export function loadArchivedSession(name: string): Promise<string> {
+  return invoke<string>("read_archived_session", { name });
+}
+
+/** Default loader: the Rust command returning every session's full body (search). */
 export function loadArchivedSessions(): Promise<ArchivedSession[]> {
   return invoke<ArchivedSession[]>("list_archived_sessions");
 }
@@ -239,6 +286,42 @@ export function buildDashboard(callbacks: DashboardCallbacks): DashboardSurface 
 
   let model: DashboardModel | null = null;
 
+  // Full parsed sessions by file name (#144): the shared cache backing BOTH the
+  // lazy detail load and the on-demand full-text search. A detail open fills one
+  // entry; the first search fills them all, so later clicks/searches are instant.
+  const fullByName = new Map<string, ParsedSession>();
+  let allBodiesLoaded = false;
+  // Monotonic navigation tokens so a slow async load that resolves after the user
+  // has moved on (another row, another query, or back to the overview) is dropped
+  // instead of clobbering the view that is now on screen.
+  let detailToken = 0;
+  let searchToken = 0;
+
+  /** Load + parse ONE session's full body, memoized by name. Null on read error. */
+  async function loadFullSession(name: string): Promise<ParsedSession | null> {
+    const cached = fullByName.get(name);
+    if (cached !== undefined) return cached;
+    try {
+      const parsed = parseSession(await callbacks.loadSession(name));
+      fullByName.set(name, parsed);
+      return parsed;
+    } catch {
+      return null;
+    }
+  }
+
+  /** Load + parse EVERY finished session's full body once, for complete search
+   *  (#131). Idempotent; the in-progress recording is excluded like the index. */
+  async function ensureAllBodiesLoaded(): Promise<void> {
+    if (allBodiesLoaded) return;
+    const all = await callbacks.loadAll();
+    for (const a of all) {
+      const parsed = parseSession(a.markdown);
+      if (!parsed.isRecording) fullByName.set(a.name, parsed);
+    }
+    allBodiesLoaded = true;
+  }
+
   backBtn.addEventListener("click", () => showOverview());
   $<HTMLButtonElement>("#dash-close").addEventListener("click", () => callbacks.onClose());
 
@@ -258,6 +341,9 @@ export function buildDashboard(callbacks: DashboardCallbacks): DashboardSurface 
   }
 
   function showOverview(): void {
+    // Returning to the overview cancels any in-flight detail load (#144) so a
+    // late-resolving transcript can't paint over the overview.
+    detailToken += 1;
     setHead("DASHBOARD", false);
     bodyEl.replaceChildren();
     bodyEl.scrollTop = 0;
@@ -278,6 +364,31 @@ export function buildDashboard(callbacks: DashboardCallbacks): DashboardSurface 
     setHead(title, true);
     bodyEl.replaceChildren(renderDetail(session));
     bodyEl.scrollTop = 0;
+  }
+
+  /**
+   * Open a session's detail, lazily fetching its full body the first time (#144).
+   * The header parse (title known immediately) drives the head + a loading note
+   * while the transcript loads; a cached full body renders synchronously. A stale
+   * load (the user clicked another row or went back) is discarded via the token.
+   */
+  function openDetail(name: string, header: ParsedSession): void {
+    detailToken += 1;
+    const token = detailToken;
+    const cached = fullByName.get(name);
+    if (cached !== undefined) {
+      showDetail(cached);
+      return;
+    }
+    const title = header.meta.title !== "" ? header.meta.title : "Session";
+    setHead(title, true);
+    bodyEl.replaceChildren(meta("Loading session…"));
+    bodyEl.scrollTop = 0;
+    void loadFullSession(name).then((full) => {
+      if (token !== detailToken || !root.classList.contains("open")) return;
+      if (full !== null) showDetail(full);
+      else bodyEl.replaceChildren(meta("Could not read this session."));
+    });
   }
 
   function renderEmpty(): HTMLElement {
@@ -326,20 +437,24 @@ export function buildDashboard(callbacks: DashboardCallbacks): DashboardSurface 
     h.textContent = "History";
     wrap.appendChild(h);
 
-    // Pair each session with its index entry ONCE. `m.sessions` is newest-first;
-    // the chronological index is oldest-first, so read it in reverse.
+    // Pair each header session with its index entry + file name ONCE.
+    // `m.sessions` is newest-first; the chronological index is oldest-first, so
+    // read it in reverse. The name backs the lazy detail load + search (#144).
     const index = m.stats.index;
-    const pairs: { session: ParsedSession; entry: SessionIndexEntry | undefined }[] = [];
+    const pairs: { name: string; session: ParsedSession; entry: SessionIndexEntry | undefined }[] = [];
     for (let i = 0; i < m.sessions.length; i++) {
-      const session = m.sessions[i];
-      if (session === undefined) continue;
-      pairs.push({ session, entry: index[index.length - 1 - i] });
+      const indexed = m.sessions[i];
+      if (indexed === undefined) continue;
+      pairs.push({ name: indexed.name, session: indexed.session, entry: index[index.length - 1 - i] });
     }
 
     // Search box (#131): case-insensitive substring over title/summary/board/
-    // transcript, debounced, filtering the in-memory sessions only. The hint is
-    // an overlay label that hides once text is typed — the same pattern
-    // #qt-input uses for the composer (an input hint element, not an attribute).
+    // transcript, debounced. Title/summary/board are already in the header
+    // parse, but transcript-body matching needs the full bodies, so a non-empty
+    // query loads them on demand (#144) — the search stays COMPLETE across ALL
+    // sessions, never regressing to loaded/title-only. The hint is an overlay
+    // label that hides once text is typed — the same pattern #qt-input uses for
+    // the composer (an input hint element, not an attribute).
     const searchWrap = document.createElement("div");
     searchWrap.className = "dash-search-wrap";
     searchWrap.style.position = "relative";
@@ -364,23 +479,52 @@ export function buildDashboard(callbacks: DashboardCallbacks): DashboardSurface 
     rows.className = "dash-rows";
     wrap.appendChild(rows);
 
-    const renderRows = (query: string): void => {
+    type Match = { name: string; session: ParsedSession; entry: SessionIndexEntry | undefined; snippet: string };
+
+    const paintRows = (matches: Match[], q: string): void => {
       rows.replaceChildren();
-      const q = query.trim();
-      let shown = 0;
-      for (const { session, entry } of pairs) {
-        let snippet = "";
-        if (q !== "") {
-          const result = sessionMatches(session, q);
-          if (!result.matched) continue;
-          snippet = result.snippet;
-        }
-        rows.appendChild(historyRow(session, entry, snippet));
-        shown += 1;
+      for (const m2 of matches) {
+        rows.appendChild(historyRow(m2.session, m2.name, m2.entry, m2.snippet));
       }
-      if (q !== "" && shown === 0) {
+      if (q !== "" && matches.length === 0) {
         rows.appendChild(meta(`No sessions match "${q}"`));
       }
+    };
+
+    const renderRows = (query: string): void => {
+      const q = query.trim();
+      // Every render supersedes any in-flight search load (staleness guard).
+      searchToken += 1;
+      const token = searchToken;
+
+      if (q === "") {
+        // No query: show every session, no bodies needed.
+        paintRows(pairs.map((p) => ({ ...p, snippet: "" })), "");
+        return;
+      }
+
+      // Complete transcript-body search: ensure every session's full body is
+      // loaded, then run the SAME `sessionMatches` over the full parse — so the
+      // #131 search never regresses to loaded/title-only (#144).
+      if (!allBodiesLoaded) rows.replaceChildren(meta("Searching all sessions…"));
+      void ensureAllBodiesLoaded().then(
+        () => {
+          if (token !== searchToken) return; // a newer query is in flight
+          const matches: Match[] = [];
+          for (const p of pairs) {
+            // Full body when available; the header parse (title/summary/board,
+            // no transcript) is only a fallback if a single load failed.
+            const full = fullByName.get(p.name) ?? p.session;
+            const result = sessionMatches(full, q);
+            if (result.matched) matches.push({ ...p, snippet: result.snippet });
+          }
+          paintRows(matches, q);
+        },
+        () => {
+          if (token !== searchToken) return;
+          rows.replaceChildren(meta("Could not search sessions."));
+        },
+      );
     };
 
     // ~150ms debounce so filtering doesn't re-render on every keystroke. The
@@ -396,9 +540,11 @@ export function buildDashboard(callbacks: DashboardCallbacks): DashboardSurface 
     return wrap;
   }
 
-  /** One History row: title + meta, plus an optional match snippet (#131). */
+  /** One History row: title + meta, plus an optional match snippet (#131). Click
+   *  lazily loads the full session body before showing its detail (#144). */
   function historyRow(
     session: ParsedSession,
+    name: string,
     entry: SessionIndexEntry | undefined,
     snippet: string,
   ): HTMLElement {
@@ -418,7 +564,7 @@ export function buildDashboard(callbacks: DashboardCallbacks): DashboardSurface 
       snip.textContent = snippet;
       row.appendChild(snip);
     }
-    row.addEventListener("click", () => showDetail(session));
+    row.addEventListener("click", () => openDetail(name, session));
     return row;
   }
 
@@ -623,9 +769,12 @@ export function buildDashboard(callbacks: DashboardCallbacks): DashboardSurface 
   function open(): void {
     root.classList.add("open");
     showLoading();
-    callbacks.load().then(
-      (archived) => {
-        model = buildDashboardModel(archived);
+    // Open loads only the lightweight index (front matter), so open time is
+    // bounded regardless of archive size (#144). Bodies load lazily on click /
+    // on search.
+    callbacks.loadIndex().then(
+      (index) => {
+        model = buildDashboardModel(index);
         if (root.classList.contains("open")) showOverview();
       },
       (error: unknown) => {
