@@ -105,7 +105,10 @@ pub fn autostart(_app: &AppHandle) -> bool {
     false
 }
 
-#[cfg(test)]
+// Debug-only items (`DevFlags`, `parse`, `resolve`) are compiled out of release
+// builds, so these tests must be too — otherwise `cargo test --release` fails to
+// compile (#161). CI runs debug, so this is currently theoretical but correct.
+#[cfg(all(test, debug_assertions))]
 mod tests {
     use super::*;
 

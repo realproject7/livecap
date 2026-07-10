@@ -16,7 +16,7 @@
 //! threads do.
 
 use std::collections::HashMap;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -28,6 +28,7 @@ use crate::audio::device::AudioDevice;
 use crate::audio::mic::MicCapture;
 use crate::audio::system::SystemAudioCapture;
 use crate::audio::AudioChunk;
+#[cfg(debug_assertions)]
 use crate::debug_dump::ChannelDump;
 use crate::event::{CaptionEvent, CaptionKind, Channel};
 use crate::model::ModelManager;
@@ -339,10 +340,13 @@ async fn channel_worker_inner(
     // Gated raw-WAV fixture dump (#64): OFF unless LIVECAP_BLEED_DUMP_DIR is set.
     // Captures the exact 16 kHz stream the VAD/suppressor see, for tuning bleed
     // thresholds against real acoustics. Privacy: explicit opt-in only (EPIC #1).
+    // Debug builds only (#161): the env read and dump are compiled out of release
+    // binaries entirely, so a shipped binary has NO env path to raw-audio capture.
+    #[cfg(debug_assertions)]
     let mut dump = std::env::var_os("LIVECAP_BLEED_DUMP_DIR").and_then(|dir| {
-        match ChannelDump::create(Path::new(&dir), channel) {
+        match ChannelDump::create(std::path::Path::new(&dir), channel) {
             Ok(d) => {
-                log::warn!("[#64] bleed audio dump ENABLED for {channel} (raw 16 kHz WAV, debug only)");
+                log::warn!("[#64] bleed audio dump ENABLED for {channel} (raw 16 kHz WAV, debug builds only)");
                 Some(d)
             }
             Err(e) => {
@@ -400,6 +404,8 @@ async fn channel_worker_inner(
         }
 
         // Capture the resampled stream for offline tuning when the dump is on (#64).
+        // Debug builds only (#161): compiled out of release binaries with `dump`.
+        #[cfg(debug_assertions)]
         if let Some(d) = dump.as_mut() {
             d.write(&samples_16k);
         }
