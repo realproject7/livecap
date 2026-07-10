@@ -8,7 +8,7 @@
 
 import { beforeEach, describe, expect, it } from "vitest";
 
-import { buildDashboard, type ArchivedSession, type DashboardSurface } from "../src/dashboard";
+import { buildDashboard, type DashboardSurface } from "../src/dashboard";
 
 const COACHED_SESSION = `# Standup
 > 2026-06-11 10:00–10:15 (15 min) · EN → KO · engine: Claude CLI ($0.05)
@@ -59,15 +59,21 @@ const PLAIN_SESSION = `# Retro
 `;
 
 async function openDetail(markdown: string): Promise<DashboardSurface> {
-  const archived: ArchivedSession[] = [{ name: "s.md", markdown }];
+  const name = "2026-06-11 1045 — S.md";
+  // The index carries only front matter (up to `## Transcript`); the full body
+  // arrives via the lazy per-session load when the detail opens (#144).
+  const frontMatter = markdown.slice(0, markdown.indexOf("## Transcript"));
   const dashboard = buildDashboard({
-    load: () => Promise.resolve(archived),
+    loadIndex: () => Promise.resolve([{ name, markdown: frontMatter }]),
+    loadSession: () => Promise.resolve(markdown),
+    loadAll: () => Promise.resolve([{ name, markdown }]),
     onClose: () => undefined,
   });
   document.body.replaceChildren(dashboard.el);
   dashboard.open();
-  await new Promise((resolve) => setTimeout(resolve, 0)); // let load() settle into the overview
+  await new Promise((resolve) => setTimeout(resolve, 0)); // let loadIndex settle into the overview
   dashboard.el.querySelector<HTMLButtonElement>(".dash-row")?.click();
+  await new Promise((resolve) => setTimeout(resolve, 0)); // let the lazy loadSession settle into the detail
   return dashboard;
 }
 

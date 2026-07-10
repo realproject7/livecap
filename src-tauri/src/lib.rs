@@ -306,6 +306,8 @@ pub fn run() {
             ui_state::ui_beat,
             ui_state::ui_snapshot,
             session::host_probe,
+            dashboard::list_session_index,
+            dashboard::read_archived_session,
             dashboard::list_archived_sessions,
             settings::get_settings,
             settings::set_settings,

@@ -9,7 +9,7 @@ import {
   formatCost,
   formatDuration,
   sessionMatches,
-  type ArchivedSession,
+  type SessionHeader,
 } from "../src/dashboard";
 import type { ParsedSession } from "@livecap/archive/src/parse.ts";
 
@@ -114,29 +114,34 @@ describe("formatCost", () => {
   });
 });
 
-describe("buildDashboardModel", () => {
-  it("parses, aggregates, and excludes the in-progress recording", () => {
-    const archived: ArchivedSession[] = [
-      { name: "a.md", markdown: SESSION_A },
-      { name: "b.md", markdown: SESSION_B },
-      { name: "rec.md", markdown: RECORDING },
+describe("buildDashboardModel (#144: front-matter index)", () => {
+  it("parses the index, aggregates, and excludes the in-progress recording", () => {
+    // The index carries front matter only; `parseSession` handles either, and the
+    // stats depend only on the meta/metrics that live in the front matter.
+    const index: SessionHeader[] = [
+      { name: "2026-06-10 0900 — A.md", markdown: SESSION_A },
+      { name: "2026-06-11 1000 — B.md", markdown: SESSION_B },
+      { name: "2026-06-12 1100 — (recording).md", markdown: RECORDING },
     ];
-    const model = buildDashboardModel(archived);
+    const model = buildDashboardModel(index);
 
     // The recording is dropped; only the two finished sessions remain.
     expect(model.sessions).toHaveLength(2);
     expect(model.stats.completedSessions).toBe(2);
     expect(model.stats.totalSessions).toBe(2);
 
-    // Newest first in the history list.
-    expect(model.sessions[0]?.meta.title).toBe("Standup");
-    expect(model.sessions[1]?.meta.title).toBe("Quarterly review");
+    // Newest first in the history list, each carrying its file name for the lazy
+    // detail load.
+    expect(model.sessions[0]?.session.meta.title).toBe("Standup");
+    expect(model.sessions[0]?.name).toBe("2026-06-11 1000 — B.md");
+    expect(model.sessions[1]?.session.meta.title).toBe("Quarterly review");
+    expect(model.sessions[1]?.name).toBe("2026-06-10 0900 — A.md");
 
     // The chronological index is the reverse (oldest first).
     expect(model.stats.index[0]?.title).toBe("Quarterly review");
     expect(model.stats.index[1]?.title).toBe("Standup");
 
-    // Aggregated totals.
+    // Aggregated totals (including metrics, which live in the front matter).
     expect(model.stats.totalDurationMin).toBe(45);
     expect(model.stats.totalCostUsd).toBeCloseTo(0.15, 5);
     expect(model.stats.averageTalkRatioMic).toBeCloseTo(0.5, 5); // (0.4 + 0.6) / 2
@@ -151,14 +156,19 @@ describe("buildDashboardModel", () => {
     expect(model.stats.totalDurationMin).toBe(0);
   });
 
-  it("keeps a session's parsed transcript and board intact", () => {
-    const model = buildDashboardModel([{ name: "a.md", markdown: SESSION_A }]);
-    const session = model.sessions[0];
-    expect(session?.entries).toHaveLength(2);
-    expect(session?.entries[0]?.speaker).toBe("me");
-    expect(session?.entries[0]?.source).toBe("Hello there.");
-    expect(session?.entries[0]?.target).toBe("안녕하세요.");
-    expect(session?.board.decisions).toEqual(["ship on Friday"]);
+  it("builds stats from FRONT MATTER alone — no transcript body needed", () => {
+    // What the Rust index actually returns: everything up to `## Transcript`.
+    const frontMatter = SESSION_A.slice(0, SESSION_A.indexOf("## Transcript"));
+    const model = buildDashboardModel([{ name: "2026-06-10 0900 — A.md", markdown: frontMatter }]);
+    const indexed = model.sessions[0];
+    // The name is preserved for the lazy detail load, and meta/board/metrics come
+    // straight from the front matter — the transcript never has to be read here.
+    expect(indexed?.name).toBe("2026-06-10 0900 — A.md");
+    expect(indexed?.session.meta.title).toBe("Quarterly review");
+    expect(indexed?.session.board.decisions).toEqual(["ship on Friday"]);
+    expect(model.stats.averageSmoothScore).toBeCloseTo(70, 5);
+    // The transcript entries are absent in a header parse (they load lazily).
+    expect(indexed?.session.entries).toHaveLength(0);
   });
 });
 
