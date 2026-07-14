@@ -81,13 +81,18 @@ impl PipelineConfig {
 
     /// Set the spoken/source transcription language (#94). A BCP-47 / ISO-639-1
     /// code forces whisper to that language; `"auto"` (or empty) keeps the
-    /// current per-utterance auto-detection (`language = None`). Whisper only
-    /// understands a primary subtag, so a tag like `"pt-br"` is reduced to its
+    /// current per-utterance auto-detection (`language = None`). The special value
+    /// `"auto-translate"` (per-utterance detect + translate to English) is passed
+    /// through verbatim (#178) — the engine matches it exactly (`whisper/engine.rs`
+    /// `set_translate`); without this it would hit the subtag reduction below and
+    /// be mangled to `"auto"`, silently disabling translation. Whisper otherwise
+    /// only understands a primary subtag, so a tag like `"pt-br"` is reduced to its
     /// primary subtag (`"pt"`) before being handed to the engine.
     pub fn with_source_language(mut self, code: &str) -> Self {
         let normalized = code.trim().to_lowercase();
         self.language = match normalized.as_str() {
             "" | "auto" => None,
+            "auto-translate" => Some("auto-translate".to_string()),
             other => Some(other.split('-').next().unwrap_or(other).to_string()),
         };
         self
@@ -773,6 +778,22 @@ mod tests {
         assert_eq!(PipelineConfig::new(&dir).with_source_language("auto").language, None);
         assert_eq!(PipelineConfig::new(&dir).with_source_language("").language, None);
         assert_eq!(PipelineConfig::new(&dir).with_source_language("  AUTO ").language, None);
+    }
+
+    #[test]
+    fn source_language_preserves_auto_translate() {
+        // #178: "auto-translate" (detect + translate to English) must survive the
+        // setter verbatim — the subtag split would otherwise mangle it to "auto"
+        // and silently disable translation. The engine matches the exact string.
+        let dir = std::path::PathBuf::from("/tmp/livecap-models");
+        assert_eq!(
+            PipelineConfig::new(&dir).with_source_language("auto-translate").language,
+            Some("auto-translate".to_string())
+        );
+        assert_eq!(
+            PipelineConfig::new(&dir).with_source_language("  Auto-Translate ").language,
+            Some("auto-translate".to_string())
+        );
     }
 
     #[test]

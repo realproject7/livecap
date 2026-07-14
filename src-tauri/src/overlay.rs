@@ -44,6 +44,11 @@ pub struct Shell {
     pub click_through: AtomicBool,
     pub pinned: AtomicBool,
     drag_generation: AtomicU64,
+    /// Epoch for the `transitioning` clear-timer (#178): each apply_mode bumps it,
+    /// and a spawned clear-timer only clears `transitioning` if its captured epoch
+    /// is still current — so a rapid second apply_mode's timer can't clear the flag
+    /// mid-way through the first (mirrors `drag_generation`).
+    transition_generation: AtomicU64,
     dirty: AtomicBool,
     transitioning: AtomicBool,
     ignoring_cursor: AtomicBool,
@@ -61,6 +66,7 @@ impl Shell {
             click_through: AtomicBool::new(click_through),
             pinned: AtomicBool::new(pinned),
             drag_generation: AtomicU64::new(0),
+            transition_generation: AtomicU64::new(0),
             dirty: AtomicBool::new(false),
             // Starts true so window-creation Moved/Resized events cannot
             // record geometry before the launch restore in `apply_mode`
@@ -76,6 +82,28 @@ impl Shell {
 
     pub fn mark_dirty(&self) {
         self.dirty.store(true, Ordering::Relaxed);
+    }
+
+    /// Begin a mode transition (#178): set `transitioning` and return a fresh
+    /// epoch. The caller hands this epoch to the clear-timer.
+    pub fn begin_transition(&self) -> u64 {
+        let generation = self.transition_generation.fetch_add(1, Ordering::SeqCst) + 1;
+        self.transitioning.store(true, Ordering::Relaxed);
+        generation
+    }
+
+    /// Clear `transitioning` ONLY if `generation` is still the current epoch —
+    /// so a stale timer from a superseded transition can't reopen geometry
+    /// recording mid-way through a newer one (#178).
+    pub fn end_transition_if_current(&self, generation: u64) {
+        if self.transition_generation.load(Ordering::SeqCst) == generation {
+            self.transitioning.store(false, Ordering::Relaxed);
+        }
+    }
+
+    #[cfg(test)]
+    fn is_transitioning(&self) -> bool {
+        self.transitioning.load(Ordering::Relaxed)
     }
 
     pub fn save_now(&self) {
@@ -212,7 +240,7 @@ pub fn apply_mode(app: &AppHandle, new_mode: Mode) {
     if shell.mode() != new_mode {
         record_geometry(&window, shell);
     }
-    shell.transitioning.store(true, Ordering::Relaxed);
+    let generation = shell.begin_transition();
     *shell.mode.lock().expect("mode lock") = new_mode;
 
     let display = display_key(&window);
@@ -257,13 +285,15 @@ pub fn apply_mode(app: &AppHandle, new_mode: Mode) {
     let _ = window.emit(EVENT_MODE, shell_state(shell));
     crate::tray::sync_mode(app, new_mode);
 
-    // Let the Moved/Resized events from this transition drain before
-    // geometry recording resumes.
+    // Let the Moved/Resized events from this transition drain before geometry
+    // recording resumes. Guard the clear by epoch (#178): if a second apply_mode
+    // ran within 250ms, this timer's epoch is stale and it leaves `transitioning`
+    // set for the newer transition instead of clobbering its geometry.
     let app2 = app.clone();
     std::thread::spawn(move || {
         std::thread::sleep(Duration::from_millis(250));
         let shell = app2.state::<Shell>();
-        shell.transitioning.store(false, Ordering::Relaxed);
+        shell.end_transition_if_current(generation);
     });
 }
 
@@ -490,4 +520,49 @@ pub fn spawn_config_saver(app: AppHandle) {
             shell.save_now();
         }
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn test_shell() -> Shell {
+        Shell::new(PathBuf::from("/tmp/livecap-test.json"), ShellConfig::default(), Mode::Panel)
+    }
+
+    #[test]
+    fn a_stale_transition_timer_does_not_clear_the_flag() {
+        // #178: two apply_mode calls within 250ms. The FIRST call's clear-timer
+        // must NOT clear `transitioning` while the SECOND transition is in flight,
+        // or record_geometry would persist the in-flight (animated) rect.
+        let shell = test_shell();
+
+        let g1 = shell.begin_transition();
+        assert!(shell.is_transitioning());
+
+        // A rapid second transition supersedes the first (new epoch).
+        let g2 = shell.begin_transition();
+        assert_ne!(g1, g2, "each transition gets a fresh epoch");
+        assert!(shell.is_transitioning());
+
+        // The FIRST timer fires late with its now-stale epoch → must be a no-op.
+        shell.end_transition_if_current(g1);
+        assert!(
+            shell.is_transitioning(),
+            "a superseded transition's timer must not clear the flag mid-transition"
+        );
+
+        // The SECOND (current) timer fires → clears cleanly.
+        shell.end_transition_if_current(g2);
+        assert!(!shell.is_transitioning());
+    }
+
+    #[test]
+    fn a_single_transition_timer_clears_the_flag() {
+        let shell = test_shell();
+        let g = shell.begin_transition();
+        assert!(shell.is_transitioning());
+        shell.end_transition_if_current(g);
+        assert!(!shell.is_transitioning());
+    }
 }

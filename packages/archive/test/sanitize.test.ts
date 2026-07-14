@@ -1,6 +1,12 @@
 import { describe, it, expect } from "vitest";
 
-import { sanitizeTitle, archiveFileName, MAX_TITLE_BYTES, FALLBACK_TITLE } from "../src/sanitize";
+import {
+  sanitizeTitle,
+  archiveFileName,
+  MAX_TITLE_BYTES,
+  FALLBACK_TITLE,
+  WORKING_TITLE,
+} from "../src/sanitize";
 
 const utf8 = (s: string) => new TextEncoder().encode(s).length;
 
@@ -74,6 +80,17 @@ describe("sanitizeTitle — path traversal defense (SECURITY.md)", () => {
 
   it("preserves ordinary unicode titles (e.g. Korean)", () => {
     expect(sanitizeTitle("주간 회의 요약")).toBe("주간 회의 요약");
+  });
+
+  it("never produces the in-progress sentinel as a finalized title (#178)", () => {
+    // A final title of "(recording)" would make `<prefix> — (recording).md`
+    // collide with the working-file grammar and be misread as a crashed orphan.
+    expect(WORKING_TITLE).toBe("(recording)");
+    expect(sanitizeTitle("(recording)")).toBe(FALLBACK_TITLE);
+    // Whitespace/case that normalizes onto the sentinel is also refused.
+    expect(sanitizeTitle("  (recording)  ")).toBe(FALLBACK_TITLE);
+    // A title merely CONTAINING the word stays intact (only the exact sentinel is refused).
+    expect(sanitizeTitle("Notes on (recording) laws")).toBe("Notes on (recording) laws");
   });
 });
 

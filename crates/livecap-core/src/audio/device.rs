@@ -33,14 +33,20 @@ impl AudioDevice {
             return Err(anyhow!("Device name cannot be empty"));
         }
 
-        let (name, device_type) = if name.to_lowercase().ends_with("(input)") {
+        // Detect and strip on the SAME case-insensitive basis (#178): the suffix
+        // is ASCII, so its char-length equals its byte-length in any casing, and
+        // slicing the ORIGINAL by that length removes the exact matched bytes —
+        // whereas `trim_end_matches("(input)")` on the original would silently
+        // leave a differently-cased "(Input)"/"(OUTPUT)" suffix stuck on.
+        let lower = name.to_lowercase();
+        let (name, device_type) = if lower.ends_with("(input)") {
             (
-                name.trim_end_matches("(input)").trim().to_string(),
+                name[..name.len() - "(input)".len()].trim().to_string(),
                 DeviceType::Input,
             )
-        } else if name.to_lowercase().ends_with("(output)") {
+        } else if lower.ends_with("(output)") {
             (
-                name.trim_end_matches("(output)").trim().to_string(),
+                name[..name.len() - "(output)".len()].trim().to_string(),
                 DeviceType::Output,
             )
         } else {
@@ -161,6 +167,21 @@ mod tests {
 
         let d = AudioDevice::from_name("External Headphones (output)").unwrap();
         assert_eq!(d.name, "External Headphones");
+        assert_eq!(d.device_type, DeviceType::Output);
+    }
+
+    #[test]
+    fn strips_the_suffix_regardless_of_case() {
+        // #178: detection is case-insensitive, so stripping must be too — a
+        // differently-cased suffix must not be left stuck on the device name (which
+        // would fail the exact-match lookup in get_device_and_config).
+        for raw in ["Studio Mic (Input)", "Studio Mic (INPUT)", "Studio Mic (input)"] {
+            let d = AudioDevice::from_name(raw).unwrap();
+            assert_eq!(d.name, "Studio Mic", "case variant {raw:?} must strip cleanly");
+            assert_eq!(d.device_type, DeviceType::Input);
+        }
+        let d = AudioDevice::from_name("Big Speaker (Output)").unwrap();
+        assert_eq!(d.name, "Big Speaker");
         assert_eq!(d.device_type, DeviceType::Output);
     }
 

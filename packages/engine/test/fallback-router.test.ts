@@ -132,6 +132,32 @@ describe("FallbackRouter", () => {
     expect((await collect(router.translate(batch, { pairs: [] }))).at(-1)?.text).toBe("fallback:final");
   });
 
+  it("resets routing even when one engine's stop() rejects (#178)", async () => {
+    // A partial stop() failure must not strand the router on the fallback: the
+    // NEXT session must still begin on the primary. The error still propagates.
+    const primary = new StubEngine("primary");
+    class FailStopEngine extends StubEngine {
+      override async stop(): Promise<void> {
+        throw new Error("fallback stop failed");
+      }
+    }
+    const fallback = new FailStopEngine("fallback");
+    const router = new FallbackRouter({ primary, fallback });
+
+    await router.start();
+    await router.switchToFallback();
+    expect(router.onFallback).toBe(true);
+
+    // stop() rejects (fallback.stop threw) — but routing state is reset anyway.
+    await expect(router.stop()).rejects.toThrow("fallback stop failed");
+    expect(router.onFallback).toBe(false);
+
+    // The next session starts on the PRIMARY, not the stopped fallback.
+    await router.start();
+    expect(router.onFallback).toBe(false);
+    expect((await collect(router.translate(batch, { pairs: [] }))).at(-1)?.text).toBe("primary:final");
+  });
+
   it("begins on the fallback when startOnFallback() is true at launch (restart-while-below)", async () => {
     const primary = new StubEngine("primary");
     const fallback = new StubEngine("fallback");

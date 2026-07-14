@@ -106,6 +106,42 @@ describe("parseSession — round-trips the real writer output", () => {
     expect(parsed.entries).toEqual(entries);
   });
 
+  it("does not misread a source that itself ends with ' (?)' as low-confidence (#178)", () => {
+    const entries: CaptionEntry[] = [
+      // NOT low-confidence, but the caption text ends with the marker glyphs.
+      { speaker: "them", timestamp: "09:00", source: "is that ok? (?)", target: "괜찮아요?" },
+      // Low-confidence AND ends with the marker glyphs.
+      { speaker: "me", timestamp: "09:01", source: "wait what? (?)", target: "뭐?", lowConfidence: true },
+    ];
+    const parsed = parseSession(writeSession(META, entries, FINAL));
+    // (1) not flagged low-confidence and not truncated — the trailing "?" is a
+    // look-alike, so the parser doesn't strip it as the marker (pre-fix this
+    // parsed as lowConfidence=true with the last four chars deleted).
+    expect(parsed.entries[0]?.lowConfidence).toBeFalsy();
+    expect(parsed.entries[0]?.source).toBe("is that ok? (？)");
+    // (2) correctly low-confidence, appended marker stripped, the caption's own
+    // trailing marker preserved (as the look-alike).
+    expect(parsed.entries[1]?.lowConfidence).toBe(true);
+    expect(parsed.entries[1]?.source).toBe("wait what? (？)");
+  });
+
+  it("does not fragment a board item that itself contains the ' · ' separator (#178)", () => {
+    const final: FinalBrief = {
+      ...FINAL,
+      board: {
+        decisions: ["Ship v2 · notify design team"], // ONE decision with a middot
+        actionItems: [],
+        openQuestions: [],
+      },
+    };
+    const parsed = parseSession(writeSession(META, ENTRIES, final));
+    // Stays ONE decision — pre-fix it split into "Ship v2" + "notify design team".
+    expect(parsed.board.decisions).toHaveLength(1);
+    // The middot is swapped for a look-alike U+2027 so it can't be mistaken for
+    // the separator; the item is otherwise intact.
+    expect(parsed.board.decisions[0]).toBe("Ship v2 ‧ notify design team");
+  });
+
   it("preserves a source line that itself contains an em-dash separator", () => {
     const entries: CaptionEntry[] = [
       { speaker: "them", timestamp: "09:00", source: "it works — mostly — for now", target: "대체로 작동" },

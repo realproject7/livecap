@@ -35,10 +35,18 @@ function renderMetaLine(m: ArchiveModel): string {
 }
 
 function renderBoard(board: BoardData): string {
+  // Items are joined with " · " and split back on it by parse.ts, so an item that
+  // itself contains " · " (natural writing; "·" is also a common Korean bullet)
+  // would round-trip as TWO items. Swap an item-internal " · " middot (U+00B7) for
+  // a look-alike U+2027 (‧) before joining so it no longer matches the separator
+  // (#178); a bare "·" is untouched, and the parser never unescapes, so the item
+  // reads back with the look-alike (near-invisible) instead of being fragmented.
+  const join = (items: string[]): string =>
+    items.map((item) => item.split(" · ").join(" ‧ ")).join(" · ");
   let out = "";
-  if (board.decisions.length > 0) out += `**Decisions** — ${board.decisions.join(" · ")}\n`;
-  if (board.actionItems.length > 0) out += `**Action items** — ${board.actionItems.join(" · ")}\n`;
-  if (board.openQuestions.length > 0) out += `**Open questions** — ${board.openQuestions.join(" · ")}\n`;
+  if (board.decisions.length > 0) out += `**Decisions** — ${join(board.decisions)}\n`;
+  if (board.actionItems.length > 0) out += `**Action items** — ${join(board.actionItems)}\n`;
+  if (board.openQuestions.length > 0) out += `**Open questions** — ${join(board.openQuestions)}\n`;
   return out;
 }
 
@@ -83,12 +91,26 @@ export function sanitizeBlock(text: string): string {
     .join("\n");
 }
 
+/** The trailing low-confidence marker appended to a source line; parse.ts strips
+ *  it back off (its LOW_CONFIDENCE_SUFFIX). */
+const LOW_CONF_MARKER = " (?)";
+
 /** Render one entry's two lines (header line + `>` translation), trailing \n. */
 export function renderEntryBody(e: CaptionEntry): string {
   const pin = e.pinned ? "📌 " : "";
   const speaker = e.speaker === "me" ? "Me" : "Them";
-  const confidence = e.lowConfidence ? " (?)" : "";
-  return `${pin}**${speaker}** (${e.timestamp}) — ${sanitizeInline(e.source)}${confidence}\n> ${sanitizeInline(e.target)}\n`;
+  const confidence = e.lowConfidence ? LOW_CONF_MARKER : "";
+  // Defuse a source that ITSELF ends with the marker " (?)" (STT punctuation / a
+  // spoken aside) so parse.ts can't mistake it for the appended marker and both
+  // truncate the caption AND falsely flag it low-confidence (#178): swap the
+  // trailing ASCII "?" for a look-alike U+FF1F (？). Runs after sanitizeInline
+  // (which never adds a trailing " (?)"), so it only fires on genuine text; the
+  // parser reads it back verbatim instead of stripping it.
+  const sanitized = sanitizeInline(e.source);
+  const source = sanitized.endsWith(LOW_CONF_MARKER)
+    ? `${sanitized.slice(0, -LOW_CONF_MARKER.length)} (？)`
+    : sanitized;
+  return `${pin}**${speaker}** (${e.timestamp}) — ${source}${confidence}\n> ${sanitizeInline(e.target)}\n`;
 }
 
 /**
