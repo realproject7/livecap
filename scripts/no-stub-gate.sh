@@ -10,12 +10,12 @@ set -euo pipefail
 # case-insensitive (grep -i below).
 PATTERN='TODO|FIXME|HACK|placeholder|\bmock|\bstub|\bdummy|unimplemented|not[[:space:]]+implemented|\bXXX\b'
 
-# Narrow carve-out (#176): "not implemented FOR <platform/target>" is a shipped
-# capability statement in an error description (e.g. crates/livecap-core/src/
-# error.rs — "System-audio capture is not implemented for the current platform"),
-# NOT a deferred stub. Only this precise phrasing is exempted; a bare "not
-# implemented" / "not implemented yet" still fires.
-ALLOW='not[[:space:]]+implemented[[:space:]]+for[[:space:]]'
+# Escape hatch (#176), mirroring color-guard's `color-guard-allow`: a line
+# carrying `no-stub-allow` is exempt. This is a PER-LINE, explicit, auditable
+# exemption — used only where a marker word legitimately appears as prose (e.g. a
+# capability description "…not implemented for <platform>" in
+# crates/livecap-core/src/error.rs), NOT a blanket phrase filter. Future deferred
+# prose without the marker still fires.
 
 # Self-test (#176): a fixture with one banned marker per line proves the gate can
 # still FIRE. If a future edit weakens PATTERN so it stops matching a known-bad
@@ -40,7 +40,7 @@ fi
 ROOTS=(src src-tauri/src crates packages/*/src)
 HITS=$(grep -rinE "$PATTERN" "${ROOTS[@]}" 2>/dev/null \
   | grep -viE '(^|/)(test|tests|__tests__|fixtures)/' \
-  | grep -viE "$ALLOW" || true)
+  | grep -v 'no-stub-allow' || true)
 if [ -n "$HITS" ]; then
   echo "no-stub gate FAILED — banned markers in application code:"
   echo "$HITS"

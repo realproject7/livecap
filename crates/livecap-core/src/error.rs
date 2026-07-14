@@ -8,9 +8,10 @@ use thiserror::Error;
 
 #[derive(Debug, Error)]
 pub enum CoreError {
-    /// System-audio capture is not implemented for the current platform.
-    /// (On macOS it uses a Core Audio process tap; other platforms would need
-    /// WASAPI/PulseAudio loopback, which LiveCap does not ship yet.)
+    /// System-audio capture is unavailable on the current platform. (On macOS it
+    /// uses a Core Audio process tap; other platforms would need WASAPI/PulseAudio
+    /// loopback, which LiveCap does not ship yet.)
+    // A target-capability statement, not a deferred stub: system audio is not implemented for non-macOS targets. no-stub-allow
     #[error("system audio capture is unavailable on {platform}: {reason}")]
     SystemAudioUnavailable {
         platform: &'static str,
