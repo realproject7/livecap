@@ -49,7 +49,8 @@ export function sanitizedSttModel(value: string | null | undefined): string {
   return STT_MODELS.some((m) => m.value === value) ? (value as string) : "small";
 }
 
-/** Pool presets (PROPOSAL §6); mirrors the engine's POOL_PRESETS. */
+/** Pool presets (PROPOSAL §6) — the single source for the plan dollar amounts
+ *  (the engine takes a plain `poolUsd` number, so nothing mirrors these). */
 export const POOL_PRESETS: { id: string; label: string; usd: number }[] = [
   { id: "pro", label: "Pro · $20", usd: 20 },
   { id: "max5x", label: "Max 5x · $100", usd: 100 },

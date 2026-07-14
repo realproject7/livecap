@@ -2,15 +2,17 @@
 // access are injected so this stays pure and Linux-headless testable — the
 // package never resolves a binary path on its own (consumer injects it).
 
-/** Default binary names to look for, in preference order. */
-export const DEFAULT_CLI_NAMES: readonly string[] = ["claude", "codex"];
+/** Default binary names to look for. Only the Claude CLI is supported —
+ *  probeCapabilities/buildClaudeArgs emit Claude-CLI-specific argv, so handing a
+ *  different vendor's binary to ClaudeCliEngine would fail unpredictably. */
+export const DEFAULT_CLI_NAMES: readonly string[] = ["claude"];
 
 export interface FindCliOptions {
   /** The PATH string to scan (e.g. process.env.PATH). */
   path: string;
   /** Predicate: is this absolute path an executable file? */
   isExecutable: (candidate: string) => boolean;
-  /** Binary names to look for; defaults to claude then codex. */
+  /** Binary names to look for; defaults to just "claude". */
   names?: readonly string[];
   /** Path entry separator; defaults to ":" (POSIX). */
   pathSeparator?: string;

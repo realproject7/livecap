@@ -12,6 +12,7 @@ import {
   buildQuickTranslatePrompt,
   buildReplyPrompt,
   buildSummaryBoardPrompt,
+  DEFAULT_CONTEXT_CAPTIONS,
   parseAnalyzeRespond,
   parseCoachBatch,
   parseCoachResult,
@@ -149,7 +150,7 @@ export class ExtrasPipeline {
     this.engine = config.engine;
     this.summaryLanguage = config.summaryLanguage;
     this.meetingLanguage = config.meetingLanguage;
-    this.contextCaptions = config.contextCaptions ?? 10;
+    this.contextCaptions = config.contextCaptions ?? DEFAULT_CONTEXT_CAPTIONS;
     this.budget = config.budget;
   }
 

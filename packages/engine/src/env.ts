@@ -25,11 +25,19 @@ const BILLING_REDIRECT =
  *   per-token API billing (the #25 class), so it strips with the credentials
  *   under the same intentional-custom-endpoint exception (#145).
  */
-export function sanitizeChildEnv(base: Record<string, string | undefined>): Record<string, string> {
+/** Copy an env map, dropping keys whose value is `undefined`, so `spawn` gets a
+ *  clean string→string env. The shared primitive under both the Claude-specific
+ *  {@link sanitizeChildEnv} and the local engine's plain drop-undefined pass. */
+export function dropUndefinedEnv(base: Record<string, string | undefined>): Record<string, string> {
   const env: Record<string, string> = {};
   for (const [key, value] of Object.entries(base)) {
     if (typeof value === "string") env[key] = value;
   }
+  return env;
+}
+
+export function sanitizeChildEnv(base: Record<string, string | undefined>): Record<string, string> {
+  const env = dropUndefinedEnv(base);
   env.MAX_THINKING_TOKENS = "0";
   if (!env.ANTHROPIC_BASE_URL) {
     for (const key of Object.keys(env)) {

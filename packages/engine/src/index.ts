@@ -42,13 +42,12 @@ export { QWEN3_4B_Q4_K_M, LLAMA_CPP_RELEASE } from "./pins";
 export type { ModelArtifact, LlamaCppAsset, LlamaCppReleasePin } from "./pins";
 
 // Issue #7 — credit accounting + auto-fallback policy (PROPOSAL §6/§8.7).
-export { CreditAccountant, POOL_PRESETS } from "./credit-ledger";
+export { CreditAccountant } from "./credit-ledger";
 export type {
   CreditConfig,
   CreditEvent,
   GaugeState,
   LedgerFs,
-  PlanId,
 } from "./credit-ledger";
 export { nodeLedgerFs } from "./credit-fs";
 export { FallbackRouter } from "./fallback-router";

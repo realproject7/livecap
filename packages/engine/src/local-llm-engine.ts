@@ -7,7 +7,9 @@
 import { spawn } from "node:child_process";
 import type { ChildProcessWithoutNullStreams } from "node:child_process";
 
-import { stderrDigest } from "./internal/redact";
+import { dropUndefinedEnv } from "./env";
+import { parseBrief } from "./internal/brief";
+import { MAX_STDERR_TAIL, stderrDigest } from "./internal/redact";
 import { asTaskMessage, buildSummaryMessage, buildSystemPrompt, buildTranslateMessage } from "./prompt";
 import { stripNonTranslation, stripThinking } from "./translation-guard";
 import type {
@@ -48,7 +50,6 @@ export interface LocalLlmEngineConfig {
   fetchImpl?: typeof fetch;
 }
 
-const MAX_STDERR_TAIL = 2000;
 const DEFAULT_HOST = "127.0.0.1";
 const DEFAULT_CTX = 4096;
 const DEFAULT_STARTUP_TIMEOUT = 60_000;
@@ -122,7 +123,7 @@ export class LocalLlmEngine implements TranslationEngine {
     ];
 
     const child = spawn(this.config.bin, args, {
-      env: this.config.env ? sanitize(this.config.env) : undefined,
+      env: this.config.env ? dropUndefinedEnv(this.config.env) : undefined,
       stdio: ["pipe", "pipe", "pipe"],
     });
     this.child = child;
@@ -301,22 +302,4 @@ export class LocalLlmEngine implements TranslationEngine {
 
 function delay(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
-}
-
-/** Drop undefined values so spawn gets a clean string env. */
-function sanitize(env: Record<string, string | undefined>): Record<string, string> {
-  const out: Record<string, string> = {};
-  for (const [key, value] of Object.entries(env)) if (typeof value === "string") out[key] = value;
-  return out;
-}
-
-/** Split a summary response into the running paragraph and board lines. */
-function parseBrief(text: string): { summary: string; board: string[] } {
-  const lines = text
-    .split("\n")
-    .map((line) => line.trim())
-    .filter((line) => line !== "");
-  const summary = lines.find((line) => !line.startsWith("[")) ?? "";
-  const board = lines.filter((line) => line.startsWith("["));
-  return { summary, board };
 }

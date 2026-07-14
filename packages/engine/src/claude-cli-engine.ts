@@ -12,9 +12,10 @@ import { randomUUID } from "node:crypto";
 
 import { buildClaudeArgs } from "./args";
 import { sanitizeChildEnv } from "./env";
+import { parseBrief } from "./internal/brief";
 import { AsyncChannel } from "./internal/channel";
 import { Mutex } from "./internal/mutex";
-import { stderrDigest } from "./internal/redact";
+import { MAX_STDERR_TAIL, stderrDigest } from "./internal/redact";
 import {
   asTaskMessage,
   buildGlossarySetupMessage,
@@ -93,7 +94,6 @@ export interface ClaudeCliEngineConfig {
 }
 
 /** Cap on the retained stderr tail used only to derive a non-content hash (chars). */
-const MAX_STDERR_TAIL = 2000;
 /** Default per-turn idle watchdog window — mirrors the local tier's 30s (#135). */
 const DEFAULT_TURN_TIMEOUT = 30_000;
 /** Consecutive turn failures before a `degraded` event drives auto-fallback (#135). */
@@ -648,15 +648,4 @@ export class ClaudeCliEngine implements TranslationEngine {
       this.rolloverPending = true;
     }
   }
-}
-
-/** Split a summary response into the running paragraph and board lines. */
-function parseBrief(text: string): { summary: string; board: string[] } {
-  const lines = text
-    .split("\n")
-    .map((l) => l.trim())
-    .filter((l) => l !== "");
-  const summary = lines.find((l) => !l.startsWith("[")) ?? "";
-  const board = lines.filter((l) => l.startsWith("["));
-  return { summary, board };
 }

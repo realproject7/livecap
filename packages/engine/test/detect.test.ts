@@ -6,9 +6,13 @@ import type { CommandResult } from "../src/detect";
 describe("findCliBins", () => {
   it("returns matches in (name, PATH-entry) preference order", () => {
     const present = new Set(["/opt/bin/claude", "/usr/local/bin/codex", "/usr/local/bin/claude"]);
+    // Pass names explicitly: the default is claude-only (the engine can only
+    // drive the Claude CLI), so a second name is supplied here purely to exercise
+    // the name-then-PATH ordering.
     const found = findCliBins({
       path: "/opt/bin:/usr/local/bin",
       isExecutable: (c) => present.has(c),
+      names: ["claude", "codex"],
     });
     // claude before codex; within claude, /opt/bin before /usr/local/bin.
     expect(found).toEqual(["/opt/bin/claude", "/usr/local/bin/claude", "/usr/local/bin/codex"]);

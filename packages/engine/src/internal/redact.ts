@@ -5,6 +5,10 @@
 
 import { createHash } from "node:crypto";
 
+/** Cap on retained child-stderr tail (bytes) kept for the digest — one value
+ *  shared by both engine adapters so their stderr redaction can't drift. */
+export const MAX_STDERR_TAIL = 2000;
+
 /** A content-free summary of captured child stderr. */
 export function stderrDigest(byteCount: number, tail: string): string {
   if (byteCount === 0) return "no stderr";
