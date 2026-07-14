@@ -33,11 +33,27 @@ const HF_REPO: &str = "https://huggingface.co/ggerganov/whisper.cpp";
 /// source — [`pointer_url`] is pinned to the official [`HF_REPO`] — so an
 /// overridden host cannot serve a fake LFS pointer alongside a matching fake
 /// blob; any blob that does not match the OFFICIAL digest fails verification.
+// Release builds never read this env var (#177), so the const is unused there —
+// which is the point: an unused const emits no string, so the release binary
+// carries no `LIVECAP_MODEL_BASE_URL` symbol (asserted by the release-invariants
+// CI gate). The `allow(dead_code)` only silences the release-profile warning.
+#[cfg_attr(not(debug_assertions), allow(dead_code))]
 const MODEL_BASE_URL_ENV: &str = "LIVECAP_MODEL_BASE_URL";
 
-/// The effective BLOB download base URL (env override or the official repo).
+/// The effective BLOB download base URL. Debug builds honor the
+/// [`MODEL_BASE_URL_ENV`] dev-run knob (#110 download-failure fallback); RELEASE
+/// builds ALWAYS use the official [`HF_REPO`] — the env read is compiled out
+/// entirely (#177, mirroring #146/#161), so a shipped binary exposes no such knob
+/// and its model-download host can't be redirected. The pure
+/// [`base_url_or_default`] core stays testable in both profiles.
+#[cfg(debug_assertions)]
 fn blob_base_url() -> String {
     base_url_or_default(std::env::var(MODEL_BASE_URL_ENV).ok())
+}
+
+#[cfg(not(debug_assertions))]
+fn blob_base_url() -> String {
+    base_url_or_default(None)
 }
 
 /// Pure core of [`blob_base_url`]: `None`/blank → the official repo. Trailing
