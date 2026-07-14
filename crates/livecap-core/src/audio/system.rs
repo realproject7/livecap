@@ -26,7 +26,11 @@ use crate::error::CoreError;
 
 /// Handle to a running system-audio capture. Dropping it stops the capture.
 pub struct SystemAudioCapture {
+    // Held only as an RAII guard: its `Drop` stops the tap thread when this
+    // handle is dropped. Never read directly (the initial rate it used to expose
+    // is no longer consumed), so `dead_code` is allowed for this field.
     #[cfg(target_os = "macos")]
+    #[allow(dead_code)]
     inner: macos::MacSystemAudioCapture,
 }
 
