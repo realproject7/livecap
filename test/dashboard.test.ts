@@ -93,6 +93,24 @@ const RECORDING = `# (recording)
 ## Transcript
 `;
 
+// #170: two sessions saved in the SAME clock-minute (back-to-back captures / the
+// "(2)" filename-collision case). They TIE on (headerDate, startClock) but have
+// distinct duration/languages/cost, so a positional index pairing would swap
+// their history-row subtitles.
+const TIED_ALPHA = `# Alpha
+> 2026-06-10 09:00–09:45 (45 min) · EN → KO · engine: Claude CLI ($0.30)
+
+## Summary
+- alpha notes
+`;
+
+const TIED_BETA = `# Beta
+> 2026-06-10 09:00–09:10 (10 min) · JA → FR · engine: Claude CLI ($0.05)
+
+## Summary
+- beta notes
+`;
+
 describe("formatDuration", () => {
   it("renders minutes, hours, and combinations", () => {
     expect(formatDuration(0)).toBe("0m");
@@ -169,6 +187,41 @@ describe("buildDashboardModel (#144: front-matter index)", () => {
     expect(model.stats.averageSmoothScore).toBeCloseTo(70, 5);
     // The transcript entries are absent in a header parse (they load lazily).
     expect(indexed?.session.entries).toHaveLength(0);
+  });
+
+  it("pairs each session with its OWN index entry when two tie on date+clock (#170)", () => {
+    // Regression: renderHistory used to read the chronological index in reverse
+    // by position; on a (date, startClock) tie both stable sorts keep the SAME
+    // relative order (not mirrored), so the reversal swapped tied sessions'
+    // duration/langs/cost subtitles. Each IndexedSession now carries its OWN entry.
+    const index: SessionHeader[] = [
+      { name: "2026-06-10 0900 — Alpha.md", markdown: TIED_ALPHA },
+      { name: "2026-06-10 0900 — Beta (2).md", markdown: TIED_BETA },
+    ];
+    const model = buildDashboardModel(index);
+    expect(model.sessions).toHaveLength(2);
+
+    const byTitle = new Map(model.sessions.map((s) => [s.session.meta.title, s]));
+    const alpha = byTitle.get("Alpha");
+    const beta = byTitle.get("Beta");
+
+    // Alpha's row shows Alpha's numbers, Beta's shows Beta's — not swapped.
+    expect(alpha?.entry.durationMin).toBe(45);
+    expect(alpha?.entry.sourceLang).toBe("EN");
+    expect(alpha?.entry.targetLang).toBe("KO");
+    expect(alpha?.entry.costUsd).toBeCloseTo(0.3, 5);
+    expect(beta?.entry.durationMin).toBe(10);
+    expect(beta?.entry.sourceLang).toBe("JA");
+    expect(beta?.entry.targetLang).toBe("FR");
+    expect(beta?.entry.costUsd).toBeCloseTo(0.05, 5);
+
+    // Invariant: every session's entry is derived from that same session's meta.
+    for (const s of model.sessions) {
+      expect(s.entry.title).toBe(s.session.meta.title);
+      expect(s.entry.date).toBe(s.session.meta.headerDate);
+      expect(s.entry.startClock).toBe(s.session.meta.startClock);
+      expect(s.entry.durationMin).toBe(s.session.meta.durationMin);
+    }
   });
 });
 

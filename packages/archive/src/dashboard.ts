@@ -74,6 +74,28 @@ function mean(values: number[]): number | null {
   return sum / values.length;
 }
 
+/**
+ * Build one per-session index row from a parsed session. Pure and derived solely
+ * from `session`, so a row always carries ITS OWN session's numbers — callers can
+ * pair an entry with a session by identity (e.g. keyed by file name) rather than
+ * by array position (#170). NaN-guarded like the aggregate.
+ */
+export function toSessionIndexEntry(session: ParsedSession): SessionIndexEntry {
+  const { meta, metrics, isRecording } = session;
+  return {
+    title: meta.title,
+    date: meta.headerDate,
+    startClock: meta.startClock,
+    durationMin: finite(meta.durationMin),
+    sourceLang: meta.sourceLang,
+    targetLang: meta.targetLang,
+    costUsd: roundCents(finite(meta.costUsd)),
+    talkRatioMic: metrics ? finite(metrics.talkRatioMic) : null,
+    smoothScore: metrics ? finite(metrics.smoothScore) : null,
+    isRecording,
+  };
+}
+
 /** Chronological order: by header date, then start clock, stable for ties. */
 function chronological(a: ParsedSession, b: ParsedSession): number {
   if (a.meta.headerDate !== b.meta.headerDate) {
@@ -120,18 +142,7 @@ export function aggregateSessions(sessions: readonly ParsedSession[]): Dashboard
       smoothScoreTrend.push({ date: meta.headerDate, startClock: meta.startClock, value: smoothScore });
     }
 
-    index.push({
-      title: meta.title,
-      date: meta.headerDate,
-      startClock: meta.startClock,
-      durationMin: finite(meta.durationMin),
-      sourceLang: meta.sourceLang,
-      targetLang: meta.targetLang,
-      costUsd: roundCents(finite(meta.costUsd)),
-      talkRatioMic,
-      smoothScore,
-      isRecording,
-    });
+    index.push(toSessionIndexEntry(session));
   }
 
   return {
