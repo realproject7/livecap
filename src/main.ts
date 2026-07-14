@@ -25,6 +25,7 @@ import {
 import { LANGUAGES, SOURCE_AUTO_CODE, SOURCE_LANGUAGES, languageByCode } from "./languages";
 import { FeedState, type CaptionBlock } from "./feed-state";
 import { FeedCoalescer, applyShimmerCap } from "./feed-coalescer";
+import { SessionScope } from "./session-scope";
 import {
   buildReview,
   type CoachingCard,
@@ -33,7 +34,6 @@ import {
 } from "./review";
 import { startOnboarding } from "./onboarding";
 import type {
-  BoardWire,
   Capabilities,
   CaptionBridgeEvent,
   HostInbound,
@@ -80,16 +80,14 @@ let phase: SessionStatus["phase"] = "idle";
 // #53: desired capture channels for the running session (both-on while idle).
 let channels: SessionChannels = { system: true, mic: true };
 let statusDetail = "";
-let summaryLine = "";
 let requestCounter = 0;
-// Latest full summary/board (#81) — retained so the post-meeting review screen
-// can render them; the live strip only shows the first summary line.
-let latestSummary: string[] = [];
-let latestBoard: BoardWire = { decisions: [], actionItems: [], openQuestions: [] };
-// Latest archive path for the review screen's "open saved file" action.
-let latestArchivePath: string | null = null;
 
+// The two long-lived per-session singletons (#171): the caption `feed` and the
+// session-scoped model values (summary/board/archive path/metrics) that feed the
+// summary strip + post-meeting review. Both are cleared at a new session start
+// (resetSessionState) so it never inherits the previous meeting's state.
 const feed = new FeedState();
+const scope = new SessionScope();
 
 document.body.innerHTML = `
   <div id="glass">
@@ -393,7 +391,7 @@ function render(): void {
 }
 
 function renderSummaryStrip(): void {
-  const { label, line, live } = summaryStripContent(phase, statusDetail, summaryLine);
+  const { label, line, live } = summaryStripContent(phase, statusDetail, scope.summaryLine);
   summaryLabel.textContent = label;
   summaryLineEl.textContent = line;
   summaryDot.classList.toggle("on", live);
@@ -849,10 +847,9 @@ function speakBetter(text: string): void {
   window.speechSynthesis.speak(utterance);
 }
 
-// Metrics arrive (HostOutbound "metrics") just before the archive path
-// ("archived"); retain them so the review opens once the session has stopped.
-let pendingMetrics: { talkRatioMic: number; smoothScore: number; micMs: number; systemMs: number } | null =
-  null;
+// `scope.pendingMetrics` (session-scoped, in SessionScope): metrics arrive
+// (HostOutbound "metrics") just before the archive path ("archived"); retained
+// so the review opens once the session has stopped.
 
 /** Open the post-meeting review screen (#81) with the retained summary/board +
  *  metrics + the session's own (mic) utterances. Called on session end. */
@@ -863,14 +860,14 @@ function openReview(talkRatioMic: number, smoothScore: number, micMs: number, sy
     time: block.epochMs !== null ? clockLabel(block.epochMs) : "",
   }));
   review.show({
-    summary: latestSummary,
-    board: latestBoard,
+    summary: scope.latestSummary,
+    board: scope.latestBoard,
     talkRatioMic,
     smoothScore,
     micMs,
     systemMs,
     utterances,
-    archivePath: latestArchivePath,
+    archivePath: scope.latestArchivePath,
   });
 }
 
@@ -988,9 +985,9 @@ void listen<HostOutbound>("host://event", (event) => {
       break;
     }
     case "summary":
-      summaryLine = message.summary[0] ?? "";
-      latestSummary = message.summary;
-      latestBoard = message.board;
+      scope.summaryLine = message.summary[0] ?? "";
+      scope.latestSummary = message.summary;
+      scope.latestBoard = message.board;
       renderSummaryStrip();
       break;
     case "engineSwitch":
@@ -1007,7 +1004,7 @@ void listen<HostOutbound>("host://event", (event) => {
       break;
     }
     case "metrics":
-      pendingMetrics = {
+      scope.pendingMetrics = {
         talkRatioMic: message.talkRatioMic,
         smoothScore: message.smoothScore,
         micMs: message.micMs,
@@ -1031,7 +1028,7 @@ void listen<HostOutbound>("host://event", (event) => {
       void promptSilenceStop(message.sinceMs);
       break;
     case "archived":
-      latestArchivePath = message.path;
+      scope.latestArchivePath = message.path;
       showToast(`Saved — ${message.path.split("/").pop() ?? message.path}`);
       break;
     case "status":
@@ -1048,14 +1045,14 @@ void listen<HostOutbound>("host://event", (event) => {
     case "stopped":
       // Session end (#81): show the review screen with the retained summary/board,
       // the metrics that just arrived, and the session's own (mic) utterances.
-      if (pendingMetrics) {
+      if (scope.pendingMetrics) {
         openReview(
-          pendingMetrics.talkRatioMic,
-          pendingMetrics.smoothScore,
-          pendingMetrics.micMs,
-          pendingMetrics.systemMs,
+          scope.pendingMetrics.talkRatioMic,
+          scope.pendingMetrics.smoothScore,
+          scope.pendingMetrics.micMs,
+          scope.pendingMetrics.systemMs,
         );
-        pendingMetrics = null;
+        scope.pendingMetrics = null;
       }
       break;
     case "ready":
@@ -1083,11 +1080,10 @@ async function promptSilenceStop(sinceMs: number): Promise<void> {
  *  session's review screen keeps the state it already captured. Session-scoped
  *  state audited: `feed` (FeedState) + its `blockEls` DOM, `feedCoalescer`,
  *  `shimmerEl`, `atBottom`, the `pendingCards`/`analysisCards` result cards, and
- *  the review inputs `summaryLine`/`latestSummary`/`latestBoard`/
- *  `latestArchivePath`/`pendingMetrics`. (`coachingCards` lives on the review
- *  surface, dismissed below; `channels` is re-seeded each start by
- *  `session://channels`; `requestCounter` stays monotonic to keep card ids
- *  unique.) */
+ *  the `scope` model values (summary line / summary / board / archive path /
+ *  metrics). (`coachingCards` lives on the review surface, dismissed below;
+ *  `channels` is re-seeded each start by `session://channels`; `requestCounter`
+ *  stays monotonic to keep card ids unique.) */
 function resetSessionState(): void {
   // Caption feed: model + its DOM nodes (the permanent #feed-note stays).
   feed.reset();
@@ -1104,12 +1100,8 @@ function resetSessionState(): void {
   pendingCards.clear();
   analysisCards.clear();
 
-  // Post-meeting review inputs (#81) — must not bleed into the next session.
-  summaryLine = "";
-  latestSummary = [];
-  latestBoard = { decisions: [], actionItems: [], openQuestions: [] };
-  latestArchivePath = null;
-  pendingMetrics = null;
+  // Summary strip + post-meeting review inputs (#81) — the unit-tested seam.
+  scope.reset();
 }
 
 void listen<SessionStatus>("session://status", (event) => {

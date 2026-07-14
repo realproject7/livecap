@@ -1,17 +1,19 @@
 // #171 regression: session-scoped webview state must NOT survive a Stop → Start
-// in the same app run. The feed is a long-lived singleton; before this fix a
-// second session inherited the first's caption blocks and — worse — its own mic
-// utterances, so session 2's post-meeting coaching (openReview reads
-// feed.micUtterances()) could rewrite lines actually spoken in session 1.
+// in the same app run. Before this fix a second session inherited the first's
+// caption blocks and its own mic utterances (session 2's post-meeting coaching
+// reads feed.micUtterances(), so it could rewrite lines spoken in session 1),
+// AND the first session's summary / board / archive path (openReview reads them).
 //
-// FeedState.reset() is the model half of that reset (main.ts also clears the
-// block/card DOM + the summary/board/archivePath/metrics accumulators — those
-// are DOM/Tauri-coupled and exercised in the running app). This drives the exact
-// start → feed content → stop → start sequence against the real FeedState.
+// main.ts clears that state at the new-session boundary via two testable seams:
+// FeedState.reset() (the caption feed) and SessionScope.reset() (the summary/
+// board/archive-path/metrics model values). Both are DOM/Tauri-free; this drives
+// the exact start → content → stop → start sequence against them. (The block/card
+// DOM clearing stays in main.ts's resetSessionState — DOM-coupled, run in the app.)
 
 import { describe, expect, it } from "vitest";
 
 import { FeedState } from "../src/feed-state";
+import { SessionScope } from "../src/session-scope";
 
 function finalized(id: number, channel: "them" | "me", text: string) {
   return {
@@ -87,5 +89,72 @@ describe("FeedState.reset (#171 session-scoped reset)", () => {
     const fresh = feed.applyCaption({ type: "partial", channel: "me", text: "brand new" });
     expect(fresh.source).toBe("brand new");
     expect(feed.blocks).toHaveLength(1);
+  });
+});
+
+describe("SessionScope.reset (#171 summary/board/archive reset)", () => {
+  it("clears the summary, board, archive path, and metrics a new session must not inherit", () => {
+    const scope = new SessionScope();
+
+    // --- Session 1: the host filled the summary/board, saved the archive, and
+    // reported end-of-meeting metrics (exactly what openReview would read) ---
+    scope.summaryLine = "we agreed to ship on Friday";
+    scope.latestSummary = ["we agreed to ship on Friday", "two follow-ups remain"];
+    scope.latestBoard = {
+      decisions: ["ship Friday"],
+      actionItems: ["send the release notes"],
+      openQuestions: ["who signs off?"],
+    };
+    scope.latestArchivePath = "/Users/me/LiveCap/2026-07-14 Standup.md";
+    scope.pendingMetrics = { talkRatioMic: 0.42, smoothScore: 0.9, micMs: 120_000, systemMs: 60_000 };
+
+    // --- Stop → Start: the new-session reset boundary ---
+    scope.reset();
+
+    // Session 2 must NOT read session 1's review data: the archive path in
+    // particular could otherwise open the previous meeting's saved file.
+    expect(scope.summaryLine).toBe("");
+    expect(scope.latestSummary).toEqual([]);
+    expect(scope.latestBoard).toEqual({ decisions: [], actionItems: [], openQuestions: [] });
+    expect(scope.latestArchivePath).toBeNull();
+    expect(scope.pendingMetrics).toBeNull();
+  });
+
+  it("gives each reset a fresh board object (no shared-reference bleed)", () => {
+    const scope = new SessionScope();
+    const board1 = scope.latestBoard;
+    scope.reset();
+    // A new empty board, not the same instance mutated — so a later push into
+    // one session's board can never surface in another's.
+    expect(scope.latestBoard).not.toBe(board1);
+    expect(scope.latestBoard).toEqual({ decisions: [], actionItems: [], openQuestions: [] });
+  });
+});
+
+describe("session model reset (#171 start → content → stop → start)", () => {
+  it("clears the feed AND the summary/board/archive together, as resetSessionState does", () => {
+    // Model the two seams main.ts resets as a unit at a new session.
+    const feed = new FeedState();
+    const scope = new SessionScope();
+
+    // Session 1 produced a transcript, a summary/board, and a saved archive.
+    feed.applyCaption(finalized(1, "me", "let us start"));
+    feed.applyTranslation([{ id: 1, text: "시작합시다" }], true);
+    scope.summaryLine = "kickoff";
+    scope.latestBoard = { decisions: ["go"], actionItems: [], openQuestions: [] };
+    scope.latestArchivePath = "/tmp/session-1.md";
+
+    // New session start → reset both seams (the model half of resetSessionState).
+    feed.reset();
+    scope.reset();
+
+    // A completely clean slate for session 2: no transcript, no review data.
+    expect(feed.blocks).toEqual([]);
+    expect(feed.micUtterances()).toEqual([]);
+    expect(scope.summaryLine).toBe("");
+    expect(scope.latestSummary).toEqual([]);
+    expect(scope.latestBoard).toEqual({ decisions: [], actionItems: [], openQuestions: [] });
+    expect(scope.latestArchivePath).toBeNull();
+    expect(scope.pendingMetrics).toBeNull();
   });
 });
