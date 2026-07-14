@@ -34,7 +34,7 @@ describe("resolveStartConfig — language plumbing (#12 goal 4)", () => {
     expect(resolved.targetLanguage).toBe("Korean"); // (a) translation system prompt
     expect(resolved.summaryLanguage).toBe("Korean"); // (b) extras/summary output
     expect(resolved.targetLangCode).toBe("KO"); // (c) archive header meta
-    expect(resolved.sourceLangCode).toBe("EN");
+    expect(resolved.sourceLangCode).toBe("AUTO"); // default source is auto-detect (#94)
   });
 
   it("supports EN as a target and arbitrary BCP-47 tags", () => {
@@ -51,6 +51,45 @@ describe("resolveStartConfig — language plumbing (#12 goal 4)", () => {
     const resolved = resolveStartConfig(startMessage({ targetLanguageCode: "ja" }));
     expect(resolved.meetingLanguage).toBe("English");
     expect(resolved.summaryLanguage).toBe("Japanese");
+  });
+});
+
+describe("resolveStartConfig — source (spoken) language wiring (#94/#175)", () => {
+  it("wires a picked source language to the archive header AND the meeting/quick-translate language", () => {
+    // Spoken Korean, translate into English: the archive header is KO → EN, and
+    // reply/quick-translate output goes into Korean (the meeting's language).
+    const resolved = resolveStartConfig(
+      startMessage({ sourceLanguageCode: "ko", targetLanguageCode: "en" }),
+    );
+    expect(resolved.sourceLangCode).toBe("KO"); // was hardcoded "EN" before #175
+    expect(resolved.meetingLanguage).toBe("Korean"); // quick-translate/reply output
+    expect(resolved.targetLangCode).toBe("EN");
+    expect(resolved.summaryLanguage).toBe("English"); // summary stays in the target
+  });
+
+  it("carries arbitrary BCP-47 source tags through to the header + meeting language", () => {
+    const resolved = resolveStartConfig(
+      startMessage({ sourceLanguageCode: "ja", targetLanguageCode: "ko" }),
+    );
+    expect(resolved.sourceLangCode).toBe("JA");
+    expect(resolved.meetingLanguage).toBe("Japanese");
+  });
+
+  it("keeps auto-detect neutral: header label AUTO, reply falls back to English", () => {
+    const resolved = resolveStartConfig(
+      startMessage({ sourceLanguageCode: "auto", targetLanguageCode: "ko" }),
+    );
+    // The spoken language is detected per-utterance by whisper, so no fixed source
+    // language: a neutral "AUTO" header (never a phantom language) and the pre-#94
+    // English reply fallback are preserved.
+    expect(resolved.sourceLangCode).toBe("AUTO");
+    expect(resolved.meetingLanguage).toBe("English");
+  });
+
+  it("treats a blank source (older shell) as auto — never languageByCode('') = the default", () => {
+    const resolved = resolveStartConfig(startMessage({ sourceLanguageCode: "" }));
+    expect(resolved.sourceLangCode).toBe("AUTO");
+    expect(resolved.meetingLanguage).toBe("English");
   });
 });
 
