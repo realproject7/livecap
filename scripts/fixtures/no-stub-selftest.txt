@@ -1,0 +1,14 @@
+# no-stub-gate self-test fixture (#176): one banned marker per non-comment line.
+# The gate asserts its PATTERN matches EVERY line below, so a future edit that
+# weakens the pattern fails loudly here instead of silently letting stubs ship.
+# This file lives under fixtures/ so the gate's own app-code scan skips it.
+TODO leftover work
+FIXME a broken thing
+HACK around a bug
+a placeholder value
+a mock server
+function stubTranslateBatch() {}
+a dummy value
+unimplemented!()
+this feature is not implemented yet
+danger XXX here

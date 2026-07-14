@@ -3,9 +3,11 @@
 //!
 //! This exercises the exact production path (`pipeline.rs` force-cuts at
 //! `max_utterance_ms`, then the utterance ends naturally). It uses REAL speech
-//! synthesized with macOS `say`: the synthetic-harmonic generator in the vad
-//! unit tests is never classified as speech by this Silero build, so the
-//! force-cut → SpeechEnd path can only be reached with real audio.
+//! synthesized with macOS `say` for production-fidelity timing. (The
+//! synthetic-harmonic generator in the vad unit tests IS classified as speech by
+//! this Silero build — see `vad_state_is_maintained_across_chunks` — but its
+//! continuous signal does not reproduce the force-cut → natural-SpeechEnd
+//! sequence where the #162 panic occurred, so that regression is guarded here.)
 //!
 //! Before the #162 fix this test PANICS at the natural SpeechEnd (draining
 //! Silero's buffer on the cut left its state-enum `start_ms` stale). macOS only.
