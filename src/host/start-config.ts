@@ -6,17 +6,21 @@
 
 import { DEFAULT_EXTRAS_BUDGET_USD } from "@livecap/engine";
 
-import { languageByCode } from "../languages.ts";
+import { languageByCode, SOURCE_AUTO_CODE } from "../languages.ts";
 import type { EnginePref, HostInbound } from "../protocol.ts";
 
 type StartMessage = Extract<HostInbound, { type: "start" }>;
 
-/** The meeting itself is spoken English (PROPOSAL positioning): reply
- *  suggestions and quick translate output INTO the meeting, and the archive
- *  header's source label reflects it. Captions themselves are auto-detected
- *  per sentence by whisper — there is no source-language setting (§8.6). */
-const MEETING_LANGUAGE = "English";
-const SOURCE_LANG_CODE = "EN";
+/** Reply suggestions and quick-translate output go INTO the meeting's spoken
+ *  language (§8.5), and the archive header's source label reflects it. #94 lets
+ *  the user pick that spoken language; when they leave it on "auto" (per-utterance
+ *  whisper detection, the default) there is no single spoken language, so reply/
+ *  quick-translate falls back to English — the pre-#94 behavior. */
+const AUTO_MEETING_LANGUAGE = "English";
+/** Archive header source label (§8.9) for auto-detect (#94/#175): a neutral
+ *  "AUTO" — detection is per-utterance, so no one language is the source. A
+ *  PICKED source language uses its own archiveLabel (e.g. "KO"). */
+const AUTO_SOURCE_LABEL = "AUTO";
 
 export interface ResolvedStartConfig {
   /** Translation target for the engine system prompt, e.g. "Korean". */
@@ -45,11 +49,22 @@ export interface ResolvedStartConfig {
 
 export function resolveStartConfig(message: StartMessage): ResolvedStartConfig {
   const language = languageByCode(message.targetLanguageCode);
+  // Spoken/source language (#94/#175): "auto" — and a blank value from an older
+  // shell — keeps per-utterance whisper detection (no fixed spoken language), so
+  // reply/quick-translate falls back to English and the archive header shows a
+  // neutral "AUTO". A picked tag uses its own name + archive label (Korean →
+  // "Korean" / "KO"). (`languageByCode("")` would be the `ko` default, hence the
+  // explicit blank check.)
+  const sourceCode = message.sourceLanguageCode.trim().toLowerCase();
+  const source =
+    sourceCode === SOURCE_AUTO_CODE || sourceCode === ""
+      ? null
+      : languageByCode(message.sourceLanguageCode);
   return {
     targetLanguage: language.name,
     summaryLanguage: language.name,
-    meetingLanguage: MEETING_LANGUAGE,
-    sourceLangCode: SOURCE_LANG_CODE,
+    meetingLanguage: source ? source.name : AUTO_MEETING_LANGUAGE,
+    sourceLangCode: source ? source.archiveLabel : AUTO_SOURCE_LABEL,
     targetLangCode: language.archiveLabel,
     enginePref: message.enginePref === "local" ? "local" : "cli",
     poolUsd: Number.isFinite(message.poolUsd) && message.poolUsd > 0 ? message.poolUsd : 20,
