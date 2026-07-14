@@ -21,7 +21,7 @@ import { invoke } from "@tauri-apps/api/core";
 // Import the #98 data layer DIRECTLY from its source modules rather than the
 // package barrel: `parse`/`dashboard` are pure (they only touch `./types`), so
 // the webview never pulls the package's Node-only `fs` writer into the bundle.
-import { aggregateSessions, type DashboardStats } from "@livecap/archive/src/dashboard.ts";
+import { aggregateSessions, toSessionIndexEntry, type DashboardStats } from "@livecap/archive/src/dashboard.ts";
 import { parseSession, type ParsedSession } from "@livecap/archive/src/parse.ts";
 import type { SessionIndexEntry } from "@livecap/archive/src/dashboard.ts";
 import type { CaptionEntry } from "@livecap/archive/src/types.ts";
@@ -57,6 +57,10 @@ export interface IndexedSession {
   name: string;
   /** Front-matter parse: meta/summary/board/metrics populated, entries empty. */
   session: ParsedSession;
+  /** The history-row index entry derived from THIS session (#170) — carried with
+   *  the session so a row shows its own duration/langs/cost, never a tied
+   *  session's (no positional pairing). */
+  entry: SessionIndexEntry;
 }
 
 /** A parsed session paired with the dashboard index entry derived from it, so a
@@ -87,12 +91,16 @@ const BACK_ICON =
  */
 export function buildDashboardModel(index: readonly SessionHeader[]): DashboardModel {
   const parsed = index
-    .map((h) => ({ name: h.name, session: parseSession(h.markdown) }))
+    .map((h) => {
+      const session = parseSession(h.markdown);
+      // Derive each session's index entry HERE, alongside its file name (#170),
+      // so a history row pairs with its OWN entry by identity — not by a fragile
+      // positional reversal that swaps sessions tied on (date, startClock).
+      return { name: h.name, session, entry: toSessionIndexEntry(session) };
+    })
     .filter((p) => !p.session.isRecording);
   const stats = aggregateSessions(parsed.map((p) => p.session));
-  // `stats.index` is chronological (oldest first); the history list shows newest
-  // first. Sort the parsed sessions the same way the aggregator orders the index
-  // so a row's position maps to the same session.
+  // History shows newest-first; each session already carries its own entry.
   const sessions = [...parsed].sort((a, b) => compareChronological(b.session, a.session));
   return { stats, sessions };
 }
@@ -437,16 +445,11 @@ export function buildDashboard(callbacks: DashboardCallbacks): DashboardSurface 
     h.textContent = "History";
     wrap.appendChild(h);
 
-    // Pair each header session with its index entry + file name ONCE.
-    // `m.sessions` is newest-first; the chronological index is oldest-first, so
-    // read it in reverse. The name backs the lazy detail load + search (#144).
-    const index = m.stats.index;
-    const pairs: { name: string; session: ParsedSession; entry: SessionIndexEntry | undefined }[] = [];
-    for (let i = 0; i < m.sessions.length; i++) {
-      const indexed = m.sessions[i];
-      if (indexed === undefined) continue;
-      pairs.push({ name: indexed.name, session: indexed.session, entry: index[index.length - 1 - i] });
-    }
+    // Each session carries its OWN index entry (built alongside it in
+    // buildDashboardModel, #170), so a row shows its own duration/langs/cost —
+    // never a tied session's, as the old positional index reversal did. The name
+    // backs the lazy detail load + search (#144).
+    const pairs = m.sessions;
 
     // Search box (#131): case-insensitive substring over title/summary/board/
     // transcript, debounced. Title/summary/board are already in the header

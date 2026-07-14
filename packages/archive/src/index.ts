@@ -33,5 +33,5 @@ export type {
 // Issue #98 — Dashboard data layer: parse saved sessions + aggregate stats (headless).
 export { parseSession } from "./parse";
 export type { ParsedSession, ParsedSessionMeta } from "./parse";
-export { aggregateSessions } from "./dashboard";
+export { aggregateSessions, toSessionIndexEntry } from "./dashboard";
 export type { DashboardStats, SessionIndexEntry, TrendPoint } from "./dashboard";
