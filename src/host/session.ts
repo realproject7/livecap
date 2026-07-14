@@ -152,6 +152,19 @@ export function meterEngines(
   }
 }
 
+/** The content-free custom-endpoint notice (#174) for a base environment, or
+ *  null when no `ANTHROPIC_BASE_URL` is set. A set base URL silently reroutes all
+ *  CLI transcript traffic to an arbitrary host (its credentials preserved by
+ *  #145), so the CLI path surfaces this ONCE per session — carrying ONLY the safe
+ *  host (`detectCustomEndpoint` drops the URL path/query and any credentials),
+ *  mirroring the #145 proxy notice. Pure over the env so the exact status string
+ *  and its redaction are unit-testable — `HostSession.start` spawns real CLI
+ *  children and has no headless harness. */
+export function customEndpointNotice(env: Record<string, string | undefined>): string | null {
+  const host = detectCustomEndpoint(env);
+  return host === null ? null : `translation traffic is routing to a custom Anthropic endpoint: ${host}`;
+}
+
 export class HostSession {
   /** Routers for the two CLI lanes (null on the local-only path). A credit- or
    *  health-driven fallback switches BOTH to the shared local engine (#142). */
@@ -324,18 +337,12 @@ export class HostSession {
       if (proxyHost) {
         this.emit({ type: "status", detail: `translation traffic is routing through a proxy: ${proxyHost}` });
       }
-      // Custom-endpoint discipline (#174, sibling of #145): a set
-      // ANTHROPIC_BASE_URL is an intentional reroute — sanitizeChildEnv preserves
-      // it AND its credentials — but it silently sends every translation to an
-      // arbitrary Anthropic-API host, so surface it ONCE per session with only the
-      // safe host (never the URL path/query/credentials), like the proxy notice.
-      const customEndpointHost = detectCustomEndpoint(process.env);
-      if (customEndpointHost) {
-        this.emit({
-          type: "status",
-          detail: `translation traffic is routing to a custom Anthropic endpoint: ${customEndpointHost}`,
-        });
-      }
+      // Custom-endpoint discipline (#174, sibling of #145): surface a set
+      // ANTHROPIC_BASE_URL ONCE per session so its silent reroute is a conscious
+      // choice. The notice string + redaction live in the pure, tested
+      // `customEndpointNotice`; here we only emit it.
+      const endpointNotice = customEndpointNotice(process.env);
+      if (endpointNotice) this.emit({ type: "status", detail: endpointNotice });
     } else {
       if (resolved.enginePref === "cli") {
         this.emit({ type: "status", detail: "no Claude CLI found — using the local model" });
