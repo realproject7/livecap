@@ -63,13 +63,14 @@ jobs:
       - run: cargo test --workspace
 
   release-invariants:
-    # #176: turn the #161-class privacy invariant into a permanent gate. CI's
+    # #176/#177: turn the #161-class privacy invariant into a permanent gate. CI's
     # other jobs only compile/test the DEBUG profile, so a dropped
-    # `#[cfg(debug_assertions)]` guard (e.g. a bad merge on the #64 bleed dump or a
-    # #108 dev flag) is invisible to them and only surfaces at tag time. This job
-    # compiles livecap-app in RELEASE and asserts the debug-only env-escape NAMES
-    # are absent from the binary — they exist only inside `#[cfg(debug_assertions)]`
-    # items, so a release build compiles them out entirely (#146/#161).
+    # `#[cfg(debug_assertions)]` guard (e.g. a bad merge on the #64 bleed dump, a
+    # #108 dev flag, or the #177 model-base-url knob) is invisible to them and only
+    # surfaces at tag time. This job compiles livecap-app in RELEASE and asserts the
+    # debug-only env-escape NAMES are absent from the binary — they exist only
+    # inside `#[cfg(debug_assertions)]` items, so a release build compiles them out
+    # entirely (#146/#161/#177).
     runs-on: macos-14
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
@@ -98,7 +99,7 @@ jobs:
           # These env vars are read ONLY inside #[cfg(debug_assertions)] items, so a
           # release build must contain none of their names. A hit means a guard was
           # dropped and the shipped binary regained a covert env path (#161-class).
-          FORBIDDEN="LIVECAP_BLEED_DUMP_DIR LIVECAP_CAPTURE_VISIBLE LIVECAP_AUTOSTART LIVECAP_UI_PROBE"
+          FORBIDDEN="LIVECAP_BLEED_DUMP_DIR LIVECAP_CAPTURE_VISIBLE LIVECAP_AUTOSTART LIVECAP_UI_PROBE LIVECAP_MODEL_BASE_URL"
           fail=0
           for name in $FORBIDDEN; do
             if strings "$BIN" | grep -q "$name"; then
