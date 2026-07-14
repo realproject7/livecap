@@ -16,8 +16,14 @@
 import type { ArchiveFs } from "./fs";
 import { uniquePath } from "./paths";
 import { renderDocument, renderEntryAppend, type ArchiveModel } from "./render";
-import { sanitizeTitle } from "./sanitize";
+import { sanitizeTitle, WORKING_TITLE } from "./sanitize";
 import type { BriefUpdate, CaptionEntry, CoachingData, FinalBrief, SessionMeta } from "./types";
+
+/** The in-progress working-file title sentinel (`<prefix> — (recording).md`),
+ *  re-exported so the retention sweep can recognize — and never reap — an
+ *  unfinalized recording (#63). Defined in sanitize.ts so [`sanitizeTitle`] can
+ *  refuse to produce it as a finalized title (#178). */
+export { WORKING_TITLE };
 
 export interface SessionArchiveWriterOptions {
   fs: ArchiveFs;
@@ -28,10 +34,6 @@ export interface SessionArchiveWriterOptions {
   workingTitle?: string;
 }
 
-/** Title shown in the in-progress working file's name (`<prefix> — (recording).md`)
- *  until the session finalizes. Exported so the retention sweep can recognize —
- *  and never reap — an unfinalized recording (#63). */
-export const WORKING_TITLE = "(recording)";
 
 export class SessionArchiveWriter {
   private readonly fs: ArchiveFs;

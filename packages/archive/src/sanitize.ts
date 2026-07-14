@@ -31,6 +31,13 @@ function truncateToByteBudget(text: string, maxBytes: number): string {
 /** Fallback when a title sanitizes to nothing. */
 export const FALLBACK_TITLE = "Untitled session";
 
+/** The in-progress working-file title sentinel — a finalized archive must never
+ *  reuse it as a title, or its `<prefix> — (recording).md` filename would be
+ *  misread as a crashed recording by retention/adopt (#178). Defined here (not in
+ *  writer.ts) so [`sanitizeTitle`] can guard against it without a circular import;
+ *  re-exported from writer.ts for the retention sweep's marker. */
+export const WORKING_TITLE = "(recording)";
+
 // Characters that must never reach a filename:
 // - the NUL/C0 control range and DEL
 // - ASCII path separators
@@ -66,7 +73,12 @@ export function sanitizeTitle(raw: string): string {
   // Truncate by UTF-8 bytes (not chars) at a code-point boundary (#32), then
   // re-trim any trailing space the cut may have exposed.
   title = truncateToByteBudget(title, MAX_TITLE_BYTES).replace(/[.\s]+$/, "");
-  return title === "" ? FALLBACK_TITLE : title;
+  // A finalized title must never BE the in-progress sentinel (#178): otherwise the
+  // finalized file `<prefix> — (recording).md` collides with the working-file
+  // grammar and retention/adopt misread this real session as a crashed orphan
+  // (exempt from the sweep, then re-titled from its first summary line).
+  if (title === "" || title === WORKING_TITLE) return FALLBACK_TITLE;
+  return title;
 }
 
 /** Build the archive filename for a sanitized title: `<prefix> — <title>.md`. */
