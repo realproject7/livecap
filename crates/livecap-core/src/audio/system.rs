@@ -68,18 +68,6 @@ impl SystemAudioCapture {
             .into())
         }
     }
-
-    /// Initial sample rate reported by the capture device.
-    pub fn sample_rate(&self) -> u32 {
-        #[cfg(target_os = "macos")]
-        {
-            self.inner.sample_rate()
-        }
-        #[cfg(not(target_os = "macos"))]
-        {
-            0
-        }
-    }
 }
 
 #[cfg(target_os = "macos")]
@@ -140,14 +128,13 @@ mod macos {
     pub(super) struct MacSystemAudioCapture {
         stop: Arc<AtomicBool>,
         join: Option<std::thread::JoinHandle<()>>,
-        sample_rate: u32,
     }
 
     impl MacSystemAudioCapture {
         pub(super) fn start(out: mpsc::UnboundedSender<AudioChunk>) -> Result<Self> {
             let stop = Arc::new(AtomicBool::new(false));
             let thread_stop = stop.clone();
-            let (ready_tx, ready_rx) = std::sync::mpsc::channel::<Result<u32>>();
+            let (ready_tx, ready_rx) = std::sync::mpsc::channel::<Result<()>>();
 
             // All Core Audio objects (tap, aggregate device, IO proc context)
             // are created, used, and destroyed on this thread.
@@ -155,19 +142,17 @@ mod macos {
                 .name("livecap-system-audio".into())
                 .spawn(move || run_capture(thread_stop, out, ready_tx))?;
 
-            let sample_rate = ready_rx.recv().map_err(|_| {
+            // The ready channel propagates the capture thread's setup result (and
+            // blocks until it reports); the payload is unit — the tap's initial
+            // rate is not consumed, each AudioChunk carries its own current rate.
+            ready_rx.recv().map_err(|_| {
                 anyhow!("System-audio capture thread exited before reporting status")
             })??;
 
             Ok(Self {
                 stop,
                 join: Some(join),
-                sample_rate,
             })
-        }
-
-        pub(super) fn sample_rate(&self) -> u32 {
-            self.sample_rate
         }
     }
 
@@ -244,7 +229,7 @@ mod macos {
     fn run_capture(
         stop: Arc<AtomicBool>,
         out: mpsc::UnboundedSender<AudioChunk>,
-        ready_tx: std::sync::mpsc::Sender<Result<u32>>,
+        ready_tx: std::sync::mpsc::Sender<Result<()>>,
     ) {
         struct Devices {
             tap_id: AudioObjectID,
@@ -444,7 +429,7 @@ mod macos {
             "CoreAudio: system-audio capture running at {} Hz",
             current_rate.load(Ordering::Acquire)
         );
-        let _ = ready_tx.send(Ok(current_rate.load(Ordering::Acquire)));
+        let _ = ready_tx.send(Ok(()));
 
         // Pump loop: drain the ring buffer into the pipeline channel and
         // re-poll the device rate periodically (it changes when the default

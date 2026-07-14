@@ -18,8 +18,6 @@ use super::AudioChunk;
 pub struct MicCapture {
     stop_tx: std::sync::mpsc::Sender<()>,
     join: Option<std::thread::JoinHandle<()>>,
-    device: AudioDevice,
-    sample_rate: u32,
 }
 
 impl MicCapture {
@@ -32,7 +30,7 @@ impl MicCapture {
         };
         info!("Starting microphone capture on '{}'", device.name);
 
-        let (ready_tx, ready_rx) = std::sync::mpsc::channel::<Result<u32>>();
+        let (ready_tx, ready_rx) = std::sync::mpsc::channel::<Result<()>>();
         let (stop_tx, stop_rx) = std::sync::mpsc::channel::<()>();
 
         let thread_device = device.clone();
@@ -52,7 +50,7 @@ impl MicCapture {
                     );
                     let stream = build_input_stream(&cpal_device, &config, out)?;
                     stream.play()?;
-                    let _ = ready_tx.send(Ok(sample_rate));
+                    let _ = ready_tx.send(Ok(()));
                     Ok(stream)
                 })();
 
@@ -69,26 +67,18 @@ impl MicCapture {
                 }
             })?;
 
-        let sample_rate = ready_rx
+        // The ready channel propagates the capture thread's setup result (and
+        // blocks until it reports): the payload is unit — the native rate is not
+        // consumed by the pipeline, which resamples every AudioChunk by its own
+        // reported rate.
+        ready_rx
             .recv()
             .map_err(|_| anyhow!("Microphone capture thread exited before reporting status"))??;
 
         Ok(Self {
             stop_tx,
             join: Some(join),
-            device,
-            sample_rate,
         })
-    }
-
-    /// The device this capture is reading from.
-    pub fn device(&self) -> &AudioDevice {
-        &self.device
-    }
-
-    /// Native sample rate of the capture stream.
-    pub fn sample_rate(&self) -> u32 {
-        self.sample_rate
     }
 }
 

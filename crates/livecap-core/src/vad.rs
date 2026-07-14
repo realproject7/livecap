@@ -130,11 +130,6 @@ impl ContinuousVadProcessor {
         &self.current_speech
     }
 
-    /// Milliseconds of (16 kHz) audio processed so far.
-    pub fn processed_ms(&self) -> f64 {
-        self.processed_samples as f64 / (VAD_SAMPLE_RATE as f64 / 1000.0)
-    }
-
     /// Force-cut the utterance currently in progress and return it as a
     /// segment, keeping the session in speech state. Used to bound utterance
     /// length when someone talks for a very long time without pausing.

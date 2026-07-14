@@ -185,27 +185,6 @@ impl CaptionPipeline {
         ))
     }
 
-    /// Convenience: start both captures. `mic`/`system`: `Some(device)`
-    /// captures from that device, `None` skips the channel entirely. Use
-    /// [`Self::start_mic`] / [`Self::start_system`] for default-device
-    /// capture of a single channel.
-    pub fn start_capture(
-        &mut self,
-        mic: Option<AudioDevice>,
-        system: Option<AudioDevice>,
-    ) -> Result<()> {
-        if mic.is_none() && system.is_none() {
-            return Err(anyhow!("At least one of mic/system must be provided"));
-        }
-        if let Some(mic_device) = mic {
-            self.start_mic(Some(mic_device))?;
-        }
-        if let Some(system_device) = system {
-            self.start_system(Some(&system_device))?;
-        }
-        Ok(())
-    }
-
     /// Start microphone capture (`None` = system default input device) on
     /// the [`Channel::Mic`] channel.
     pub fn start_mic(&mut self, device: Option<AudioDevice>) -> Result<()> {
