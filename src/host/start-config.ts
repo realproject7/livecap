@@ -49,12 +49,22 @@ export interface ResolvedStartConfig {
 
 export function resolveStartConfig(message: StartMessage): ResolvedStartConfig {
   const language = languageByCode(message.targetLanguageCode);
-  const source = resolveSourceLanguage(message.sourceLanguageCode);
+  // Spoken/source language (#94/#175): "auto" — and a blank value from an older
+  // shell — keeps per-utterance whisper detection (no fixed spoken language), so
+  // reply/quick-translate falls back to English and the archive header shows a
+  // neutral "AUTO". A picked tag uses its own name + archive label (Korean →
+  // "Korean" / "KO"). (`languageByCode("")` would be the `ko` default, hence the
+  // explicit blank check.)
+  const sourceCode = message.sourceLanguageCode.trim().toLowerCase();
+  const source =
+    sourceCode === SOURCE_AUTO_CODE || sourceCode === ""
+      ? null
+      : languageByCode(message.sourceLanguageCode);
   return {
     targetLanguage: language.name,
     summaryLanguage: language.name,
-    meetingLanguage: source.meetingLanguage,
-    sourceLangCode: source.archiveLabel,
+    meetingLanguage: source ? source.name : AUTO_MEETING_LANGUAGE,
+    sourceLangCode: source ? source.archiveLabel : AUTO_SOURCE_LABEL,
     targetLangCode: language.archiveLabel,
     enginePref: message.enginePref === "local" ? "local" : "cli",
     poolUsd: Number.isFinite(message.poolUsd) && message.poolUsd > 0 ? message.poolUsd : 20,
@@ -68,22 +78,6 @@ export function resolveStartConfig(message: StartMessage): ResolvedStartConfig {
     extrasBudgetUsd: DEFAULT_EXTRAS_BUDGET_USD,
     channelsNote: resolveChannelsNote(message.captureSystem, message.captureMic),
   };
-}
-
-/** Resolve the start message's spoken/source language (#94/#175) into the two
- *  things the host needs from it: the reply/quick-translate output language and
- *  the archive header source label. The "auto" sentinel — and an absent/blank
- *  value from an older shell — keeps per-utterance whisper detection (no fixed
- *  spoken language), so it maps to the English reply fallback + the neutral
- *  "AUTO" label; any picked tag resolves to its own language name + archive
- *  label (e.g. Korean → "Korean" / "KO"). */
-function resolveSourceLanguage(code: string): { meetingLanguage: string; archiveLabel: string } {
-  const normalized = code.trim().toLowerCase();
-  if (normalized === SOURCE_AUTO_CODE || normalized === "") {
-    return { meetingLanguage: AUTO_MEETING_LANGUAGE, archiveLabel: AUTO_SOURCE_LABEL };
-  }
-  const source = languageByCode(code);
-  return { meetingLanguage: source.name, archiveLabel: source.archiveLabel };
 }
 
 /** Only an explicit false disables a channel (older shells omit the field);
