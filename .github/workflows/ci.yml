@@ -5,29 +5,32 @@ on:
     branches: [main]
   pull_request:
 
+# Third-party actions are pinned to full commit SHAs (#176 supply-chain hygiene);
+# the trailing comment records the human-readable version they were pinned at.
 jobs:
   no-stub-gate:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
       - run: ./scripts/no-stub-gate.sh
 
   color-guard:
-    # #116: fail if src CSS uses a raw color literal outside the :root tokens.
+    # #116: fail if src CSS or a TS-set inline style uses a raw color literal
+    # outside the :root tokens.
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
       - run: ./scripts/color-guard.sh
 
   packages-linux:
     # Engine/archive packages are Tauri-free and must build & test headless.
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: pnpm/action-setup@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4
         with:
           version: 10
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: 22
           cache: pnpm
@@ -41,19 +44,68 @@ jobs:
   app-macos:
     runs-on: macos-14
     steps:
-      - uses: actions/checkout@v4
-      - uses: pnpm/action-setup@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4
         with:
           version: 10
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: 22
           cache: pnpm
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@fa04a1451ff1842e2626ccb99004d0195b455a88 # dtolnay/rust-toolchain master (channel via `toolchain:` input)
         with:
+          toolchain: stable
           components: clippy
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
       - run: pnpm install --frozen-lockfile
       - run: pnpm build
       - run: cargo clippy --workspace --all-targets -- -D warnings
       - run: cargo test --workspace
+
+  release-invariants:
+    # #176: turn the #161-class privacy invariant into a permanent gate. CI's
+    # other jobs only compile/test the DEBUG profile, so a dropped
+    # `#[cfg(debug_assertions)]` guard (e.g. a bad merge on the #64 bleed dump or a
+    # #108 dev flag) is invisible to them and only surfaces at tag time. This job
+    # compiles livecap-app in RELEASE and asserts the debug-only env-escape NAMES
+    # are absent from the binary — they exist only inside `#[cfg(debug_assertions)]`
+    # items, so a release build compiles them out entirely (#146/#161).
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4
+        with:
+          version: 10
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - uses: dtolnay/rust-toolchain@fa04a1451ff1842e2626ccb99004d0195b455a88 # dtolnay/rust-toolchain master (channel via `toolchain:` input)
+        with:
+          toolchain: stable
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm build # tauri-build embeds the built frontend, so dist/ must exist
+      - name: Compile livecap-app in RELEASE (tests no-run + binary)
+        run: |
+          cargo test --release -p livecap-app --no-run
+          cargo build --release -p livecap-app
+      - name: Assert the release binary strips debug-only env escapes (#161/#176)
+        run: |
+          set -euo pipefail
+          BIN=target/release/livecap-app
+          test -f "$BIN" || { echo "::error::release binary not found at $BIN"; exit 1; }
+          # These env vars are read ONLY inside #[cfg(debug_assertions)] items, so a
+          # release build must contain none of their names. A hit means a guard was
+          # dropped and the shipped binary regained a covert env path (#161-class).
+          FORBIDDEN="LIVECAP_BLEED_DUMP_DIR LIVECAP_CAPTURE_VISIBLE LIVECAP_AUTOSTART LIVECAP_UI_PROBE"
+          fail=0
+          for name in $FORBIDDEN; do
+            if strings "$BIN" | grep -q "$name"; then
+              echo "::error::release binary contains debug-only env name '$name' — a #[cfg(debug_assertions)] guard was dropped (regression of #161)."
+              fail=1
+            else
+              echo "ok: '$name' absent from the release binary"
+            fi
+          done
+          exit $fail

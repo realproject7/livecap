@@ -427,6 +427,17 @@ mod tests {
         let segments_400 = run(400);
         let segments_2000 = run(2000);
 
+        // Guard against a vacuous pass (#176): if this Silero build ever stops
+        // classifying the synthetic generator as speech, both runs return 0 and the
+        // `<=` below would pass silently (0 <= 0). Require the baseline to have
+        // produced segments so the comparison is real — a failure here signals the
+        // synthetic fixture needs porting to a real-speech WAV (cf. force_cut_wav).
+        assert!(
+            !segments_400.is_empty(),
+            "precondition: the synthetic generator must be detected as speech; 0 segments \
+             makes the redemption comparison vacuous (Silero build changed?)"
+        );
+
         // Longer redemption bridges more pauses, so it must not produce more
         // segments than the short one.
         assert!(
@@ -464,10 +475,17 @@ mod tests {
         }
     }
 
-    // NOTE: the force-cut → SpeechEnd no-duplication / no-panic invariant (#138/
-    // #162) is covered by the REAL-SPEECH integration test in
-    // `tests/force_cut_wav.rs`. A synthetic-harmonic unit test cannot exercise
-    // it: this Silero build never classifies the generator's output as speech,
-    // so the force-cut path is never entered (the earlier synthetic test was
-    // vacuous and gave false confidence).
+    // NOTE (#176 — corrected): the force-cut → natural-SpeechEnd no-duplication /
+    // no-panic invariant (#138/#162) is covered by the REAL-SPEECH integration
+    // test in `tests/force_cut_wav.rs`, which drives the exact production path with
+    // realistic utterance timing (the #162 panic reproduced only there). The
+    // synthetic-harmonic generator above IS classified as speech by this Silero
+    // build — `vad_state_is_maintained_across_chunks` asserts non-empty segments
+    // and passes, so the earlier claim that it is "never" detected was wrong — but
+    // the continuous synthetic signal does not reproduce the force-cut → natural
+    // end sequence. Because these two unit tests DO depend on synthetic detection,
+    // they are Silero-version-sensitive: a model bump that changes detection would
+    // fail `vad_state_is_maintained_across_chunks` (and trip the vacuity guard in
+    // `longer_redemption_does_not_fragment_more`), signalling the fixtures need a
+    // refresh rather than passing on false confidence.
 }
