@@ -207,14 +207,6 @@ export class FeedState {
     );
   }
 
-  /** Most recent finalized source lines, oldest first (reply-chip context). */
-  recentSources(count: number): string[] {
-    return this.blocks
-      .filter((block) => block.id !== null)
-      .slice(-count)
-      .map((block) => block.source);
-  }
-
   private newBlock(channel: Channel): CaptionBlock {
     this.keyCounter += 1;
     return {

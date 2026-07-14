@@ -72,8 +72,6 @@ export interface ReviewSurface {
   hide: () => void;
   /** Whether the surface is currently shown. */
   isOpen: () => boolean;
-  /** Register a coaching card so a later "coaching" result can fill it. */
-  registerCoachingCard: (id: number) => CoachingCard;
   /** Look up a coaching card by id (for routing results / failures). */
   coachingCard: (id: number) => CoachingCard | undefined;
 }
@@ -372,7 +370,6 @@ export function buildReview(callbacks: ReviewCallbacks): ReviewSurface {
       open = false;
       root.classList.remove("open");
     },
-    registerCoachingCard,
     coachingCard: (id) => coachingCards.get(id),
   };
 }
