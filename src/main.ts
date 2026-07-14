@@ -15,6 +15,7 @@ import {
   type AppSettings,
 } from "./app-settings";
 import { bootstrap } from "./bootstrap";
+import { clockLabel } from "./clock";
 import {
   buildDashboard,
   loadArchivedSession,
@@ -22,6 +23,8 @@ import {
   loadSessionIndex,
   type DashboardSurface,
 } from "./dashboard";
+import { DEFAULT_POOL_USD, DEFAULT_RESET_DAY } from "./defaults";
+import { CLOSE_ICON } from "./icons";
 import { LANGUAGES, SOURCE_AUTO_CODE, SOURCE_LANGUAGES, languageByCode } from "./languages";
 import { FeedState, type CaptionBlock } from "./feed-state";
 import { FeedCoalescer, applyShimmerCap } from "./feed-coalescer";
@@ -53,9 +56,13 @@ interface ChromePayload {
 
 const CHROME_HIDE_MS = 3000;
 const TOAST_MS = 4000;
-/** TTS voice language for the coaching playback (#82). The meeting language is
- *  English (src/host/start-config.ts MEETING_LANGUAGE); the rewrite is in that
- *  language, so the voice is English. */
+/** TTS voice language for the coaching playback (#82). Conceptually coupled to
+ *  the meeting language: the coaching rewrite is spoken in whatever language
+ *  reply/quick-translate uses, which for the auto-detect default is English
+ *  (`AUTO_MEETING_LANGUAGE` in src/host/start-config.ts). This BCP-47 tag mirrors
+ *  that as a webview-side constant — the two are linked by this cross-reference,
+ *  not a shared source; if the meeting language ever stops being English, update
+ *  both. */
 const MEETING_VOICE_LANG = "en-US";
 
 const ICONS = {
@@ -70,8 +77,7 @@ const ICONS = {
     '<svg viewBox="0 0 12 12" fill="currentColor" aria-hidden="true"><path d="M2 1l8 6.2-3.6.5L8.2 11l-1.6.7-1.7-3.2L2 11.2z"/></svg>',
   pin: '<svg viewBox="0 0 12 12" fill="currentColor" aria-hidden="true"><path d="M7.3.9 11.1 4.7a.7.7 0 0 1-.46 1.19l-1.83.2-1.6 1.6.36 2.2a.7.7 0 0 1-1.19.6L4.2 8.16 1.6 10.75a.6.6 0 0 1-.85-.85L3.34 7.3 1.51 5.41a.7.7 0 0 1 .6-1.19l2.2.36 1.6-1.6.2-1.83A.7.7 0 0 1 7.3.9Z"/></svg>',
   mode: '<svg viewBox="0 0 12 12" fill="currentColor" aria-hidden="true"><rect x="1" y="1.5" width="10" height="3.2" rx="1.4"/><rect x="2.5" y="6.2" width="7" height="2.2" rx="1.1"/><rect x="4" y="9.8" width="4" height="1.6" rx="0.8"/></svg>',
-  close:
-    '<svg viewBox="0 0 12 12" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" fill="none" aria-hidden="true"><path d="M3 3l6 6M9 3l-6 6"/></svg>',
+  close: CLOSE_ICON,
 };
 
 const state: ShellState = { mode: "panel", clickThrough: false, pinned: true, live: false };
@@ -201,8 +207,8 @@ let appSettings: AppSettings = {
   targetLanguage: "ko",
   sourceLanguage: "auto", // #94: per-utterance auto-detect until the user picks
   sttModel: "small", // #110: default whisper model until the user picks
-  poolUsd: 20,
-  resetDay: 1,
+  poolUsd: DEFAULT_POOL_USD,
+  resetDay: DEFAULT_RESET_DAY,
   autoSwitch: true,
   captionSize: "m",
   capsuleContent: "translation",
@@ -456,11 +462,6 @@ function updateBlockEl(block: CaptionBlock): void {
     else if (block.state === "failed") tr.textContent = "translation unavailable — ⟳ to retry";
     else tr.textContent = "";
   }
-}
-
-function clockLabel(epochMs: number): string {
-  const date = new Date(epochMs);
-  return `${String(date.getHours()).padStart(2, "0")}:${String(date.getMinutes()).padStart(2, "0")}`;
 }
 
 /* ---- scroll: history with a "↓ live" snap-back chip ---- */

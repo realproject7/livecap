@@ -37,6 +37,7 @@ import {
 } from "@livecap/archive";
 import type { BoardData, CaptionEntry, MetricsData } from "@livecap/archive";
 
+import { clockLabel } from "../clock.ts";
 import type { Channel, CoachingItemWire, GaugeWire, HostInbound, HostOutbound } from "../protocol.ts";
 import { coachingAmendKeys } from "./coaching-keys.ts";
 import { detectClaudeCli } from "./detect-cli.ts";
@@ -59,8 +60,10 @@ const CLI_CONTEXT_PAIRS = 1;
  *  window, far below the ~2h "prompt too long" cliff, with ample headroom. */
 const CLI_ROLLOVER_CACHE_READ_TOKENS = 120_000;
 const SUMMARY_TICK_MS = 5_000;
-/** Recent transcript lines fed as context to a targeted analysis (#80). */
-const ANALYZE_CONTEXT_LINES = 10;
+/** Recent transcript lines fed as context to the on-demand extras (reply
+ *  suggestions #79 and targeted analysis #80) — one window so the two can't
+ *  drift. */
+const EXTRAS_CONTEXT_LINES = 10;
 const WATCHDOG_TICK_MS = 15_000;
 const DRAIN_TIMEOUT_MS = 20_000;
 /** Liveness heartbeat for the in-progress recording (#69): the writer touches
@@ -86,13 +89,6 @@ interface CaptionMeta {
   /** Spoken duration in ms (#81/#78) — accumulated into the FinalizedRecord[]
    *  the post-meeting metrics consume. */
   durationMs: number;
-}
-
-function clockLabel(epochMs: number): string {
-  const date = new Date(epochMs);
-  const hh = String(date.getHours()).padStart(2, "0");
-  const mm = String(date.getMinutes()).padStart(2, "0");
-  return `${hh}:${mm}`;
 }
 
 function fileNamePrefix(epochMs: number): string {
@@ -631,7 +627,7 @@ export class HostSession {
   private async onReply(id: number, intent: ReplyIntent): Promise<void> {
     if (!this.extras) return;
     try {
-      const result = await this.extras.suggestReply(intent, this.transcriptLines.slice(-10));
+      const result = await this.extras.suggestReply(intent, this.transcriptLines.slice(-EXTRAS_CONTEXT_LINES));
       this.emit({ type: "replyResult", id, intent, text: result.text });
       this.emitGauge(); // extras spend changed → refresh the gauge
     } catch (error) {
@@ -654,7 +650,7 @@ export class HostSession {
     try {
       const result = await this.extras.analyzeAndRespond(
         meta.text,
-        this.transcriptLines.slice(-ANALYZE_CONTEXT_LINES),
+        this.transcriptLines.slice(-EXTRAS_CONTEXT_LINES),
       );
       this.emit({ type: "analysis", cardId, analysis: result.analysis, reply: result.reply });
       this.emitGauge(); // extras spend changed → refresh the gauge

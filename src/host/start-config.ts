@@ -6,6 +6,7 @@
 
 import { DEFAULT_EXTRAS_BUDGET_USD } from "@livecap/engine";
 
+import { DEFAULT_POOL_USD, DEFAULT_RESET_DAY } from "../defaults.ts";
 import { languageByCode, SOURCE_AUTO_CODE } from "../languages.ts";
 import type { EnginePref, HostInbound } from "../protocol.ts";
 
@@ -15,7 +16,9 @@ type StartMessage = Extract<HostInbound, { type: "start" }>;
  *  language (§8.5), and the archive header's source label reflects it. #94 lets
  *  the user pick that spoken language; when they leave it on "auto" (per-utterance
  *  whisper detection, the default) there is no single spoken language, so reply/
- *  quick-translate falls back to English — the pre-#94 behavior. */
+ *  quick-translate falls back to English — the pre-#94 behavior. Cross-ref: the
+ *  webview's coaching TTS voice (`MEETING_VOICE_LANG` in src/main.ts) mirrors this
+ *  as a BCP-47 tag; the two are conceptually coupled, so keep them in step. */
 const AUTO_MEETING_LANGUAGE = "English";
 /** Archive header source label (§8.9) for auto-detect (#94/#175): a neutral
  *  "AUTO" — detection is per-utterance, so no one language is the source. A
@@ -67,7 +70,7 @@ export function resolveStartConfig(message: StartMessage): ResolvedStartConfig {
     sourceLangCode: source ? source.archiveLabel : AUTO_SOURCE_LABEL,
     targetLangCode: language.archiveLabel,
     enginePref: message.enginePref === "local" ? "local" : "cli",
-    poolUsd: Number.isFinite(message.poolUsd) && message.poolUsd > 0 ? message.poolUsd : 20,
+    poolUsd: Number.isFinite(message.poolUsd) && message.poolUsd > 0 ? message.poolUsd : DEFAULT_POOL_USD,
     resetDay: clampResetDay(message.resetDay),
     autoSwitch: message.autoSwitch !== false,
     archiveAutoSave: message.archiveAutoSave !== false,
@@ -89,6 +92,6 @@ function resolveChannelsNote(captureSystem: boolean, captureMic: boolean): strin
 }
 
 function clampResetDay(day: number): number {
-  if (!Number.isFinite(day)) return 1;
+  if (!Number.isFinite(day)) return DEFAULT_RESET_DAY;
   return Math.min(28, Math.max(1, Math.floor(day)));
 }

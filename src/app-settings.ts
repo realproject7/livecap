@@ -1,7 +1,10 @@
 // Webview mirror of the Rust AppSettings (src-tauri/src/settings.rs) plus
 // small pure helpers shared by onboarding and the Settings sheet (#12).
 
-export type EnginePref = "cli" | "local";
+// EnginePref is defined once, in the wire protocol; imported for local use and
+// re-exported so the settings-sheet/onboarding consumers keep a single import site.
+import type { EnginePref } from "./protocol";
+export type { EnginePref };
 export type CaptionSize = "s" | "m" | "l";
 /** What the one-line Capsule shows (#97). */
 export type CapsuleContent = "caption" | "translation" | "both";
