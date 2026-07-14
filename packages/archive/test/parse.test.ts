@@ -106,6 +106,23 @@ describe("parseSession — round-trips the real writer output", () => {
     expect(parsed.entries).toEqual(entries);
   });
 
+  it("does not fragment a board item that itself contains the ' · ' separator (#178)", () => {
+    const final: FinalBrief = {
+      ...FINAL,
+      board: {
+        decisions: ["Ship v2 · notify design team"], // ONE decision with a middot
+        actionItems: [],
+        openQuestions: [],
+      },
+    };
+    const parsed = parseSession(writeSession(META, ENTRIES, final));
+    // Stays ONE decision — pre-fix it split into "Ship v2" + "notify design team".
+    expect(parsed.board.decisions).toHaveLength(1);
+    // The middot is swapped for a look-alike U+2027 so it can't be mistaken for
+    // the separator; the item is otherwise intact.
+    expect(parsed.board.decisions[0]).toBe("Ship v2 ‧ notify design team");
+  });
+
   it("preserves a source line that itself contains an em-dash separator", () => {
     const entries: CaptionEntry[] = [
       { speaker: "them", timestamp: "09:00", source: "it works — mostly — for now", target: "대체로 작동" },

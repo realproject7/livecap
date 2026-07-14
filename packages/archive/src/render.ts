@@ -34,11 +34,24 @@ function renderMetaLine(m: ArchiveModel): string {
   );
 }
 
+/** Board items are joined with " · " and split back on it by parse.ts, so a
+ *  single item that itself contains " · " (natural writing; "·" is also a common
+ *  Korean bullet) would round-trip as TWO items. Neutralize an item-internal
+ *  " · " by swapping its U+00B7 middot for a visually-similar U+2027 (‧) so it no
+ *  longer matches the U+00B7 separator (#178). Only the exact " <U+00B7> "
+ *  sequence is touched — a bare "·" is left alone. The parser never unescapes,
+ *  so the item reads back with the look-alike (a near-invisible change) instead
+ *  of being fragmented. */
+function escapeBoardItem(item: string): string {
+  return item.split(" · ").join(" ‧ ");
+}
+
 function renderBoard(board: BoardData): string {
+  const join = (items: string[]): string => items.map(escapeBoardItem).join(" · ");
   let out = "";
-  if (board.decisions.length > 0) out += `**Decisions** — ${board.decisions.join(" · ")}\n`;
-  if (board.actionItems.length > 0) out += `**Action items** — ${board.actionItems.join(" · ")}\n`;
-  if (board.openQuestions.length > 0) out += `**Open questions** — ${board.openQuestions.join(" · ")}\n`;
+  if (board.decisions.length > 0) out += `**Decisions** — ${join(board.decisions)}\n`;
+  if (board.actionItems.length > 0) out += `**Action items** — ${join(board.actionItems)}\n`;
+  if (board.openQuestions.length > 0) out += `**Open questions** — ${join(board.openQuestions)}\n`;
   return out;
 }
 
