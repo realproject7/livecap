@@ -483,25 +483,45 @@ fn clean_repetitive_text(text: &str) -> String {
     final_text
 }
 
+/// Whisper hallucinations on silence/music/outro — the stock phrases it emits
+/// when there is no real speech.
+const MEANINGLESS_PATTERNS: [&str; 9] = [
+    "thank you for watching",
+    "thanks for watching",
+    "like and subscribe",
+    "music playing",
+    "applause",
+    "laughter",
+    "um um um",
+    "uh uh uh",
+    "ah ah ah",
+];
+
 /// Check for obviously meaningless patterns (whisper hallucinations on
 /// silence/music).
+///
+/// A pattern matches ONLY when it is *anchored* to the whole utterance, never as
+/// a substring inside real speech (#172): matching a bare `contains()` dropped
+/// legitimate captions like "the applause at the end was huge" — the entire
+/// caption was silently replaced with empty text. A pattern counts as a
+/// hallucination only when, after normalization (case-fold + terminal
+/// punctuation/whitespace strip so "Thanks for watching." matches), it is:
+///   (a) the entire utterance ("applause", "thanks for watching."),
+///   (b) a bracketed/parenthesized stage direction of it ("[applause]",
+///       "(laughter)"), or
+///   (c) the pattern repeated back-to-back ("applause applause applause").
+/// The confidence-floor gate (#92) already covers most silence hallucinations.
 fn is_meaningless_output(text: &str) -> bool {
-    let text_lower = text.to_lowercase();
+    let normalized = normalize_utterance(text);
+    // Peel one layer of stage-direction brackets, then re-normalize the inner so
+    // "[Applause.]" / "(laughter)" reduce to the bare pattern too.
+    let core = match strip_stage_direction(&normalized) {
+        Some(inner) => normalize_utterance(inner),
+        None => normalized,
+    };
 
-    let meaningless_patterns = [
-        "thank you for watching",
-        "thanks for watching",
-        "like and subscribe",
-        "music playing",
-        "applause",
-        "laughter",
-        "um um um",
-        "uh uh uh",
-        "ah ah ah",
-    ];
-
-    for pattern in &meaningless_patterns {
-        if text_lower.contains(pattern) {
+    for pattern in MEANINGLESS_PATTERNS {
+        if core == pattern || is_pattern_repeated(&core, pattern) {
             return true;
         }
     }
@@ -513,6 +533,38 @@ fn is_meaningless_output(text: &str) -> bool {
     }
 
     false
+}
+
+/// Lower-case and strip terminal whitespace + sentence punctuation, so a stored
+/// pattern matches regardless of case or a trailing "." / "!" / "…" (#172).
+/// Deliberately leaves brackets — [`strip_stage_direction`] handles those — and
+/// internal punctuation, so a real sentence is never collapsed onto a pattern.
+fn normalize_utterance(text: &str) -> String {
+    text.to_lowercase()
+        .trim_matches(|c: char| {
+            c.is_whitespace() || matches!(c, '.' | ',' | '!' | '?' | ';' | ':' | '…' | '"' | '\'')
+        })
+        .to_string()
+}
+
+/// Peel one matching pair of stage-direction brackets — `[applause]`,
+/// `(laughter)`, `*applause*` — returning the inner text. `None` when the
+/// utterance is not bracketed on both ends (so real speech is untouched).
+fn strip_stage_direction(text: &str) -> Option<&str> {
+    let inner = text.strip_prefix(|c: char| matches!(c, '[' | '(' | '{' | '<' | '*'))?;
+    inner.strip_suffix(|c: char| matches!(c, ']' | ')' | '}' | '>' | '*'))
+}
+
+/// True when `core` is `pattern` repeated ≥2× (a stutter hallucination like
+/// "applause applause"). The single occurrence is handled by direct equality.
+fn is_pattern_repeated(core: &str, pattern: &str) -> bool {
+    let pattern_words: Vec<&str> = pattern.split_whitespace().collect();
+    let core_words: Vec<&str> = core.split_whitespace().collect();
+    let p = pattern_words.len();
+    if p == 0 || core_words.len() < p * 2 || !core_words.len().is_multiple_of(p) {
+        return false;
+    }
+    core_words.chunks(p).all(|chunk| chunk == pattern_words.as_slice())
 }
 
 /// Collapse consecutive repetitions of the same word.
@@ -608,9 +660,46 @@ mod tests {
     }
 
     #[test]
-    fn filters_hallucination_patterns() {
-        assert_eq!(clean_repetitive_text("Thanks for watching everyone"), "");
+    fn filters_anchored_hallucination_patterns() {
+        // #172: only anchored forms are hallucinations. Whole utterance (with a
+        // trailing "." after normalization), bracketed/parenthesized stage
+        // directions, and back-to-back repeats all filter to empty.
+        for hallucination in [
+            "applause",
+            "[applause]",
+            "(laughter)",
+            "thanks for watching.",
+            "Thanks for watching!",
+            "Like and subscribe",
+            "[ Music playing ]",
+            "applause applause applause",
+        ] {
+            assert_eq!(
+                clean_repetitive_text(hallucination),
+                "",
+                "{hallucination:?} should be filtered as a hallucination"
+            );
+        }
+        // The repeated-character heuristic is retained.
         assert_eq!(clean_repetitive_text("aaaaaaaaaaaaaa"), "");
+    }
+
+    #[test]
+    fn keeps_real_sentences_containing_pattern_words() {
+        // #172 regression: a bare `contains()` dropped these entirely — the whole
+        // caption was silently lost. Anchored matching keeps them verbatim.
+        for sentence in [
+            "the applause at the end was huge",
+            "there was laughter in the room",
+            "she got a huge round of applause",
+            "Thanks for watching everyone", // pattern is a prefix, not the whole line
+        ] {
+            assert_eq!(
+                clean_repetitive_text(sentence),
+                sentence,
+                "{sentence:?} contains a pattern word but is real speech — must survive"
+            );
+        }
     }
 
     #[test]
