@@ -44,6 +44,22 @@ export class FeedState {
   }
 
   /**
+   * Clear ALL state so a new session starts empty (#171). The feed is a
+   * long-lived webview singleton; without this, a second session in the same app
+   * run inherits the first's blocks, ids, live partials, keys, and eviction
+   * count. Nothing is lost — every finalized caption is already durable in the
+   * session archive (#11). Mutates the `blocks` array in place so existing
+   * references (shimmer cap, heartbeat) observe the empty feed.
+   */
+  reset(): void {
+    this.blocks.length = 0;
+    this.byId.clear();
+    this.partials.clear();
+    this.keyCounter = 0;
+    this.evicted = 0;
+  }
+
+  /**
    * Enforce the render window (#57): while more than `windowSize` blocks are
    * held, drop the oldest ones — skipping pinned blocks and live partials,
    * which are never evicted (so the total may exceed the window when old

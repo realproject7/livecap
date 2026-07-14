@@ -1077,9 +1077,52 @@ async function promptSilenceStop(sinceMs: number): Promise<void> {
   else void hostRequest({ type: "silenceSnooze" });
 }
 
+/** #171: clear every session-scoped webview singleton so a new session never
+ *  inherits the previous one's feed, cards, summary/board, or archive path. Run
+ *  at the transition INTO a new session (not on Stop), so the just-ended
+ *  session's review screen keeps the state it already captured. Session-scoped
+ *  state audited: `feed` (FeedState) + its `blockEls` DOM, `feedCoalescer`,
+ *  `shimmerEl`, `atBottom`, the `pendingCards`/`analysisCards` result cards, and
+ *  the review inputs `summaryLine`/`latestSummary`/`latestBoard`/
+ *  `latestArchivePath`/`pendingMetrics`. (`coachingCards` lives on the review
+ *  surface, dismissed below; `channels` is re-seeded each start by
+ *  `session://channels`; `requestCounter` stays monotonic to keep card ids
+ *  unique.) */
+function resetSessionState(): void {
+  // Caption feed: model + its DOM nodes (the permanent #feed-note stays).
+  feed.reset();
+  for (const el of blockEls.values()) el.remove();
+  blockEls.clear();
+  feedCoalescer.drain(); // discard block writes queued for the old feed
+  shimmerEl = null;
+  atBottom = true;
+  feedNote.classList.remove("visible");
+  renderPinned(); // pinned dock rebuilds empty from the reset feed
+
+  // Inline result / analysis cards (§8.5 / #80) + their DOM.
+  cardsEl.replaceChildren();
+  pendingCards.clear();
+  analysisCards.clear();
+
+  // Post-meeting review inputs (#81) — must not bleed into the next session.
+  summaryLine = "";
+  latestSummary = [];
+  latestBoard = { decisions: [], actionItems: [], openQuestions: [] };
+  latestArchivePath = null;
+  pendingMetrics = null;
+}
+
 void listen<SessionStatus>("session://status", (event) => {
+  const prevPhase = phase;
   phase = event.payload.phase;
   statusDetail = event.payload.detail ?? "";
+  // #171: a new session is beginning (a non-active phase → starting|live). Reset
+  // all session-scoped state BEFORE its events arrive so it never inherits the
+  // previous session's feed/cards/summary/board/archive path. Guarded to the
+  // idle→start edge so pause/resume and the starting→live progression don't
+  // re-clear a live session.
+  const wasActive = prevPhase === "starting" || prevPhase === "live" || prevPhase === "paused";
+  if (!wasActive && (phase === "starting" || phase === "live")) resetSessionState();
   // A new session is starting — dismiss the previous review screen so it never
   // overlaps the live feed.
   if ((phase === "starting" || phase === "live") && review.isOpen()) review.hide();
