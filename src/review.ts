@@ -115,7 +115,7 @@ export function renderBetter(parent: HTMLElement, better: string, changes: { fro
 /**
  * Populate `target` with the meeting board: one `board-row` (label + `<ul>`) per
  * non-empty section — Decisions / Action items / Open questions — or a "—"
- * placeholder when every section is empty. Clears `target` first, so it is safe
+ * dash when every section is empty. Clears `target` first, so it is safe
  * to re-run. Exported and shared by the review surface and the dashboard so the
  * two Board renderings can't drift; each caller owns its own container element
  * (the review reuses its board node; the dashboard wraps this in `.dash-board`).

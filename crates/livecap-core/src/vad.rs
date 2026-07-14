@@ -15,13 +15,13 @@ use std::time::Duration;
 /// Silero VAD requires 16 kHz input.
 pub const VAD_SAMPLE_RATE: u32 = 16000;
 
-/// Placeholder confidence for a segment we cut/ended ourselves (force-cut on a
+/// Estimated confidence for a segment we cut/ended ourselves (force-cut on a
 /// very long utterance, or a flush at capture stop) rather than one Silero
 /// completed on its own. Named so the two forced sites stay in lockstep if these
 /// heuristics are ever retuned.
 const FORCED_SEGMENT_CONFIDENCE: f32 = 0.8;
 
-/// Placeholder confidence for a segment Silero completed via a natural SpeechEnd.
+/// Estimated confidence for a segment Silero completed via a natural SpeechEnd.
 const VAD_SEGMENT_CONFIDENCE: f32 = 0.9;
 
 /// Represents a complete speech segment detected by VAD.
