@@ -34,20 +34,15 @@ function renderMetaLine(m: ArchiveModel): string {
   );
 }
 
-/** Board items are joined with " · " and split back on it by parse.ts, so a
- *  single item that itself contains " · " (natural writing; "·" is also a common
- *  Korean bullet) would round-trip as TWO items. Neutralize an item-internal
- *  " · " by swapping its U+00B7 middot for a visually-similar U+2027 (‧) so it no
- *  longer matches the U+00B7 separator (#178). Only the exact " <U+00B7> "
- *  sequence is touched — a bare "·" is left alone. The parser never unescapes,
- *  so the item reads back with the look-alike (a near-invisible change) instead
- *  of being fragmented. */
-function escapeBoardItem(item: string): string {
-  return item.split(" · ").join(" ‧ ");
-}
-
 function renderBoard(board: BoardData): string {
-  const join = (items: string[]): string => items.map(escapeBoardItem).join(" · ");
+  // Items are joined with " · " and split back on it by parse.ts, so an item that
+  // itself contains " · " (natural writing; "·" is also a common Korean bullet)
+  // would round-trip as TWO items. Swap an item-internal " · " middot (U+00B7) for
+  // a look-alike U+2027 (‧) before joining so it no longer matches the separator
+  // (#178); a bare "·" is untouched, and the parser never unescapes, so the item
+  // reads back with the look-alike (near-invisible) instead of being fragmented.
+  const join = (items: string[]): string =>
+    items.map((item) => item.split(" · ").join(" ‧ ")).join(" · ");
   let out = "";
   if (board.decisions.length > 0) out += `**Decisions** — ${join(board.decisions)}\n`;
   if (board.actionItems.length > 0) out += `**Action items** — ${join(board.actionItems)}\n`;
@@ -100,25 +95,21 @@ export function sanitizeBlock(text: string): string {
  *  it back off (its LOW_CONFIDENCE_SUFFIX). */
 const LOW_CONF_MARKER = " (?)";
 
-/** Defuse a source that ITSELF ends with the low-confidence marker " (?)" (STT
- *  punctuation or a spoken aside) so the parser can't mistake it for the appended
- *  marker and both truncate the caption AND falsely flag it low-confidence (#178).
- *  Swap the trailing ASCII "?" for a look-alike U+FF1F (？) so the suffix is no
- *  longer the exact marker; visually near-identical, and the parser reads it back
- *  verbatim instead of stripping it. Runs AFTER sanitizeInline (which never adds a
- *  trailing " (?)"), so it only ever fires on genuine caption text. */
-function defuseLowConfMarker(source: string): string {
-  return source.endsWith(LOW_CONF_MARKER)
-    ? `${source.slice(0, -LOW_CONF_MARKER.length)} (？)`
-    : source;
-}
-
 /** Render one entry's two lines (header line + `>` translation), trailing \n. */
 export function renderEntryBody(e: CaptionEntry): string {
   const pin = e.pinned ? "📌 " : "";
   const speaker = e.speaker === "me" ? "Me" : "Them";
   const confidence = e.lowConfidence ? LOW_CONF_MARKER : "";
-  const source = defuseLowConfMarker(sanitizeInline(e.source));
+  // Defuse a source that ITSELF ends with the marker " (?)" (STT punctuation / a
+  // spoken aside) so parse.ts can't mistake it for the appended marker and both
+  // truncate the caption AND falsely flag it low-confidence (#178): swap the
+  // trailing ASCII "?" for a look-alike U+FF1F (？). Runs after sanitizeInline
+  // (which never adds a trailing " (?)"), so it only fires on genuine text; the
+  // parser reads it back verbatim instead of stripping it.
+  const sanitized = sanitizeInline(e.source);
+  const source = sanitized.endsWith(LOW_CONF_MARKER)
+    ? `${sanitized.slice(0, -LOW_CONF_MARKER.length)} (？)`
+    : sanitized;
   return `${pin}**${speaker}** (${e.timestamp}) — ${source}${confidence}\n> ${sanitizeInline(e.target)}\n`;
 }
 
