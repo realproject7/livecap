@@ -96,12 +96,30 @@ export function sanitizeBlock(text: string): string {
     .join("\n");
 }
 
+/** The trailing low-confidence marker appended to a source line; parse.ts strips
+ *  it back off (its LOW_CONFIDENCE_SUFFIX). */
+const LOW_CONF_MARKER = " (?)";
+
+/** Defuse a source that ITSELF ends with the low-confidence marker " (?)" (STT
+ *  punctuation or a spoken aside) so the parser can't mistake it for the appended
+ *  marker and both truncate the caption AND falsely flag it low-confidence (#178).
+ *  Swap the trailing ASCII "?" for a look-alike U+FF1F (？) so the suffix is no
+ *  longer the exact marker; visually near-identical, and the parser reads it back
+ *  verbatim instead of stripping it. Runs AFTER sanitizeInline (which never adds a
+ *  trailing " (?)"), so it only ever fires on genuine caption text. */
+function defuseLowConfMarker(source: string): string {
+  return source.endsWith(LOW_CONF_MARKER)
+    ? `${source.slice(0, -LOW_CONF_MARKER.length)} (？)`
+    : source;
+}
+
 /** Render one entry's two lines (header line + `>` translation), trailing \n. */
 export function renderEntryBody(e: CaptionEntry): string {
   const pin = e.pinned ? "📌 " : "";
   const speaker = e.speaker === "me" ? "Me" : "Them";
-  const confidence = e.lowConfidence ? " (?)" : "";
-  return `${pin}**${speaker}** (${e.timestamp}) — ${sanitizeInline(e.source)}${confidence}\n> ${sanitizeInline(e.target)}\n`;
+  const confidence = e.lowConfidence ? LOW_CONF_MARKER : "";
+  const source = defuseLowConfMarker(sanitizeInline(e.source));
+  return `${pin}**${speaker}** (${e.timestamp}) — ${source}${confidence}\n> ${sanitizeInline(e.target)}\n`;
 }
 
 /**
