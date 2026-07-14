@@ -1252,7 +1252,8 @@ let bootCapabilities: Capabilities | null = null;
 let bootSettings: AppSettings | null = null;
 let onboardingDecided = false;
 
-// First run (§8.6): the three onboarding cards, then straight into a session.
+// First run (§8.6): the two onboarding cards, then the idle Start screen (#1 —
+// no auto-start; the user presses Start when ready).
 // Needs BOTH capabilities and settings, so it runs once both have arrived.
 function maybeStartOnboarding(): void {
   if (onboardingDecided || bootCapabilities === null || bootSettings === null) return;
