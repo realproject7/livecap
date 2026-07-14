@@ -15,7 +15,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, Command, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::Duration;
 
 use livecap_core::model::DEFAULT_MODEL;
 use livecap_core::{CaptionKind, CaptionPipeline, ModelManager, PipelineConfig};
@@ -186,13 +186,6 @@ fn emit_status(app: &AppHandle, phase: Phase, detail: Option<String>) {
             detail,
         },
     );
-}
-
-fn now_epoch_ms() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_millis() as u64)
-        .unwrap_or(0)
 }
 
 fn is_executable(path: &Path) -> bool {
@@ -623,7 +616,7 @@ async fn start_inner(app: &AppHandle) -> Result<Option<String>, String> {
             let Some(mapped) = BridgeCaption::from_event(
                 event,
                 || session.next_caption_id.fetch_add(1, Ordering::Relaxed) + 1,
-                now_epoch_ms(),
+                crate::util::epoch_ms(),
             ) else {
                 continue;
             };

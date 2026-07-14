@@ -15,6 +15,15 @@ use std::time::Duration;
 /// Silero VAD requires 16 kHz input.
 pub const VAD_SAMPLE_RATE: u32 = 16000;
 
+/// Placeholder confidence for a segment we cut/ended ourselves (force-cut on a
+/// very long utterance, or a flush at capture stop) rather than one Silero
+/// completed on its own. Named so the two forced sites stay in lockstep if these
+/// heuristics are ever retuned.
+const FORCED_SEGMENT_CONFIDENCE: f32 = 0.8;
+
+/// Placeholder confidence for a segment Silero completed via a natural SpeechEnd.
+const VAD_SEGMENT_CONFIDENCE: f32 = 0.9;
+
 /// Represents a complete speech segment detected by VAD.
 #[derive(Debug, Clone)]
 pub struct SpeechSegment {
@@ -154,7 +163,7 @@ impl ContinuousVadProcessor {
             samples: std::mem::take(&mut self.current_speech),
             start_timestamp_ms: start_ms,
             end_timestamp_ms: end_ms,
-            confidence: 0.8, // estimated confidence for a forced cut
+            confidence: FORCED_SEGMENT_CONFIDENCE,
         };
         self.speech_start_sample = self.processed_samples;
         Some(segment)
@@ -235,7 +244,7 @@ impl ContinuousVadProcessor {
                 samples: std::mem::take(&mut self.current_speech),
                 start_timestamp_ms: start_ms,
                 end_timestamp_ms: end_ms,
-                confidence: 0.8, // estimated confidence for a forced end
+                confidence: FORCED_SEGMENT_CONFIDENCE,
             });
             self.in_speech = false;
         }
@@ -327,7 +336,7 @@ impl ContinuousVadProcessor {
                             samples: speech_samples,
                             start_timestamp_ms: start_ms,
                             end_timestamp_ms: end_timestamp_ms as f64,
-                            confidence: 0.9, // VAD confidence
+                            confidence: VAD_SEGMENT_CONFIDENCE,
                         };
 
                         info!(

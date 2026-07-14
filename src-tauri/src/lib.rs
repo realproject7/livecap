@@ -15,6 +15,7 @@ mod settings;
 mod snap;
 mod tray;
 mod ui_state;
+mod util;
 
 use std::time::Duration;
 
@@ -38,6 +39,13 @@ pub const CAPABILITIES: Capabilities = Capabilities {
     captioning: true,
     settings: true,
 };
+
+/// Human-readable accelerator hints for the global shortcuts. Single source so
+/// the tray menu's displayed hint (`tray.rs`) and the registration error log
+/// below cannot drift from each other if `shortcut_toggle`/`shortcut_cycle`
+/// change (nothing else ties the label strings to the `Shortcut` values).
+pub(crate) const TOGGLE_LABEL: &str = "Alt+Space";
+pub(crate) const CYCLE_LABEL: &str = "Alt+Shift+Space";
 
 fn shortcut_toggle() -> Shortcut {
     Shortcut::new(Some(Modifiers::ALT), Code::Space)
@@ -434,7 +442,7 @@ pub fn run() {
                 });
             }
 
-            for (name, shortcut) in [("Alt+Space", shortcut_toggle()), ("Alt+Shift+Space", shortcut_cycle())]
+            for (name, shortcut) in [(TOGGLE_LABEL, shortcut_toggle()), (CYCLE_LABEL, shortcut_cycle())]
             {
                 if let Err(e) = app.global_shortcut().register(shortcut) {
                     eprintln!("livecap: could not register global hotkey {name}: {e}");

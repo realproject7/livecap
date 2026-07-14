@@ -28,7 +28,10 @@ fn default_source_language() -> String {
     "auto".into()
 }
 fn default_stt_model() -> String {
-    "small".into()
+    // Single source of truth with the engine's download-failure fallback
+    // (`session.rs` uses `livecap_core::model::DEFAULT_MODEL`): the Settings
+    // default and the fallback must not diverge (#110).
+    livecap_core::model::DEFAULT_MODEL.into()
 }
 fn default_pool() -> f64 {
     20.0
@@ -280,6 +283,18 @@ mod tests {
         std::fs::write(&path, b"{not json").unwrap();
         assert_eq!(load(&path), AppSettings::default());
         std::fs::remove_dir_all(path.parent().unwrap()).ok();
+    }
+
+    #[test]
+    fn default_stt_model_is_a_curated_pick() {
+        // The Settings default now derives from livecap_core's DEFAULT_MODEL; if
+        // the crate ever changes it to a value outside the curated STT_MODELS
+        // list, sanitize() would silently clamp the default away — catch that here.
+        assert!(
+            STT_MODELS.contains(&livecap_core::model::DEFAULT_MODEL),
+            "livecap_core::model::DEFAULT_MODEL ({}) must be one of the curated STT_MODELS",
+            livecap_core::model::DEFAULT_MODEL
+        );
     }
 
     #[test]

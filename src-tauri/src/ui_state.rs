@@ -36,13 +36,6 @@ pub struct UiSnapshot {
     pub age_ms: Option<u64>,
 }
 
-fn now_ms() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_millis() as u64)
-        .unwrap_or(0)
-}
-
 /// Disk-mirror view of a beat (#147): the liveness/wedge detector only needs
 /// the counts and mode, never caption text. `latestSource`/`latestTranslation`
 /// AND `capsuleText` all carry caption content (the capsule line is the latest
@@ -134,6 +127,6 @@ pub fn ui_beat(app: tauri::AppHandle, state: tauri::State<'_, UiState>, beat: Ui
 #[tauri::command]
 pub fn ui_snapshot(state: tauri::State<'_, UiState>) -> UiSnapshot {
     let beat = state.0.lock().expect("ui beat lock").clone();
-    let age_ms = beat.as_ref().map(|b| now_ms().saturating_sub(b.ts));
+    let age_ms = beat.as_ref().map(|b| crate::util::epoch_ms().saturating_sub(b.ts));
     UiSnapshot { beat, age_ms }
 }

@@ -29,7 +29,7 @@ fn icon(live: bool) -> Image<'static> {
 pub fn create(app: &AppHandle, initial_mode: Mode, initial_pinned: bool) -> tauri::Result<()> {
     let caps = crate::CAPABILITIES;
 
-    let toggle = MenuItem::with_id(app, "toggle", "Show/Hide LiveCap", true, Some("Alt+Space"))?;
+    let toggle = MenuItem::with_id(app, "toggle", "Show/Hide LiveCap", true, Some(crate::TOGGLE_LABEL))?;
 
     let mode_items: Vec<(Mode, CheckMenuItem<Wry>)> = Mode::ALL
         .iter()
