@@ -42,7 +42,7 @@ impl StreamResampler {
             // Pass-through; drop any residue from a previous rate.
             self.inner = None;
             self.from_rate = from_rate;
-            self.input_buf.clear();
+            self.drop_residue();
             return Ok(samples.to_vec());
         }
 
@@ -60,7 +60,7 @@ impl StreamResampler {
                 1,
             )?);
             self.from_rate = from_rate;
-            self.input_buf.clear();
+            self.drop_residue();
         }
 
         self.input_buf.extend_from_slice(samples);
@@ -73,6 +73,24 @@ impl StreamResampler {
             out.extend_from_slice(&result[0]);
         }
         Ok(out)
+    }
+
+    /// Discard the sub-`CHUNK_IN` residue buffered at the OLD rate on a rate change
+    /// (#178). This is a DELIBERATE, correct drop, NOT a bug to "fix": those
+    /// samples were captured at the old rate, so they can neither be fed through
+    /// the freshly-rebuilt new-rate resampler (a rate mismatch would itself corrupt
+    /// the output) nor emitted as new-rate pass-through. The loss is bounded (at
+    /// most CHUNK_IN-1 samples, ~21ms at 48kHz) and only occurs at a mid-meeting
+    /// device/rate switch. The count (never any audio) is logged so the drop is
+    /// observable rather than silent — the one thing the finding actually asks for.
+    fn drop_residue(&mut self) {
+        if !self.input_buf.is_empty() {
+            log::debug!(
+                "Resampler: dropping {} buffered old-rate sample(s) at a rate change (#178)",
+                self.input_buf.len()
+            );
+            self.input_buf.clear();
+        }
     }
 }
 
