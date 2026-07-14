@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest";
 
-import { sanitizeChildEnv, detectProxy } from "../src/env";
+import { sanitizeChildEnv, detectProxy, detectCustomEndpoint } from "../src/env";
 
 describe("sanitizeChildEnv", () => {
   it("strips ANTHROPIC_API_KEY and ANTHROPIC_AUTH_TOKEN by default", () => {
@@ -155,5 +155,44 @@ describe("detectProxy (#145)", () => {
 
   it("does not leak the raw value for an unparseable proxy string", () => {
     expect(detectProxy({ HTTPS_PROXY: "://:::bogus" })).toBe("(set)");
+  });
+});
+
+describe("detectCustomEndpoint (#174)", () => {
+  it("returns null when ANTHROPIC_BASE_URL is unset", () => {
+    expect(detectCustomEndpoint({ PATH: "/usr/bin" })).toBeNull();
+  });
+
+  it("returns null for an empty/whitespace value", () => {
+    expect(detectCustomEndpoint({ ANTHROPIC_BASE_URL: "" })).toBeNull();
+    expect(detectCustomEndpoint({ ANTHROPIC_BASE_URL: "   " })).toBeNull();
+  });
+
+  it("surfaces the host[:port] of a set custom endpoint", () => {
+    expect(detectCustomEndpoint({ ANTHROPIC_BASE_URL: "https://gateway.example:8443" })).toBe(
+      "gateway.example:8443",
+    );
+    expect(detectCustomEndpoint({ ANTHROPIC_BASE_URL: "https://relay.corp" })).toBe("relay.corp");
+  });
+
+  it("redacts the path/query and any embedded credentials — host[:port] only", () => {
+    const host = detectCustomEndpoint({
+      ANTHROPIC_BASE_URL: "https://user:s3cret@gateway.example:8443/v1/messages?key=abc",
+    });
+    expect(host).toBe("gateway.example:8443");
+    expect(host).not.toContain("s3cret");
+    expect(host).not.toContain("user");
+    expect(host).not.toContain("v1");
+    expect(host).not.toContain("abc");
+  });
+
+  it("accepts a scheme-less host:port value", () => {
+    expect(detectCustomEndpoint({ ANTHROPIC_BASE_URL: "gateway.example:8443" })).toBe(
+      "gateway.example:8443",
+    );
+  });
+
+  it("does not leak the raw value for an unparseable base URL", () => {
+    expect(detectCustomEndpoint({ ANTHROPIC_BASE_URL: "://:::bogus" })).toBe("(set)");
   });
 });

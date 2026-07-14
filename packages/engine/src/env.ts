@@ -59,19 +59,40 @@ export function detectProxy(base: Record<string, string | undefined>): string | 
   for (const name of PROXY_VARS) {
     for (const key of [name, name.toLowerCase()]) {
       const value = base[key];
-      if (typeof value === "string" && value.trim() !== "") return proxyHost(value.trim());
+      if (typeof value === "string" && value.trim() !== "") return safeHost(value.trim());
     }
   }
   return null;
 }
 
-/** Reduce a proxy URL to `host[:port]`, dropping any embedded credentials/path. */
-function proxyHost(raw: string): string {
+/**
+ * Detect an intentional custom Anthropic endpoint (`ANTHROPIC_BASE_URL`) in the
+ * base environment (#174, sibling of the #145 proxy notice). Like a proxy, it is
+ * NOT stripped — [`sanitizeChildEnv`] deliberately preserves it and its
+ * credentials as a user's explicit choice — but it silently reroutes ALL Claude
+ * CLI transcript traffic to an arbitrary host, so the transcript must never
+ * transit it *silently*: the host surfaces a content-free notice when this
+ * returns non-null.
+ *
+ * Returns a SAFE host label (`host` or `host:port`), or null when unset/blank.
+ * The full URL is never returned or logged — it can embed credentials and a
+ * path/query — and is reduced to host[:port] via the shared [`safeHost`].
+ */
+export function detectCustomEndpoint(base: Record<string, string | undefined>): string | null {
+  const value = base.ANTHROPIC_BASE_URL;
+  if (typeof value === "string" && value.trim() !== "") return safeHost(value.trim());
+  return null;
+}
+
+/** Reduce a proxy / endpoint URL to `host[:port]`, dropping any embedded
+ *  credentials and path/query. Shared by [`detectProxy`] and
+ *  [`detectCustomEndpoint`] so both notices redact identically. */
+function safeHost(raw: string): string {
   try {
     const url = new URL(raw.includes("://") ? raw : `http://${raw}`);
     return url.port ? `${url.hostname}:${url.port}` : url.hostname;
   } catch {
-    // Unparseable value: acknowledge a proxy is set without echoing the raw string.
+    // Unparseable value: acknowledge the reroute is set without echoing the raw string.
     return "(set)";
   }
 }

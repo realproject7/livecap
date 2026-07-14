@@ -12,6 +12,7 @@ import {
   computeMeetingMetrics,
   CreditAccountant,
   detectProxy,
+  detectCustomEndpoint,
   ExtrasBudget,
   ExtrasBudgetExceededError,
   ExtrasPipeline,
@@ -322,6 +323,18 @@ export class HostSession {
       const proxyHost = detectProxy(process.env);
       if (proxyHost) {
         this.emit({ type: "status", detail: `translation traffic is routing through a proxy: ${proxyHost}` });
+      }
+      // Custom-endpoint discipline (#174, sibling of #145): a set
+      // ANTHROPIC_BASE_URL is an intentional reroute — sanitizeChildEnv preserves
+      // it AND its credentials — but it silently sends every translation to an
+      // arbitrary Anthropic-API host, so surface it ONCE per session with only the
+      // safe host (never the URL path/query/credentials), like the proxy notice.
+      const customEndpointHost = detectCustomEndpoint(process.env);
+      if (customEndpointHost) {
+        this.emit({
+          type: "status",
+          detail: `translation traffic is routing to a custom Anthropic endpoint: ${customEndpointHost}`,
+        });
       }
     } else {
       if (resolved.enginePref === "cli") {
