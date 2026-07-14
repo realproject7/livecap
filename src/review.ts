@@ -14,12 +14,8 @@
 // exposes a small imperative API the orchestrator (src/main.ts) drives. The host
 // round-trips stay in main.ts; this module only renders and raises callbacks.
 
+import { CLOSE_ICON } from "./icons";
 import type { BoardWire, CoachingItemWire } from "./protocol";
-
-/** Shared close glyph (matches main.ts ICONS.close) so review cards get the same
- *  clear ✕ as the inline feed cards (#1/#3). */
-const CLOSE_ICON =
-  '<svg viewBox="0 0 12 12" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" fill="none" aria-hidden="true"><path d="M3 3l6 6M9 3l-6 6"/></svg>';
 
 /** One of the user's own utterances, as listed in the coaching tab. */
 export interface MicUtterance {
@@ -72,8 +68,6 @@ export interface ReviewSurface {
   hide: () => void;
   /** Whether the surface is currently shown. */
   isOpen: () => boolean;
-  /** Register a coaching card so a later "coaching" result can fill it. */
-  registerCoachingCard: (id: number) => CoachingCard;
   /** Look up a coaching card by id (for routing results / failures). */
   coachingCard: (id: number) => CoachingCard | undefined;
 }
@@ -116,6 +110,41 @@ export function renderBetter(parent: HTMLElement, better: string, changes: { fro
     parent.appendChild(mark);
     rest = rest.slice(bestAt + bestNeedle.length);
   }
+}
+
+/**
+ * Populate `target` with the meeting board: one `board-row` (label + `<ul>`) per
+ * non-empty section — Decisions / Action items / Open questions — or a "—"
+ * dash when every section is empty. Clears `target` first, so it is safe
+ * to re-run. Exported and shared by the review surface and the dashboard so the
+ * two Board renderings can't drift; each caller owns its own container element
+ * (the review reuses its board node; the dashboard wraps this in `.dash-board`).
+ */
+export function renderBoardInto(target: HTMLElement, board: BoardWire): void {
+  target.replaceChildren();
+  const sections: [string, string[]][] = [
+    ["Decisions", board.decisions],
+    ["Action items", board.actionItems],
+    ["Open questions", board.openQuestions],
+  ];
+  for (const [label, items] of sections) {
+    if (items.length === 0) continue;
+    const row = document.createElement("div");
+    row.className = "board-row";
+    const head = document.createElement("span");
+    head.className = "board-head";
+    head.textContent = label;
+    row.appendChild(head);
+    const ul = document.createElement("ul");
+    for (const item of items) {
+      const li = document.createElement("li");
+      li.textContent = item;
+      ul.appendChild(li);
+    }
+    row.appendChild(ul);
+    target.appendChild(row);
+  }
+  if (target.childElementCount === 0) target.textContent = "—";
 }
 
 function pct(fraction: number): number {
@@ -310,35 +339,6 @@ export function buildReview(callbacks: ReviewCallbacks): ReviewSurface {
     }
   }
 
-  function renderBoard(board: BoardWire): void {
-    boardEl.replaceChildren();
-    const sections: [string, string[]][] = [
-      ["Decisions", board.decisions],
-      ["Action items", board.actionItems],
-      ["Open questions", board.openQuestions],
-    ];
-    for (const [label, items] of sections) {
-      if (items.length === 0) continue;
-      const row = document.createElement("div");
-      row.className = "board-row";
-      const head = document.createElement("span");
-      head.className = "board-head";
-      head.textContent = label;
-      row.appendChild(head);
-      const ul = document.createElement("ul");
-      for (const item of items) {
-        const li = document.createElement("li");
-        li.textContent = item;
-        ul.appendChild(li);
-      }
-      row.appendChild(ul);
-      boardEl.appendChild(row);
-    }
-    if (boardEl.childElementCount === 0) {
-      boardEl.textContent = "—";
-    }
-  }
-
   return {
     el: root,
     isOpen: () => open,
@@ -361,7 +361,7 @@ export function buildReview(callbacks: ReviewCallbacks): ReviewSurface {
         li.textContent = "No summary was generated.";
         summaryEl.appendChild(li);
       }
-      renderBoard(data.board);
+      renderBoardInto(boardEl, data.board);
       renderUtteranceList();
       coachCardsEl.replaceChildren();
       openBtn.disabled = data.archivePath === null;
@@ -372,7 +372,6 @@ export function buildReview(callbacks: ReviewCallbacks): ReviewSurface {
       open = false;
       root.classList.remove("open");
     },
-    registerCoachingCard,
     coachingCard: (id) => coachingCards.get(id),
   };
 }

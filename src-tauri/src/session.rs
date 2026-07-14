@@ -15,7 +15,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, Command, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::Duration;
 
 use livecap_core::model::DEFAULT_MODEL;
 use livecap_core::{CaptionKind, CaptionPipeline, ModelManager, PipelineConfig};
@@ -26,11 +26,15 @@ use crate::bridge::BridgeCaption;
 use crate::settings::SettingsState;
 use crate::tray;
 
-const HOST_EXIT_TIMEOUT: Duration = Duration::from_secs(60);
+/// How long `stop()` waits for the host's `stopped` JSONL event (archive
+/// finalized) after sending `stop`. Since #82 the host deliberately does NOT
+/// exit on stop — it stays alive to serve the review screen's Coaching tab — so
+/// this bounds the wait for that event, not a process exit.
+const HOST_STOPPED_EVENT_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// Bound on the graceful host stop during process teardown (#66). Shorter than
-/// [`HOST_EXIT_TIMEOUT`] because the user is quitting / the process got a
-/// SIGTERM and is expected to disappear promptly; the host's own stop (engine
+/// [`HOST_STOPPED_EVENT_TIMEOUT`] because the user is quitting / the process got
+/// a SIGTERM and is expected to disappear promptly; the host's own stop (engine
 /// SIGTERM + a 2 s grace, then SIGKILL) fits comfortably inside this.
 const SHUTDOWN_HOST_TIMEOUT: Duration = Duration::from_secs(8);
 
@@ -186,13 +190,6 @@ fn emit_status(app: &AppHandle, phase: Phase, detail: Option<String>) {
             detail,
         },
     );
-}
-
-fn now_epoch_ms() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_millis() as u64)
-        .unwrap_or(0)
 }
 
 fn is_executable(path: &Path) -> bool {
@@ -356,7 +353,7 @@ fn spawn_host(app: &AppHandle, start_message: &serde_json::Value) -> Result<Host
         // still waiting for a `stopped` event that will now never arrive (the
         // host crashed inside the stop window), drop the waiter's sender so its
         // bounded wait fails FAST (channel disconnected) instead of idling out
-        // the full HOST_EXIT_TIMEOUT (#169). Harmless no-op after a clean stop
+        // the full HOST_STOPPED_EVENT_TIMEOUT (#169). Harmless no-op after a clean stop
         // (the `stopped` arm already took the slot).
         if let Ok(mut slot) = reader_stopped_signal.lock() {
             slot.take();
@@ -623,7 +620,7 @@ async fn start_inner(app: &AppHandle) -> Result<Option<String>, String> {
             let Some(mapped) = BridgeCaption::from_event(
                 event,
                 || session.next_caption_id.fetch_add(1, Ordering::Relaxed) + 1,
-                now_epoch_ms(),
+                crate::util::epoch_ms(),
             ) else {
                 continue;
             };
@@ -681,7 +678,7 @@ pub async fn stop(app: AppHandle) -> Result<(), String> {
         }
         let _ = write_host_line(&host.stdin, &serde_json::json!({ "type": "stop" }));
         let waited =
-            tauri::async_runtime::spawn_blocking(move || rx.recv_timeout(HOST_EXIT_TIMEOUT)).await;
+            tauri::async_runtime::spawn_blocking(move || rx.recv_timeout(HOST_STOPPED_EVENT_TIMEOUT)).await;
         if !matches!(waited, Ok(Ok(()))) {
             // The host did not confirm in time; the archive working file is still
             // on disk (incremental writes) — nothing is lost. Reap it rather than
@@ -1268,7 +1265,7 @@ mod tests {
 
     #[test]
     fn crashed_host_unblocks_the_stop_waiter_immediately() {
-        // #169: stop() waits on `stopped_signal` up to HOST_EXIT_TIMEOUT (60s). If
+        // #169: stop() waits on `stopped_signal` up to HOST_STOPPED_EVENT_TIMEOUT (60s). If
         // the host crashes inside the stop window it never emits `stopped`; the
         // reader thread's stdout-closed handler drops the waiter's sender so the
         // wait fails FAST (channel disconnected) instead of idling the full
@@ -1285,7 +1282,7 @@ mod tests {
         // The waiter (stop()'s bounded wait) returns at once, and NOT with Ok(()),
         // so stop() takes its reap / fast-fail branch, not "stopped cleanly".
         let start = std::time::Instant::now();
-        let waited = rx.recv_timeout(HOST_EXIT_TIMEOUT);
+        let waited = rx.recv_timeout(HOST_STOPPED_EVENT_TIMEOUT);
         assert!(matches!(
             waited,
             Err(std::sync::mpsc::RecvTimeoutError::Disconnected)
@@ -1293,7 +1290,7 @@ mod tests {
         assert!(!matches!(waited, Ok(())));
         assert!(
             start.elapsed() < Duration::from_secs(1),
-            "a crashed host must not idle the full HOST_EXIT_TIMEOUT"
+            "a crashed host must not idle the full HOST_STOPPED_EVENT_TIMEOUT"
         );
     }
 
@@ -1311,7 +1308,7 @@ mod tests {
         if let Some(tx) = slot.lock().unwrap().take() {
             let _ = tx.send(());
         }
-        assert!(matches!(rx.recv_timeout(HOST_EXIT_TIMEOUT), Ok(())));
+        assert!(matches!(rx.recv_timeout(HOST_STOPPED_EVENT_TIMEOUT), Ok(())));
 
         // Post-stop EOF: slot already None → take() is a harmless no-op.
         assert!(slot.lock().unwrap().take().is_none());

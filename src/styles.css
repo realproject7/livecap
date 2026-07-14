@@ -923,17 +923,6 @@ body[data-capsize="l"] #capsule-view .txt { font-size: 15.5px; }
   gap: 12px;
   margin-top: 8px;
 }
-.ob-select {
-  width: 100%;
-  margin: 2px 0 4px;
-  padding: 8px 10px;
-  border: none;
-  border-radius: 8px;
-  background: var(--surface-3);
-  color: var(--text-original);
-  font-size: 13.5px;
-  font-family: var(--font);
-}
 .ob-actions {
   display: flex;
   flex-direction: column;

@@ -17,37 +17,21 @@ export type {
   ParsedEvent,
 } from "./types";
 
-export { StreamJsonParser } from "./stream-parser";
-export { sanitizeChildEnv, detectProxy, detectCustomEndpoint } from "./env";
-export { buildClaudeArgs, ISOLATION_ARGS, DEFAULT_MODEL } from "./args";
+export { detectProxy, detectCustomEndpoint } from "./env";
 export type { ClaudeArgsOptions } from "./args";
-export {
-  buildSystemPrompt,
-  buildTranslateMessage,
-  buildSummaryMessage,
-  buildGlossarySetupMessage,
-  buildReseedMessage,
-  formatUserMessageLine,
-} from "./prompt";
 export type { PromptOptions } from "./prompt";
 export { findCliBins, probeCapabilities, DEFAULT_CLI_NAMES } from "./detect";
 export type { FindCliOptions, CommandRunner, CommandResult, Capabilities } from "./detect";
 export { TranslationQueue } from "./queue";
 export type { QueueOptions } from "./queue";
-export { ClaudeCliEngine, EngineTurnError, EngineTimeoutError } from "./claude-cli-engine";
+export { ClaudeCliEngine } from "./claude-cli-engine";
 export type { ClaudeCliEngineConfig, EngineHealthEvent } from "./claude-cli-engine";
 
 // Issue #6 — local LLM fallback tier (PROPOSAL §4 tier 2).
 export { LocalLlmEngine } from "./local-llm-engine";
 export type { LocalLlmEngineConfig } from "./local-llm-engine";
 export { stripNonTranslation } from "./translation-guard";
-export {
-  ensureModel,
-  ModelChecksumError,
-  ModelDownloadStallError,
-  nodeDownloadFs,
-  nodeRangeFetcher,
-} from "./model-download";
+export { ensureModel, nodeDownloadFs, nodeRangeFetcher } from "./model-download";
 export type {
   DownloadFs,
   RangeFetcher,
@@ -58,13 +42,12 @@ export { QWEN3_4B_Q4_K_M, LLAMA_CPP_RELEASE } from "./pins";
 export type { ModelArtifact, LlamaCppAsset, LlamaCppReleasePin } from "./pins";
 
 // Issue #7 — credit accounting + auto-fallback policy (PROPOSAL §6/§8.7).
-export { CreditAccountant, periodKeyFor, POOL_PRESETS } from "./credit-ledger";
+export { CreditAccountant } from "./credit-ledger";
 export type {
   CreditConfig,
   CreditEvent,
   GaugeState,
   LedgerFs,
-  PlanId,
 } from "./credit-ledger";
 export { nodeLedgerFs } from "./credit-fs";
 export { FallbackRouter } from "./fallback-router";
@@ -87,10 +70,6 @@ export {
   buildReplyPrompt,
   buildAnalyzeRespondPrompt,
   buildQuickTranslatePrompt,
-  buildCoachPrompt,
-  parseSummaryBoard,
-  parseAnalyzeRespond,
-  parseCoachResult,
 } from "./extras-prompts";
 export type {
   MeetingBoard,

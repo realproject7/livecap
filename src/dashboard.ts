@@ -26,9 +26,11 @@ import { parseSession, type ParsedSession } from "@livecap/archive/src/parse.ts"
 import type { SessionIndexEntry } from "@livecap/archive/src/dashboard.ts";
 import type { CaptionEntry } from "@livecap/archive/src/types.ts";
 
-// The review tab's change-highlighting (#82), reused verbatim so persisted
-// rewrites look the same here as they did when generated (#114).
-import { renderBetter } from "./review";
+import { CLOSE_ICON } from "./icons";
+// The review tab's change-highlighting (#82) and shared board renderer (#179),
+// reused verbatim so persisted rewrites and the Board look the same here as on
+// the review surface (#114).
+import { renderBetter, renderBoardInto } from "./review";
 
 /** One saved session's FULL document as handed over by the Rust
  *  `list_archived_sessions` / `read_archived_session` commands: a file name +
@@ -74,8 +76,6 @@ export interface DashboardModel {
   sessions: IndexedSession[];
 }
 
-const CLOSE_ICON =
-  '<svg viewBox="0 0 12 12" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" fill="none" aria-hidden="true"><path d="M3 3l6 6M9 3l-6 6"/></svg>';
 const BACK_ICON =
   '<svg viewBox="0 0 12 12" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" fill="none" aria-hidden="true"><path d="M7 2.5 3.5 6 7 9.5"/></svg>';
 
@@ -677,29 +677,7 @@ export function buildDashboard(callbacks: DashboardCallbacks): DashboardSurface 
   function renderBoard(session: ParsedSession): HTMLElement {
     const boardEl = document.createElement("div");
     boardEl.className = "dash-board";
-    const sections: [string, string[]][] = [
-      ["Decisions", session.board.decisions],
-      ["Action items", session.board.actionItems],
-      ["Open questions", session.board.openQuestions],
-    ];
-    for (const [label, items] of sections) {
-      if (items.length === 0) continue;
-      const rowEl = document.createElement("div");
-      rowEl.className = "board-row";
-      const head = document.createElement("span");
-      head.className = "board-head";
-      head.textContent = label;
-      rowEl.appendChild(head);
-      const ul = document.createElement("ul");
-      for (const item of items) {
-        const li = document.createElement("li");
-        li.textContent = item;
-        ul.appendChild(li);
-      }
-      rowEl.appendChild(ul);
-      boardEl.appendChild(rowEl);
-    }
-    if (boardEl.childElementCount === 0) boardEl.textContent = "—";
+    renderBoardInto(boardEl, session.board);
     return boardEl;
   }
 

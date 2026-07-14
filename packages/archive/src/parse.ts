@@ -13,6 +13,7 @@
 // dashboard aggregations stay NaN-free (cf. #88).
 
 import { COACHING_ARROW, COACHING_CHANGE_SEP } from "./render";
+import { WORKING_TITLE } from "./sanitize";
 import type { BoardData, CaptionEntry, CoachingData, MetricsData, Speaker } from "./types";
 
 /** Header metadata recovered from the `> …` meta line + the H1 title. */
@@ -52,8 +53,6 @@ export interface ParsedSession {
   isRecording: boolean;
 }
 
-/** Working title the writer uses until finalize (mirrors writer.ts WORKING_TITLE). */
-const WORKING_TITLE = "(recording)";
 
 // The exact separators the renderer emits (render.ts) — kept as named constants
 // so the inversion can never silently drift from the format it mirrors.

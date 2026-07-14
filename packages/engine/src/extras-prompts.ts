@@ -24,7 +24,7 @@ const INTENT_INSTRUCTION: Record<ReplyIntent, string> = {
   suggest: "offer a concrete suggestion",
 };
 
-const DEFAULT_CONTEXT_CAPTIONS = 10;
+export const DEFAULT_CONTEXT_CAPTIONS = 10;
 
 /** Build the summary+board request (one call feeds both — §8.4). */
 export function buildSummaryBoardPrompt(

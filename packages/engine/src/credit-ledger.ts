@@ -9,9 +9,6 @@
 import type { Usage } from "./types";
 
 /** Agent SDK monthly pool presets (PROPOSAL §6). */
-export const POOL_PRESETS = { pro: 20, max5x: 100, max20x: 200 } as const;
-export type PlanId = keyof typeof POOL_PRESETS;
-
 /** Atomic-write filesystem surface (injected). */
 export interface LedgerFs {
   exists(path: string): boolean;
