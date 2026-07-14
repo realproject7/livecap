@@ -483,25 +483,66 @@ fn clean_repetitive_text(text: &str) -> String {
     final_text
 }
 
+/// Whisper hallucinations on silence/music/outro — the stock phrases it emits
+/// when there is no real speech.
+const MEANINGLESS_PATTERNS: [&str; 9] = [
+    "thank you for watching",
+    "thanks for watching",
+    "like and subscribe",
+    "music playing",
+    "applause",
+    "laughter",
+    "um um um",
+    "uh uh uh",
+    "ah ah ah",
+];
+
 /// Check for obviously meaningless patterns (whisper hallucinations on
 /// silence/music).
+///
+/// A pattern matches ONLY when it is *anchored* to the whole utterance, never as
+/// a substring inside real speech (#172): matching a bare `contains()` dropped
+/// legitimate captions like "the applause at the end was huge" — the entire
+/// caption was silently replaced with empty text. A pattern counts as a
+/// hallucination only when, after normalization (case-fold + terminal
+/// punctuation/whitespace strip so "Thanks for watching." matches), it is:
+///   (a) the entire utterance ("applause", "thanks for watching."),
+///   (b) a *matched* bracketed/parenthesized stage direction of it ("[applause]",
+///       "(laughter)"), or
+///   (c) the pattern repeated back-to-back ("applause applause applause").
+/// (a) and (c) are one test: the words of the core are the pattern's words
+/// repeated k≥1 times. The confidence-floor gate (#92) already covers most
+/// silence hallucinations.
 fn is_meaningless_output(text: &str) -> bool {
-    let text_lower = text.to_lowercase();
+    let normalized = normalize_utterance(text);
+    // Peel one MATCHED pair of stage-direction delimiters and re-normalize the
+    // inner, so "[Applause.]" / "(laughter)" reduce to the bare pattern. A
+    // mismatched pair ("[applause)") is NOT a stage direction — leave it whole so
+    // it never silently drops. Delimiters are ASCII, so the byte slice is safe.
+    let core = match (normalized.chars().next(), normalized.chars().last()) {
+        (Some(open), Some(close))
+            if normalized.len() >= 2
+                && matches!(
+                    (open, close),
+                    ('[', ']') | ('(', ')') | ('{', '}') | ('<', '>') | ('*', '*')
+                ) =>
+        {
+            normalize_utterance(&normalized[open.len_utf8()..normalized.len() - close.len_utf8()])
+        }
+        _ => normalized,
+    };
 
-    let meaningless_patterns = [
-        "thank you for watching",
-        "thanks for watching",
-        "like and subscribe",
-        "music playing",
-        "applause",
-        "laughter",
-        "um um um",
-        "uh uh uh",
-        "ah ah ah",
-    ];
-
-    for pattern in &meaningless_patterns {
-        if text_lower.contains(pattern) {
+    let core_words: Vec<&str> = core.split_whitespace().collect();
+    for pattern in MEANINGLESS_PATTERNS {
+        let pattern_words: Vec<&str> = pattern.split_whitespace().collect();
+        let p = pattern_words.len();
+        // core == pattern (k=1) OR pattern repeated back-to-back (k≥2): the core's
+        // words split into equal-length chunks that each equal the pattern.
+        if p > 0
+            && core_words.len() >= p
+            && core_words.len().is_multiple_of(p)
+            && core_words.chunks(p).all(|chunk| chunk == pattern_words.as_slice())
+        {
             return true;
         }
     }
@@ -513,6 +554,18 @@ fn is_meaningless_output(text: &str) -> bool {
     }
 
     false
+}
+
+/// Lower-case and strip terminal whitespace + sentence punctuation, so a stored
+/// pattern matches regardless of case or a trailing "." / "!" / "…" (#172).
+/// Deliberately leaves brackets (the caller peels a matched pair) and internal
+/// punctuation, so a real sentence is never collapsed onto a pattern.
+fn normalize_utterance(text: &str) -> String {
+    text.to_lowercase()
+        .trim_matches(|c: char| {
+            c.is_whitespace() || matches!(c, '.' | ',' | '!' | '?' | ';' | ':' | '…' | '"' | '\'')
+        })
+        .to_string()
 }
 
 /// Collapse consecutive repetitions of the same word.
@@ -608,9 +661,60 @@ mod tests {
     }
 
     #[test]
-    fn filters_hallucination_patterns() {
-        assert_eq!(clean_repetitive_text("Thanks for watching everyone"), "");
+    fn filters_anchored_hallucination_patterns() {
+        // #172: only anchored forms are hallucinations. Whole utterance (with a
+        // trailing "." after normalization), bracketed/parenthesized stage
+        // directions, and back-to-back repeats all filter to empty.
+        for hallucination in [
+            "applause",
+            "[applause]",
+            "(laughter)",
+            "thanks for watching.",
+            "Thanks for watching!",
+            "Like and subscribe",
+            "[ Music playing ]",
+            "applause applause applause",
+        ] {
+            assert_eq!(
+                clean_repetitive_text(hallucination),
+                "",
+                "{hallucination:?} should be filtered as a hallucination"
+            );
+        }
+        // The repeated-character heuristic is retained.
         assert_eq!(clean_repetitive_text("aaaaaaaaaaaaaa"), "");
+    }
+
+    #[test]
+    fn keeps_real_sentences_containing_pattern_words() {
+        // #172 regression: a bare `contains()` dropped these entirely — the whole
+        // caption was silently lost. Anchored matching keeps them verbatim.
+        for sentence in [
+            "the applause at the end was huge",
+            "there was laughter in the room",
+            "she got a huge round of applause",
+            "Thanks for watching everyone", // pattern is a prefix, not the whole line
+        ] {
+            assert_eq!(
+                clean_repetitive_text(sentence),
+                sentence,
+                "{sentence:?} contains a pattern word but is real speech — must survive"
+            );
+        }
+    }
+
+    #[test]
+    fn mismatched_delimiters_are_not_stage_directions() {
+        // #172 (RE1): only a MATCHED delimiter pair is a stage direction. A
+        // mismatched pair must not be peeled-and-dropped — it survives verbatim
+        // rather than silently collapsing onto a pattern.
+        for s in ["[applause)", "(laughter]", "applause]", "[applause"] {
+            assert_eq!(
+                clean_repetitive_text(s),
+                s,
+                "{s:?} has mismatched/one-sided delimiters — must not be dropped"
+            );
+        }
     }
 
     #[test]
