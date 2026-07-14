@@ -70,12 +70,19 @@ export class FallbackRouter implements TranslationEngine {
     // returned by onUsage() — NOT cleared here. Both engines keep their listeners
     // across stop(), so accounting (e.g. accountant.attach(router) once) keeps
     // working after a stop/start cycle (#38).
-    // Stop both; the fallback may have been started on a switch.
-    await Promise.all([this.primary.stop(), this.fallback.stop()]);
-    // Reset routing so the NEXT session begins on the primary again — otherwise
-    // a Stop/Start after an auto-fallback would route to the stopped fallback.
+    // Stop both; the fallback may have been started on a switch. `allSettled` so
+    // ONE engine's stop() rejecting can't skip the state reset below (#178): with
+    // `Promise.all`, a rejection stranded `usingFallback = true`, and the next
+    // session's start() would then silently route to the (stopped) fallback tier
+    // even after credit recovered. Neither shipped engine's stop() rejects today,
+    // but the TranslationEngine contract does not forbid it.
+    const results = await Promise.allSettled([this.primary.stop(), this.fallback.stop()]);
+    // Reset routing UNCONDITIONALLY so the NEXT session begins on the primary
+    // again, regardless of a partial stop() failure.
     this.active = this.primary;
     this.usingFallback = false;
+    const rejected = results.find((r) => r.status === "rejected");
+    if (rejected) throw (rejected as PromiseRejectedResult).reason;
   }
 
   /** Synchronous force-kill of both tiers' OS children (#66 process teardown). */
