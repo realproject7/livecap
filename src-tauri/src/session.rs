@@ -269,11 +269,21 @@ fn spawn_host(app: &AppHandle, start_message: &serde_json::Value) -> Result<Host
         .ok_or_else(|| "Node.js runtime not found — install node or set LIVECAP_NODE".to_string())?;
     let script = host_script(app)?;
 
-    let mut child = Command::new(node)
+    let mut command = Command::new(node);
+    command
         .arg(script)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
+        .stderr(Stdio::piped());
+    // Put the host in its OWN process group (pgid == host pid). Its llama-server
+    // grandchild inherits the group, so the force-kill backstop in `reap_host`
+    // can SIGKILL the whole group and never orphan the engine — a plain
+    // `child.kill()` reaches only node (#169). It also detaches the host from the
+    // app's controlling-terminal group, so a terminal SIGINT drives teardown
+    // through the app's own handler instead of racing node straight to death.
+    #[cfg(unix)]
+    std::os::unix::process::CommandExt::process_group(&mut command, 0);
+    let mut child = command
         .spawn()
         .map_err(|e| format!("could not start the session host: {e}"))?;
 
@@ -341,6 +351,15 @@ fn spawn_host(app: &AppHandle, start_message: &serde_json::Value) -> Result<Host
                 continue;
             }
             let _ = reader_app.emit("host://event", &value);
+        }
+        // The host's stdout closed = the host process exited. If a `stop()` is
+        // still waiting for a `stopped` event that will now never arrive (the
+        // host crashed inside the stop window), drop the waiter's sender so its
+        // bounded wait fails FAST (channel disconnected) instead of idling out
+        // the full HOST_EXIT_TIMEOUT (#169). Harmless no-op after a clean stop
+        // (the `stopped` arm already took the slot).
+        if let Ok(mut slot) = reader_stopped_signal.lock() {
+            slot.take();
         }
         if !reader_expected.load(Ordering::Relaxed) {
             let _ = reader_app.emit(
@@ -544,13 +563,7 @@ async fn start_inner(app: &AppHandle) -> Result<Option<String>, String> {
         "captureSystem": channels.system,
         "captureMic": channels.mic,
     });
-    let mut host = spawn_host(app, &start_message)?;
-
-    let abort_host = |host: &mut HostHandle| {
-        host.expected_exit.store(true, Ordering::Relaxed);
-        let _ = write_host_line(&host.stdin, &serde_json::json!({ "type": "stop" }));
-        let _ = host.child.kill();
-    };
+    let host = spawn_host(app, &start_message)?;
 
     // #110: the Settings model pick drives transcription. Ensure it is on disk
     // first (with visible download progress); a failed download falls back to
@@ -565,7 +578,9 @@ async fn start_inner(app: &AppHandle) -> Result<Option<String>, String> {
     let (mut pipeline, mut events_rx) = match CaptionPipeline::new(config).await {
         Ok(built) => built,
         Err(error) => {
-            abort_host(&mut host);
+            // Graceful teardown (stdin-drop → bounded wait → group-kill backstop)
+            // so a half-built host's llama-server is reaped, never orphaned (#169).
+            reap_host(host).await;
             return Err(format!("caption pipeline failed to start: {error}"));
         }
     };
@@ -573,7 +588,7 @@ async fn start_inner(app: &AppHandle) -> Result<Option<String>, String> {
     let capture_note = match start_captures(&mut pipeline, channels) {
         Ok(note) => note,
         Err(error) => {
-            abort_host(&mut host);
+            reap_host(host).await;
             let _ = pipeline.finish().await;
             return Err(error);
         }
@@ -708,13 +723,14 @@ pub async fn stop(app: AppHandle) -> Result<(), String> {
 /// half-built `Starting` session whose host + llama-server are already spawned)
 /// so nothing is orphaned when the process is about to exit.
 ///
-/// The host child is killed GRACEFULLY: it is sent a `{"type":"stop"}` line and
-/// given a bounded wait to exit. That stop drives the host's own shutdown, which
-/// calls `engine.stop()` — sending SIGTERM to the spawned llama-server and
-/// awaiting its exit — so the engine is reaped, not just the node host. A plain
-/// `child.kill()` (SIGTERM straight to node) would terminate node before it
-/// could reap llama-server, leaving the engine orphaned. Draining the pipeline
-/// first also lets a gated #64 WAV dump finalize its header.
+/// The host child is torn down GRACEFULLY via [`reap_host`]: its stdin is closed
+/// (EOF), which drives the host's own shutdown — `engine.stop()` SIGTERMs the
+/// spawned llama-server and awaits its exit — so the engine is reaped, not just
+/// the node host. Only if the host overstays its bounded wait is it force-killed,
+/// and then by process group so llama-server dies with it. A plain `child.kill()`
+/// — which is SIGKILL, not SIGTERM, on Unix — straight to node would terminate
+/// node before it could reap llama-server, orphaning the engine. Draining the
+/// pipeline first also lets a gated #64 WAV dump finalize its header.
 pub async fn shutdown(app: &AppHandle) {
     let state = app.state::<SessionState>();
     let (pipeline, host, events_task, post_session_host) = {
@@ -779,12 +795,14 @@ async fn reap_host(host: HostHandle) {
         let deadline = std::time::Instant::now() + SHUTDOWN_HOST_TIMEOUT;
         loop {
             match child.try_wait() {
-                Ok(Some(_)) => break, // host exited; its llama-server is reaped
+                Ok(Some(_)) => break, // host exited gracefully; it reaped llama-server
                 Ok(None) if std::time::Instant::now() >= deadline => {
-                    // Host overstayed its graceful stop: force it. The OS reaps
-                    // its llama-server child with it, so nothing is orphaned.
-                    let _ = child.kill();
-                    let _ = child.wait();
+                    // Host overstayed its graceful stop: force-kill its whole
+                    // process group so the separate llama-server grandchild dies
+                    // with node. A plain `child.kill()` SIGKILLs only node; the
+                    // OS reparents (does NOT reap) llama-server, orphaning it
+                    // (#169 — the prior "OS reaps it with node" comment was wrong).
+                    force_kill_host_group(&mut child);
                     break;
                 }
                 Ok(None) => std::thread::sleep(Duration::from_millis(25)),
@@ -793,6 +811,32 @@ async fn reap_host(host: HostHandle) {
         }
     })
     .await;
+}
+
+/// SIGKILL the host's entire process group — node **and** its llama-server
+/// grandchild — then reap node. The host is spawned into its own group
+/// (`process_group(0)` in [`spawn_host`], pgid == host pid), so a group-directed
+/// kill reaches the grandchild; a plain `child.kill()` would SIGKILL only node
+/// and leave llama-server orphaned (#169). Only the forced backstop needs this —
+/// the graceful stdin-drop path lets node reap its own child.
+fn force_kill_host_group(child: &mut Child) {
+    #[cfg(target_os = "macos")]
+    {
+        // Negative pid targets the process group. Safe: `kill` only reads the
+        // pid and posts a signal — no memory is shared with the child.
+        let pid = child.id() as libc::pid_t;
+        unsafe {
+            libc::kill(-pid, libc::SIGKILL);
+        }
+        let _ = child.wait();
+    }
+    // The app ships macOS-only (no `libc` on other targets); fall back to killing
+    // node directly. Not a shipped path — present so the crate builds anywhere.
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = child.kill();
+        let _ = child.wait();
+    }
 }
 
 /// Mid-session microphone toggle (#53): pause/resume JUST the mic capture.
@@ -907,15 +951,15 @@ async fn cleanup(inner: &mut Inner) {
     if let Some(pipeline) = inner.pipeline.take() {
         let _ = pipeline.finish().await;
     }
-    if let Some(mut host) = inner.host.take() {
-        host.expected_exit.store(true, Ordering::Relaxed);
-        let _ = host.child.kill();
-        let _ = host.child.wait();
+    // Route host teardown through the graceful reap protocol (stdin-drop →
+    // bounded wait → group-kill backstop) rather than an immediate SIGKILL, so a
+    // half-built or race-lost session's llama-server is reaped, never orphaned,
+    // and node is always wait()ed (no zombie) (#169).
+    if let Some(host) = inner.host.take() {
+        reap_host(host).await;
     }
-    if let Some(mut host) = inner.post_session_host.take() {
-        host.expected_exit.store(true, Ordering::Relaxed);
-        let _ = host.child.kill();
-        let _ = host.child.wait();
+    if let Some(host) = inner.post_session_host.take() {
+        reap_host(host).await;
     }
     if let Some(task) = inner.events_task.take() {
         task.abort();
@@ -1172,5 +1216,111 @@ mod tests {
         assert_eq!(state.phase(), Phase::Starting);
         assert_eq!(state.phase().as_str(), "starting");
         drop(held);
+    }
+
+    #[test]
+    fn crashed_host_unblocks_the_stop_waiter_immediately() {
+        // #169: stop() waits on `stopped_signal` up to HOST_EXIT_TIMEOUT (60s). If
+        // the host crashes inside the stop window it never emits `stopped`; the
+        // reader thread's stdout-closed handler drops the waiter's sender so the
+        // wait fails FAST (channel disconnected) instead of idling the full
+        // timeout. Model that exact slot + waiter (the real types from spawn_host).
+        let slot: Arc<StdMutex<Option<std::sync::mpsc::Sender<()>>>> =
+            Arc::new(StdMutex::new(None));
+        let (tx, rx) = std::sync::mpsc::channel::<()>();
+        *slot.lock().unwrap() = Some(tx); // stop() installs its sender
+
+        // Reader hits EOF (host crashed) and drops the sender, exactly as the new
+        // `reader_stopped_signal.take()` on the stdout-closed path does.
+        slot.lock().unwrap().take();
+
+        // The waiter (stop()'s bounded wait) returns at once, and NOT with Ok(()),
+        // so stop() takes its reap / fast-fail branch, not "stopped cleanly".
+        let start = std::time::Instant::now();
+        let waited = rx.recv_timeout(HOST_EXIT_TIMEOUT);
+        assert!(matches!(
+            waited,
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected)
+        ));
+        assert!(!matches!(waited, Ok(())));
+        assert!(
+            start.elapsed() < Duration::from_secs(1),
+            "a crashed host must not idle the full HOST_EXIT_TIMEOUT"
+        );
+    }
+
+    #[test]
+    fn a_clean_stopped_event_still_releases_the_waiter() {
+        // The crash fast-fail must not regress the normal path: when the host
+        // emits `stopped`, the reader sends () (slot cleared) and the waiter
+        // completes with Ok(()). A later EOF then finds an empty slot — a no-op.
+        let slot: Arc<StdMutex<Option<std::sync::mpsc::Sender<()>>>> =
+            Arc::new(StdMutex::new(None));
+        let (tx, rx) = std::sync::mpsc::channel::<()>();
+        *slot.lock().unwrap() = Some(tx);
+
+        // Reader observes `stopped`: take + send (mirrors the kind=="stopped" arm).
+        if let Some(tx) = slot.lock().unwrap().take() {
+            let _ = tx.send(());
+        }
+        assert!(matches!(rx.recv_timeout(HOST_EXIT_TIMEOUT), Ok(())));
+
+        // Post-stop EOF: slot already None → take() is a harmless no-op.
+        assert!(slot.lock().unwrap().take().is_none());
+    }
+
+    /// AC(a): the force-kill backstop must never orphan the llama-server
+    /// grandchild. Model the host tree with a parent shell that spawns a
+    /// long-lived grandchild in the SAME process group (exactly how node spawns
+    /// llama-server), then assert the group-kill takes the grandchild down too —
+    /// a plain `child.kill()` would leave it running. macOS-only: `libc` (and the
+    /// shipped app) are macOS-only, so this runs under the `app-macos` CI job.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn force_kill_host_group_reaps_the_whole_process_tree() {
+        use std::os::unix::process::CommandExt;
+
+        // Parent prints its grandchild's PID, then waits so the group stays alive.
+        let mut parent = Command::new("/bin/sh")
+            .args(["-c", "sleep 300 & echo $!; wait"])
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .process_group(0) // pgid == parent pid; grandchild inherits it
+            .spawn()
+            .expect("spawn parent shell");
+
+        let mut line = String::new();
+        {
+            let stdout = parent.stdout.take().expect("piped stdout");
+            BufReader::new(stdout)
+                .read_line(&mut line)
+                .expect("read grandchild pid");
+        }
+        let grandchild: libc::pid_t = line.trim().parse().expect("grandchild pid");
+
+        // Sanity: the grandchild is alive (signal 0 = existence probe).
+        assert_eq!(
+            unsafe { libc::kill(grandchild, 0) },
+            0,
+            "grandchild should be alive before the kill"
+        );
+
+        force_kill_host_group(&mut parent);
+
+        // The grandchild must now be gone. It can linger a beat while the kernel
+        // delivers SIGKILL and init reaps the reparented process — poll briefly.
+        let mut orphaned = true;
+        for _ in 0..200 {
+            if unsafe { libc::kill(grandchild, 0) } != 0 {
+                orphaned = false;
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(
+            !orphaned,
+            "group-kill must reap the llama-server-equivalent grandchild, not orphan it"
+        );
     }
 }
