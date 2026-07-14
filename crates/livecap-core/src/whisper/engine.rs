@@ -507,21 +507,42 @@ const MEANINGLESS_PATTERNS: [&str; 9] = [
 /// hallucination only when, after normalization (case-fold + terminal
 /// punctuation/whitespace strip so "Thanks for watching." matches), it is:
 ///   (a) the entire utterance ("applause", "thanks for watching."),
-///   (b) a bracketed/parenthesized stage direction of it ("[applause]",
+///   (b) a *matched* bracketed/parenthesized stage direction of it ("[applause]",
 ///       "(laughter)"), or
 ///   (c) the pattern repeated back-to-back ("applause applause applause").
-/// The confidence-floor gate (#92) already covers most silence hallucinations.
+/// (a) and (c) are one test: the words of the core are the pattern's words
+/// repeated k≥1 times. The confidence-floor gate (#92) already covers most
+/// silence hallucinations.
 fn is_meaningless_output(text: &str) -> bool {
     let normalized = normalize_utterance(text);
-    // Peel one layer of stage-direction brackets, then re-normalize the inner so
-    // "[Applause.]" / "(laughter)" reduce to the bare pattern too.
-    let core = match strip_stage_direction(&normalized) {
-        Some(inner) => normalize_utterance(inner),
-        None => normalized,
+    // Peel one MATCHED pair of stage-direction delimiters and re-normalize the
+    // inner, so "[Applause.]" / "(laughter)" reduce to the bare pattern. A
+    // mismatched pair ("[applause)") is NOT a stage direction — leave it whole so
+    // it never silently drops. Delimiters are ASCII, so the byte slice is safe.
+    let core = match (normalized.chars().next(), normalized.chars().last()) {
+        (Some(open), Some(close))
+            if normalized.len() >= 2
+                && matches!(
+                    (open, close),
+                    ('[', ']') | ('(', ')') | ('{', '}') | ('<', '>') | ('*', '*')
+                ) =>
+        {
+            normalize_utterance(&normalized[open.len_utf8()..normalized.len() - close.len_utf8()])
+        }
+        _ => normalized,
     };
 
+    let core_words: Vec<&str> = core.split_whitespace().collect();
     for pattern in MEANINGLESS_PATTERNS {
-        if core == pattern || is_pattern_repeated(&core, pattern) {
+        let pattern_words: Vec<&str> = pattern.split_whitespace().collect();
+        let p = pattern_words.len();
+        // core == pattern (k=1) OR pattern repeated back-to-back (k≥2): the core's
+        // words split into equal-length chunks that each equal the pattern.
+        if p > 0
+            && core_words.len() >= p
+            && core_words.len().is_multiple_of(p)
+            && core_words.chunks(p).all(|chunk| chunk == pattern_words.as_slice())
+        {
             return true;
         }
     }
@@ -537,34 +558,14 @@ fn is_meaningless_output(text: &str) -> bool {
 
 /// Lower-case and strip terminal whitespace + sentence punctuation, so a stored
 /// pattern matches regardless of case or a trailing "." / "!" / "…" (#172).
-/// Deliberately leaves brackets — [`strip_stage_direction`] handles those — and
-/// internal punctuation, so a real sentence is never collapsed onto a pattern.
+/// Deliberately leaves brackets (the caller peels a matched pair) and internal
+/// punctuation, so a real sentence is never collapsed onto a pattern.
 fn normalize_utterance(text: &str) -> String {
     text.to_lowercase()
         .trim_matches(|c: char| {
             c.is_whitespace() || matches!(c, '.' | ',' | '!' | '?' | ';' | ':' | '…' | '"' | '\'')
         })
         .to_string()
-}
-
-/// Peel one matching pair of stage-direction brackets — `[applause]`,
-/// `(laughter)`, `*applause*` — returning the inner text. `None` when the
-/// utterance is not bracketed on both ends (so real speech is untouched).
-fn strip_stage_direction(text: &str) -> Option<&str> {
-    let inner = text.strip_prefix(|c: char| matches!(c, '[' | '(' | '{' | '<' | '*'))?;
-    inner.strip_suffix(|c: char| matches!(c, ']' | ')' | '}' | '>' | '*'))
-}
-
-/// True when `core` is `pattern` repeated ≥2× (a stutter hallucination like
-/// "applause applause"). The single occurrence is handled by direct equality.
-fn is_pattern_repeated(core: &str, pattern: &str) -> bool {
-    let pattern_words: Vec<&str> = pattern.split_whitespace().collect();
-    let core_words: Vec<&str> = core.split_whitespace().collect();
-    let p = pattern_words.len();
-    if p == 0 || core_words.len() < p * 2 || !core_words.len().is_multiple_of(p) {
-        return false;
-    }
-    core_words.chunks(p).all(|chunk| chunk == pattern_words.as_slice())
 }
 
 /// Collapse consecutive repetitions of the same word.
@@ -698,6 +699,20 @@ mod tests {
                 clean_repetitive_text(sentence),
                 sentence,
                 "{sentence:?} contains a pattern word but is real speech — must survive"
+            );
+        }
+    }
+
+    #[test]
+    fn mismatched_delimiters_are_not_stage_directions() {
+        // #172 (RE1): only a MATCHED delimiter pair is a stage direction. A
+        // mismatched pair must not be peeled-and-dropped — it survives verbatim
+        // rather than silently collapsing onto a pattern.
+        for s in ["[applause)", "(laughter]", "applause]", "[applause"] {
+            assert_eq!(
+                clean_repetitive_text(s),
+                s,
+                "{s:?} has mismatched/one-sided delimiters — must not be dropped"
             );
         }
     }
