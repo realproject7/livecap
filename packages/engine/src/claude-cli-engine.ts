@@ -506,19 +506,38 @@ export class ClaudeCliEngine implements TranslationEngine {
       // stdin may already be closed.
     }
     current.kill();
-    // Bank the retired session's cost so the reported cumulative can't regress
-    // when the fresh session's total_cost_usd restarts near 0 (#136/#24).
+    // Snapshot the pre-rollover identity + cost so a FAILED fresh spawn rolls the
+    // WHOLE transition back atomically (#173). Committing the new id + banked cost
+    // before the spawn is confirmed would otherwise strand recovery: sessionId/
+    // resumeId would point at a conversation that never existed (the next respawn
+    // would `--resume` that phantom id for the rest of the meeting), and the
+    // retired session's cost would stay banked — double-counting it if recovery
+    // then resumed that session.
+    const prevSessionId = this.sessionId;
+    const prevResumeId = this.resumeId;
+    const prevRolledOverCostUsd = this.rolledOverCostUsd;
+    const prevSessionCumulativeCostUsd = this.sessionCumulativeCostUsd;
+    // Provisionally commit: bank the retired session's cost so the reported
+    // cumulative can't regress when the fresh session's total_cost_usd restarts
+    // near 0 (#136/#24), and mint the fresh conversation id (history resets;
+    // resumeId follows so a later crash resumes THIS session). spawnSession spawns
+    // with `--session-id this.sessionId`, so the fresh id must be live before it.
     this.rolledOverCostUsd += this.sessionCumulativeCostUsd;
     this.sessionCumulativeCostUsd = 0;
-    // Fresh conversation id — history resets. resumeId follows it so a later
-    // crash resumes THIS session, not the abandoned one.
     this.sessionId = randomUUID();
     this.resumeId = this.sessionId;
     let child: ChildProcessWithoutNullStreams;
     try {
       child = await this.spawnSession(undefined); // fresh — no --resume
     } catch {
+      // The fresh session never spawned: roll the transition back so the next
+      // runTurn's respawn resumes the still-valid retired session (--resume the
+      // prior id) with consistent, non-duplicated accounting — not a phantom id.
       // spawnSession recorded the error status/detail; caller throws not-started.
+      this.sessionId = prevSessionId;
+      this.resumeId = prevResumeId;
+      this.rolledOverCostUsd = prevRolledOverCostUsd;
+      this.sessionCumulativeCostUsd = prevSessionCumulativeCostUsd;
       return null;
     }
     this.emitHealthEvent({ kind: "rolledOver" });
