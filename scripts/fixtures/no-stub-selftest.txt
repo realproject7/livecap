@@ -10,4 +10,5 @@ a mock server
 function stubTranslateBatch() {}
 a dummy value
 unimplemented!()
+this feature is not implemented yet
 danger XXX here
