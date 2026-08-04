@@ -82,7 +82,17 @@ export function createSettingsSheet(options: SettingsSheetOptions): SettingsShee
         <!-- #203: the model half of this label is set in renderControls from the
              actual pick (it used to hard-code "Haiku"). -->
         <button class="sh-seg-btn" data-engine="cli" id="sh-engine-cli">Claude CLI</button>
+        <!-- #204: hidden entirely unless a codex binary is present. -->
+        <button class="sh-seg-btn" data-engine="codex" id="sh-engine-codex" hidden>Codex</button>
         <button class="sh-seg-btn" data-engine="local">Local · Qwen 4B</button>
+      </div>
+      <!-- #204: the quota cost is stated in the picker itself, not a tooltip.
+           The hours figure is measured, and deliberately not rounded up. -->
+      <div class="sh-engine-note t-meta" id="sh-codex-note" hidden>
+        Codex runs on your own Codex/ChatGPT account and spends that plan's
+        quota — measured at roughly 4–7 hours of captioning per week on the plan
+        we tested, less on a smaller one. LiveCap never sees your Codex login.
+        When the quota runs low it falls back to the free local model.
       </div>
       <div class="sh-seg" role="radiogroup" aria-label="Claude model">${claudeChoices}</div>
       <div class="sh-engine-note t-meta">
@@ -177,6 +187,8 @@ export function createSettingsSheet(options: SettingsSheetOptions): SettingsShee
   const sttButtons = Array.from(host.querySelectorAll<HTMLButtonElement>(".sh-seg-btn[data-stt]"));
   const claudeButtons = Array.from(host.querySelectorAll<HTMLButtonElement>(".sh-seg-btn[data-claude]"));
   const engineCliBtn = el<HTMLButtonElement>(host, "#sh-engine-cli");
+  const engineCodexBtn = el<HTMLButtonElement>(host, "#sh-engine-codex");
+  const codexNote = el<HTMLDivElement>(host, "#sh-codex-note");
   const sizeButtons = Array.from(host.querySelectorAll<HTMLButtonElement>(".sh-size"));
   const capsuleButtons = Array.from(host.querySelectorAll<HTMLButtonElement>(".sh-capsule"));
   const gaugeFill = el<HTMLDivElement>(host, "#sh-gauge-fill");
@@ -378,6 +390,29 @@ export function createSettingsSheet(options: SettingsSheetOptions): SettingsShee
     }, () => renderGauge());
   }
 
+  /** #204: reveal the Codex option only when a `codex` binary is present.
+   *  Hidden entirely otherwise — not shown disabled — so a user without Codex
+   *  never sees an option they cannot use. Detection is binary presence only;
+   *  no credential or login state is read. */
+  function refreshEngines(): void {
+    void invoke<ProbeResult>("host_probe").then(
+      (probe) => {
+        const available = probe.codex != null;
+        engineCodexBtn.hidden = !available;
+        codexNote.hidden = !available;
+        // A stale settings.json can select Codex on a machine that no longer
+        // has the binary; fall back rather than leaving a hidden tier selected.
+        if (!available && options.getSettings().engine === "codex") {
+          save({ engine: "cli" });
+        }
+      },
+      () => {
+        engineCodexBtn.hidden = true;
+        codexNote.hidden = true;
+      },
+    );
+  }
+
   function refreshPrivacy(): void {
     // Live check (EPIC launch gate): read the actual NSWindow sharing state.
     void invoke<boolean>("capture_excluded").then(
@@ -395,6 +430,7 @@ export function createSettingsSheet(options: SettingsSheetOptions): SettingsShee
     host.classList.add("open");
     renderControls();
     refreshGauge();
+    refreshEngines();
     refreshPrivacy();
   }
 

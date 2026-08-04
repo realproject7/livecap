@@ -68,8 +68,9 @@ export interface SessionChannels {
 
 export type ReplyIntentWire = "agree" | "push-back" | "ask" | "suggest";
 
-/** Engine preference (#12 Settings): which tier the router defaults to. */
-export type EnginePref = "cli" | "local";
+/** Engine preference (#12 Settings): which tier the router defaults to.
+ *  "cli" = Claude CLI, "codex" = Codex app-server (#204), "local" = Qwen. */
+export type EnginePref = "cli" | "codex" | "local";
 
 /** Messages written by Rust to the host's stdin (one JSON per line). The
  *  start message carries the persisted AppSettings (settings.json, #12) the
@@ -245,5 +246,9 @@ export interface ProbeCli {
 export interface ProbeResult {
   type: "probe";
   cli: ProbeCli | null;
+  /** Presence of the `codex` binary (#204). Null ⇒ the Codex option is hidden
+   *  entirely, not shown disabled. Presence and version only — LiveCap never
+   *  reads Codex credentials or login state. */
+  codex?: ProbeCli | null;
   gauge: GaugeWire;
 }

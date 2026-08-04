@@ -8,10 +8,15 @@ import { join } from "node:path";
 import { CreditAccountant, nodeLedgerFs } from "@livecap/engine";
 
 import type { ProbeRequest, ProbeResult } from "../protocol.ts";
-import { detectClaudeCli } from "./detect-cli.ts";
+import { detectClaudeCli, detectCodexCli } from "./detect-cli.ts";
 
 export async function runProbe(request: ProbeRequest): Promise<ProbeResult> {
-  const cli = await detectClaudeCli(process.env.PATH);
+  // #204: both detections are binary-presence only and run in parallel; neither
+  // starts a session, spends quota, or reads any credential.
+  const [cli, codex] = await Promise.all([
+    detectClaudeCli(process.env.PATH),
+    detectCodexCli(process.env.PATH),
+  ]);
   // Constructing the accountant loads (and, on a period rollover, rewrites)
   // the same ledger a session uses — the gauge here is the live one.
   const accountant = new CreditAccountant({
@@ -24,6 +29,7 @@ export async function runProbe(request: ProbeRequest): Promise<ProbeResult> {
   return {
     type: "probe",
     cli: cli ? { bin: cli.bin, version: cli.version } : null,
+    codex: codex ? { bin: codex.bin, version: codex.version } : null,
     gauge: accountant.gauge(),
   };
 }
