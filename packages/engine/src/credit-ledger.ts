@@ -74,9 +74,9 @@ export interface GaugeState {
   /** Whether {@link estimatedHoursRemaining} is a real measurement (#205).
    *
    *  Always true on the USD path. False only when a headroom source could not
-   *  be read: the hours figure is then a placeholder 0 that the DECISION path
-   *  refuses to act on, rather than an `Infinity` that would silently disable
-   *  the safety net. Consumers displaying hours should show "unknown" here. */
+   *  be read: the hours figure then reads 0, which the DECISION path refuses to
+   *  act on, rather than an `Infinity` that would silently disable the safety
+   *  net. Consumers displaying hours should show "unknown" here. */
   headroomKnown: boolean;
   /** Engine-tagged, human-readable detail for DISPLAY ONLY (#205 scope 6) —
    *  `"$3.40 of $20.00"` on the USD path, `"62% used, resets in 3h"` on a quota
@@ -254,7 +254,7 @@ export class CreditAccountant {
       spentUsd: spent,
       remainingUsd: remaining,
       dollarsPerHour,
-      // Never Infinity: unknown headroom carries a placeholder 0 that
+      // Never Infinity: unknown headroom reads 0, which
       // `isBelowThreshold`/`evaluate` refuse to act on (#205 scope 5).
       estimatedHoursRemaining: headroom.known ? headroom.hoursRemaining : 0,
       fractionUsed,
