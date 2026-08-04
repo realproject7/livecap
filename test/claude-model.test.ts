@@ -12,6 +12,9 @@ import {
   DEFAULT_CLAUDE_MODEL,
   sanitizedClaudeModel,
 } from "../src/app-settings";
+import { buildCliEngineConfig } from "../src/host/session";
+import { resolveStartConfig } from "../src/host/start-config";
+import type { HostInbound } from "../src/protocol";
 
 // #203: the Settings sheet exposes a curated set of Claude tiers. The webview
 // cannot import @livecap/engine (that package reaches for node builtins and
@@ -114,6 +117,56 @@ describe("claudeModelLabel (#203 shared by both surfaces)", () => {
   it("falls back to the default's label for unknown values", () => {
     expect(claudeModelLabel("gpt-5")).toBe("Haiku");
     expect(claudeModelLabel(undefined)).toBe("Haiku");
+  });
+});
+
+// The wiring #203 exists to fix. Before it, session.ts built the CLI engine
+// config with NO `model` field, so ClaudeCliEngine's `config.model` was always
+// undefined and every install ran Haiku no matter what was persisted. Deleting
+// that one line is a silent regression — it breaks no type and no other test —
+// so it gets its own assertion here.
+describe("settings reach the CLI engine config (#203)", () => {
+  const cli = { bin: "/usr/local/bin/claude", version: "1.0.0", includePartialMessages: true };
+
+  function startMessage(claudeModel: string): Extract<HostInbound, { type: "start" }> {
+    return {
+      type: "start",
+      appDataDir: "/tmp/livecap-data",
+      archiveDir: "/tmp/livecap-archives",
+      targetLanguageCode: "ko",
+      sourceLanguageCode: "auto",
+      enginePref: "cli",
+      claudeModel,
+      poolUsd: 20,
+      resetDay: 1,
+      autoSwitch: true,
+      archiveAutoSave: true,
+      archiveRetentionDays: 0,
+      captureSystem: true,
+      captureMic: true,
+    };
+  }
+
+  it("carries each curated pick from the start message into the engine config", () => {
+    for (const m of CLAUDE_MODELS) {
+      const resolved = resolveStartConfig(startMessage(m.value));
+      expect(buildCliEngineConfig(cli, "/tmp/cwd", {}, resolved).model).toBe(m.value);
+    }
+  });
+
+  it("hands the engine Haiku for an unknown pick rather than a 404-ing model", () => {
+    const resolved = resolveStartConfig(startMessage("claude-opus-4-5-20251101"));
+    expect(buildCliEngineConfig(cli, "/tmp/cwd", {}, resolved).model).toBe("haiku");
+  });
+
+  // Both CLI lanes (#142) spread this one object, so they cannot drift onto
+  // different models — which would make the gauge's single cumulative cost
+  // figure span two different rates.
+  it("is a single shared object, so both CLI lanes run the same model", () => {
+    const resolved = resolveStartConfig(startMessage("opus"));
+    const config = buildCliEngineConfig(cli, "/tmp/cwd", {}, resolved);
+    expect({ ...config }.model).toBe("opus"); // translation lane spreads it
+    expect(config.model).toBe("opus"); // extras lane passes it directly
   });
 });
 

@@ -42,10 +42,12 @@ import { clockLabel } from "../clock.ts";
 import type { Channel, CoachingItemWire, GaugeWire, HostInbound, HostOutbound } from "../protocol.ts";
 import { coachingAmendKeys } from "./coaching-keys.ts";
 import { detectClaudeCli } from "./detect-cli.ts";
+import type { DetectedCli } from "./detect-cli.ts";
 import { toFinalizedRecords } from "./metrics-records.ts";
 import { LazyLocalEngine } from "./local-tier.ts";
 import { SILENCE_THRESHOLD_MS, SilenceWatchdog } from "./silence.ts";
 import { resolveStartConfig } from "./start-config.ts";
+import type { ResolvedStartConfig } from "./start-config.ts";
 import { withTimeout } from "./timeout.ts";
 import { TranslationRunner } from "./translation-runner.ts";
 
@@ -60,6 +62,39 @@ const CLI_CONTEXT_PAIRS = 1;
  *  `cacheReadInputTokens` (#136) — a conservative fraction of the model context
  *  window, far below the ~2h "prompt too long" cliff, with ample headroom. */
 const CLI_ROLLOVER_CACHE_READ_TOKENS = 120_000;
+/**
+ * The shared config both CLI lanes are constructed from (#142), extracted so
+ * the settings→argv wiring is assertable without spawning a session (#203).
+ *
+ * `model` is the load-bearing field here: before #203 it was simply absent, so
+ * `ClaudeCliEngine`'s `config.model` was always undefined and every install ran
+ * `DEFAULT_MODEL` regardless of what the user picked. Both lanes spread this
+ * one object, so translate and extras/summary always run the SAME model — a
+ * split would make the gauge's single cumulative figure span two rates.
+ */
+export function buildCliEngineConfig(
+  cli: DetectedCli,
+  cwd: string,
+  env: NodeJS.ProcessEnv,
+  resolved: ResolvedStartConfig,
+) {
+  return {
+    bin: cli.bin,
+    cwd,
+    env,
+    includePartialMessages: cli.includePartialMessages,
+    // The user's Claude model pick (#203), already clamped in resolveStartConfig.
+    model: resolved.claudeModel,
+    targetLanguage: resolved.targetLanguage,
+    // Bound the translate session's per-turn input (#136): trim the redundant
+    // recent-context pairs (the persistent session remembers them) via the
+    // per-engine knob — NOT shared buildTranslateMessage, so local keeps its
+    // full window. And refresh the session before the ~2h context cliff.
+    contextPairs: CLI_CONTEXT_PAIRS,
+    rolloverAfterCacheReadTokens: CLI_ROLLOVER_CACHE_READ_TOKENS,
+  };
+}
+
 const SUMMARY_TICK_MS = 5_000;
 /** Recent transcript lines fed as context to the on-demand extras (reply
  *  suggestions #79 and targeted analysis #80) — one window so the two can't
@@ -283,24 +318,7 @@ export class HostSession {
       // shared turn mutex. Both fall back to the SAME local engine: the split is
       // CLI-tier only; running two 4B llama-servers is not worth it, so on the
       // local path summary still contends there (documented, unchanged).
-      const engineConfig = {
-        bin: cli.bin,
-        cwd,
-        env: process.env,
-        includePartialMessages: cli.includePartialMessages,
-        // #203: the user's Claude model pick, clamped in resolveStartConfig.
-        // Both CLI lanes below spread this config, so the translate and
-        // extras/summary sessions always run the SAME model — a split would
-        // make the gauge's single cumulative figure span two rates.
-        model: resolved.claudeModel,
-        targetLanguage: resolved.targetLanguage,
-        // Bound the translate session's per-turn input (#136): trim the redundant
-        // recent-context pairs (the persistent session remembers them) via the
-        // per-engine knob — NOT shared buildTranslateMessage, so local keeps its
-        // full window. And refresh the session before the ~2h context cliff.
-        contextPairs: CLI_CONTEXT_PAIRS,
-        rolloverAfterCacheReadTokens: CLI_ROLLOVER_CACHE_READ_TOKENS,
-      };
+      const engineConfig = buildCliEngineConfig(cli, cwd, process.env, resolved);
       // Each ClaudeCliEngine mints its own session id (config.sessionId omitted),
       // so the two persistent `claude -p` conversations stay independent.
       const translationPrimary = new ClaudeCliEngine({
