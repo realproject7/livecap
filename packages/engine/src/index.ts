@@ -44,6 +44,22 @@ export type { ModelArtifact, LlamaCppAsset, LlamaCppReleasePin } from "./pins";
 
 // Issue #7 — credit accounting + auto-fallback policy (PROPOSAL §6/§8.7).
 export { CreditAccountant } from "./credit-ledger";
+// Engine-agnostic headroom seam (#205) — hours is the primitive; USD is one
+// derivation of it. No token→USD rate card lives here or anywhere downstream.
+export {
+  DEFAULT_PERCENT_PER_HOUR,
+  hoursFromRate,
+  quotaHeadroom,
+  ratePerHour,
+  usdNativeDetail,
+} from "./headroom";
+export type {
+  Headroom,
+  HeadroomReading,
+  HeadroomSource,
+  HeadroomUnknownReason,
+  HeadroomWindow,
+} from "./headroom";
 export type {
   CreditConfig,
   CreditEvent,

@@ -6,6 +6,14 @@
 // Pure TS, fixture-driven. The ledger path and clock are injected; the package
 // hardcodes no path and reads no real clock.
 
+import {
+  hoursFromRate,
+  quotaHeadroom,
+  ratePerHour,
+  usdNativeDetail,
+  type Headroom,
+  type HeadroomSource,
+} from "./headroom";
 import type { Usage } from "./types";
 
 /** Agent SDK monthly pool presets (PROPOSAL §6). */
@@ -33,6 +41,11 @@ export interface CreditConfig {
   fallbackThresholdHours?: number;
   /** $/hr used until enough real usage accrues (PROPOSAL §6 estimate). Default 0.40. */
   defaultDollarsPerHour?: number;
+  /** Optional engine-agnostic headroom source (#205). Omitted ⇒ the USD
+   *  derivation below, i.e. today's Claude behaviour bit-for-bit. When present,
+   *  `estimatedHoursRemaining` comes from the last snapshot this source
+   *  produced (refresh it with {@link CreditAccountant.refreshHeadroom}). */
+  headroomSource?: HeadroomSource;
   /** Injected clock (epoch ms). */
   now: () => number;
 }
@@ -54,10 +67,21 @@ export interface GaugeState {
   remainingUsd: number;
   /** Rolling cost per meeting-hour (falls back to the default until metered). */
   dollarsPerHour: number;
-  /** Never negative. */
+  /** Never negative, and never `Infinity` — see {@link headroomKnown} (#205). */
   estimatedHoursRemaining: number;
   /** 0–1. */
   fractionUsed: number;
+  /** Whether {@link estimatedHoursRemaining} is a real measurement (#205).
+   *
+   *  Always true on the USD path. False only when a headroom source could not
+   *  be read: the hours figure then reads 0, which the DECISION path refuses to
+   *  act on, rather than an `Infinity` that would silently disable the safety
+   *  net. Consumers displaying hours should show "unknown" here. */
+  headroomKnown: boolean;
+  /** Engine-tagged, human-readable detail for DISPLAY ONLY (#205 scope 6) —
+   *  `"$3.40 of $20.00"` on the USD path, `"62% used, resets in 3h"` on a quota
+   *  path. The decision path must never read this; the tests assert it. */
+  nativeDetail: string;
 }
 
 export type CreditEvent =
@@ -100,6 +124,14 @@ export class CreditAccountant {
   private data: LedgerData;
   /** Latch so an engine-switch fires exactly once per downward crossing. */
   private belowThreshold = false;
+  /** Last snapshot from the headroom source (#205). Unknown until the first
+   *  successful refresh — so a configured-but-never-read source is treated as
+   *  unknown (and therefore non-switching), never as unlimited. */
+  private headroom: Headroom = {
+    known: false,
+    reason: "unreadable",
+    nativeDetail: "usage unknown",
+  };
 
   constructor(config: CreditConfig) {
     this.config = config;
@@ -115,9 +147,38 @@ export class CreditAccountant {
   }
 
   /** Whether est. meeting-hours left is under the fallback threshold right now.
-   *  Pull this at session start to decide whether to begin on the fallback. */
+   *  Pull this at session start to decide whether to begin on the fallback.
+   *
+   *  #205: unknown headroom never switches. An unreadable source means we do not
+   *  know how much is left — not that it is low — so acting on it would degrade
+   *  a working Claude session to the local tier on a transient read failure. It
+   *  is surfaced through `headroomKnown` instead of being guessed at. */
   isBelowThreshold(): boolean {
-    return this.gauge().estimatedHoursRemaining < this.thresholdHours;
+    const gauge = this.gauge();
+    return gauge.headroomKnown && gauge.estimatedHoursRemaining < this.thresholdHours;
+  }
+
+  /**
+   * Refresh the cached headroom snapshot from the configured source (#205).
+   *
+   * Async because a real source is a network read; the accountant's own read
+   * path stays synchronous so `startOnFallback` and the #37 rollover-resilience
+   * contract are unaffected. A source that throws is treated as unreadable
+   * rather than allowed to escape — a headroom failure must never take down the
+   * caption stream, exactly as a ledger write failure never does.
+   */
+  async refreshHeadroom(): Promise<void> {
+    const source = this.config.headroomSource;
+    if (!source) return;
+    let headroom: Headroom;
+    try {
+      const reading = await source.read();
+      headroom = quotaHeadroom(reading, this.meteredHours(), this.config.now());
+    } catch {
+      headroom = { known: false, reason: "unreadable", nativeDetail: "usage unknown" };
+    }
+    this.headroom = headroom;
+    this.evaluate();
   }
 
   /** Subscribe to gauge / engine-switch events. Returns an unsubscribe fn. */
@@ -160,32 +221,53 @@ export class CreditAccountant {
     this.evaluate();
   }
 
+  /** Metered meeting-hours this period — the denominator of every rolling rate. */
+  private meteredHours(): number {
+    return this.data.meteredMs / MS_PER_HOUR;
+  }
+
   /** Current gauge snapshot (period-rollover aware). */
   gauge(): GaugeState {
     this.rolloverIfNeeded();
     const pool = Math.max(0, this.config.poolUsd);
     const spent = this.data.spentUsd;
     const remaining = Math.max(0, pool - spent);
-    const meteredHours = this.data.meteredMs / MS_PER_HOUR;
-    const dollarsPerHour =
-      meteredHours > 0 && spent > 0 ? spent / meteredHours : this.defaultDollarsPerHour;
-    const estimatedHoursRemaining = dollarsPerHour > 0 ? remaining / dollarsPerHour : 0;
+    const meteredHours = this.meteredHours();
+    // The USD derivation, unchanged (#205 scope 2): the shared helpers below are
+    // the same arithmetic this path always used — `spent / meteredHours` with a
+    // default until metered, then `remaining / rate` — lifted so the quota
+    // derivation cannot drift from it. Claude behaviour stays bit-for-bit.
+    const dollarsPerHour = ratePerHour(spent, meteredHours, this.defaultDollarsPerHour);
     const fractionUsed = pool > 0 ? Math.min(1, spent / pool) : 1;
+    // A configured headroom source REPLACES the USD derivation of hours; without
+    // one, the USD path is authoritative and always known.
+    const headroom: Headroom = this.config.headroomSource
+      ? this.headroom
+      : {
+          known: true,
+          hoursRemaining: hoursFromRate(remaining, dollarsPerHour),
+          nativeDetail: usdNativeDetail(spent, pool),
+        };
     return {
       periodKey: this.data.periodKey,
       poolUsd: pool,
       spentUsd: spent,
       remainingUsd: remaining,
       dollarsPerHour,
-      estimatedHoursRemaining,
+      // Never Infinity: unknown headroom reads 0, which
+      // `isBelowThreshold`/`evaluate` refuse to act on (#205 scope 5).
+      estimatedHoursRemaining: headroom.known ? headroom.hoursRemaining : 0,
       fractionUsed,
+      headroomKnown: headroom.known,
+      nativeDetail: headroom.nativeDetail,
     };
   }
 
   private evaluate(): void {
     const gauge = this.gauge();
     this.emit({ type: "gauge", gauge });
-    const below = gauge.estimatedHoursRemaining < this.thresholdHours;
+    // #205: same gate as isBelowThreshold — unknown headroom is not "low".
+    const below = gauge.headroomKnown && gauge.estimatedHoursRemaining < this.thresholdHours;
     if (below && !this.belowThreshold) {
       // Downward crossing — recommend the switch exactly once.
       this.emit({ type: "engine-switch", reason: "credit-low", gauge });
