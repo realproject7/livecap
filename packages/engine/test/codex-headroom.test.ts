@@ -46,6 +46,32 @@ describe("resetsAtMs (#204 seconds → milliseconds)", () => {
     expect(new Date(resetsAtMs(1_786_449_404) as number).getUTCFullYear()).toBe(2026);
   });
 
+  // The failure mode this conversion prevents, made checkable rather than
+  // inferred: `formatResetsIn` computes `resetsAt - nowMs` with no unit guard,
+  // so a RAW seconds value is ~1.79e12 ms in the past and renders "resets now"
+  // forever — a string that reads as correct while being permanently wrong.
+  it("prevents the permanent 'resets now' string a raw seconds value produces", () => {
+    const NOW = 1_786_400_000_000; // ms, shortly before the measured reset
+    const raw = 1_786_449_404; // what Codex actually sends
+    const unconverted = quotaHeadroom(
+      { known: true, windows: [{ label: "weekly", usedPercent: 18, resetsAt: raw }] },
+      3,
+      NOW,
+    );
+    expect(unconverted.nativeDetail).toBe("18% used, resets now"); // the bug
+
+    const converted = quotaHeadroom(
+      { known: true, windows: [{ label: "weekly", usedPercent: 18, resetsAt: resetsAtMs(raw) }] },
+      3,
+      NOW,
+    );
+    expect(converted.nativeDetail).toBe("18% used, resets in 13h"); // the fix
+    // Display-only either way — the decision is identical (#205 scope 7).
+    expect(unconverted.known && unconverted.hoursRemaining).toBe(
+      converted.known && converted.hoursRemaining,
+    );
+  });
+
   it("returns null for anything unusable, so the display just omits the reset", () => {
     expect(resetsAtMs(null)).toBeNull();
     expect(resetsAtMs(undefined)).toBeNull();
