@@ -337,6 +337,14 @@ mod tests {
         assert_eq!(damaged.stt_model, "small");
         assert_eq!(damaged, AppSettings::existing_install_default());
         assert_ne!(damaged, AppSettings::default());
+
+        // Same arm, second shape: a write truncated mid-flight. Listed
+        // separately because it is the realistic corruption, not a hand-edit.
+        let cut = temp_path("truncated");
+        std::fs::create_dir_all(cut.parent().unwrap()).unwrap();
+        std::fs::write(&cut, br#"{"onboardingComplete": true, "sttMod"#).unwrap();
+        assert_eq!(load(&cut).stt_model, "small");
+        std::fs::remove_dir_all(cut.parent().unwrap()).ok();
         std::fs::remove_dir_all(path.parent().unwrap()).ok();
     }
 
