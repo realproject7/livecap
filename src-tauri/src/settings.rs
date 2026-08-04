@@ -33,6 +33,28 @@ fn default_stt_model() -> String {
     // default and the fallback must not diverge (#110).
     livecap_core::model::DEFAULT_MODEL.into()
 }
+
+/// What an install was running before #202 moved the default.
+const LEGACY_STT_MODEL: &str = "small";
+
+/// The model an EXISTING install keeps when its settings file carries no
+/// `sttModel` (#202 migration).
+///
+/// The discriminator is the settings FILE, not the field: `load()` only reaches
+/// this deserialization path when a file was read, so anything landing here is
+/// an install that has run before. Files predating #110 have no `sttModel` at
+/// all, and those users never chose `small` — they were simply defaulted into
+/// it — so treating "absent" as consent to a 547 MB download on the next
+/// session start would be exactly the silent switch #202 rules out. A fresh
+/// install has no file, takes `AppSettings::default()`, and gets the new
+/// default.
+///
+/// Trade-off, stated because it is real: an existing user who never touched the
+/// setting stays on `small` until they pick the new model in the Settings sheet,
+/// where it appears with its size. Opt-in beats an unrequested download.
+fn migrated_stt_model() -> String {
+    LEGACY_STT_MODEL.into()
+}
 fn default_pool() -> f64 {
     20.0
 }
@@ -52,7 +74,7 @@ fn default_capsule_content() -> String {
 
 /// Curated whisper model picks the Settings sheet exposes (#110) — a subset of
 /// `livecap_core::model::MODEL_NAMES`. Anything else sanitizes to the default.
-const STT_MODELS: &[&str] = &["small", "medium", "large-v3-turbo"];
+const STT_MODELS: &[&str] = &["small", "medium", "large-v3-turbo", "large-v3-turbo-q5_0"];
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
@@ -69,9 +91,10 @@ pub struct AppSettings {
     #[serde(default = "default_source_language")]
     pub source_language: String,
     /// Whisper STT model for transcription (#110): "small" | "medium" |
-    /// "large-v3-turbo" (curated subset of MODEL_NAMES; downloaded on first use
-    /// at session start).
-    #[serde(default = "default_stt_model")]
+    /// "large-v3-turbo" | "large-v3-turbo-q5_0" (curated subset of MODEL_NAMES;
+    /// downloaded on first use at session start). Fresh installs default to the
+    /// quantized turbo build (#202); an existing file keeps what it had.
+    #[serde(default = "migrated_stt_model")]
     pub stt_model: String,
     /// Agent SDK monthly pool in USD (PROPOSAL §6; presets 20/100/200).
     pub pool_usd: f64,
@@ -129,13 +152,16 @@ impl AppSettings {
         // #94: source language is a lowercased non-empty tag, else "auto".
         let source = self.source_language.trim().to_lowercase();
         self.source_language = if source.is_empty() { default_source_language() } else { source };
-        // #110: only the three curated model picks are valid; a hand-edited
-        // value (or a future rename) clamps back to the default.
+        // #110: only the curated model picks are valid; a hand-edited value
+        // (or a future rename) clamps back. It clamps to the LEGACY model, not
+        // the new default (#202): sanitize only ever runs on a file that was
+        // read, i.e. an existing install, and a garbage value is no more
+        // consent to a 547 MB download than an absent one.
         let model = self.stt_model.trim();
         self.stt_model = if STT_MODELS.contains(&model) {
             model.to_string()
         } else {
-            default_stt_model()
+            migrated_stt_model()
         };
         if !self.pool_usd.is_finite() || self.pool_usd <= 0.0 {
             self.pool_usd = default_pool();
@@ -295,6 +321,43 @@ mod tests {
             "livecap_core::model::DEFAULT_MODEL ({}) must be one of the curated STT_MODELS",
             livecap_core::model::DEFAULT_MODEL
         );
+        // The legacy value must stay selectable too, or the #202 migration would
+        // clamp every existing install straight back onto the new default.
+        assert!(STT_MODELS.contains(&LEGACY_STT_MODEL));
+    }
+
+    /// #202 migration. The settings FILE is the discriminator, not the field: a
+    /// fresh install has none and gets the new default; anything parsed from
+    /// disk is an install that has run before and keeps `small` unless it says
+    /// otherwise. Nobody is pushed into a 547 MB download they did not ask for.
+    #[test]
+    fn fresh_install_gets_the_new_default_existing_installs_keep_theirs() {
+        // No file at all → fresh install → the new default.
+        assert_eq!(AppSettings::default().stt_model, "large-v3-turbo-q5_0");
+        assert_eq!(
+            AppSettings::default().stt_model,
+            livecap_core::model::DEFAULT_MODEL
+        );
+
+        // A settings file with NO sttModel (predates #110) → still an existing
+        // install → keeps the legacy model, NOT the new default.
+        let legacy: AppSettings =
+            serde_json::from_str(r#"{ "onboardingComplete": true }"#).unwrap();
+        assert_eq!(legacy.stt_model, "small");
+        assert_eq!(legacy.sanitized().stt_model, "small");
+
+        // An explicit choice is respected in both directions.
+        for chosen in ["small", "medium", "large-v3-turbo", "large-v3-turbo-q5_0"] {
+            let parsed: AppSettings =
+                serde_json::from_str(&format!(r#"{{ "sttModel": "{chosen}" }}"#)).unwrap();
+            assert_eq!(parsed.sanitized().stt_model, chosen);
+        }
+
+        // A hand-edited unknown value clamps to the legacy model for the same
+        // reason absence does — it is not consent to a new download.
+        let junk: AppSettings =
+            serde_json::from_str(r#"{ "sttModel": "large-v9-turbo" }"#).unwrap();
+        assert_eq!(junk.sanitized().stt_model, "small");
     }
 
     #[test]
@@ -304,7 +367,7 @@ mod tests {
         assert_eq!(d.engine_pref, "cli");
         assert_eq!(d.target_language, "ko"); // KO default (§8.6)
         assert_eq!(d.source_language, "auto"); // #94: per-utterance auto-detect
-        assert_eq!(d.stt_model, "small"); // #110: DEFAULT_MODEL stays "small"
+        assert_eq!(d.stt_model, "large-v3-turbo-q5_0"); // #202: fresh install
         assert_eq!(d.pool_usd, 20.0); // Pro preset
         assert_eq!(d.reset_day, 1);
         assert!(d.auto_switch);
@@ -333,7 +396,7 @@ mod tests {
         assert_eq!(clean.engine_pref, "cli");
         assert_eq!(clean.target_language, "pt-br");
         assert_eq!(clean.source_language, "en");
-        assert_eq!(clean.stt_model, "small"); // #110: unknown model → default
+        assert_eq!(clean.stt_model, "small"); // #202: unknown → LEGACY, not the new default
         assert_eq!(clean.pool_usd, 20.0);
         assert_eq!(clean.reset_day, 28);
         assert_eq!(clean.caption_size, "m");
@@ -366,7 +429,7 @@ mod tests {
         assert!(parsed.onboarding_complete);
         assert_eq!(parsed.target_language, "en");
         assert_eq!(parsed.source_language, "auto"); // #94: missing → default
-        assert_eq!(parsed.stt_model, "small"); // #110: missing → default
+        assert_eq!(parsed.stt_model, "small"); // #202: missing on an existing file → legacy
         assert_eq!(parsed.engine_pref, "cli");
         assert_eq!(parsed.pool_usd, 20.0);
     }

@@ -18,8 +18,19 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 use crate::error::CoreError;
 
-/// Default model for live captioning (good accuracy/latency balance).
-pub const DEFAULT_MODEL: &str = "small";
+/// Default model for a FRESH install (#202): the quantized Large v3 Turbo.
+///
+/// Chosen on the #111 measurements in `docs/CALIBRATION.md` — +82 MB over
+/// `small` (547 vs 465 MB) buys full-turbo-class accuracy, while cold load
+/// stays at `small`'s level (0.29 s vs 0.24 s) instead of the unquantized
+/// build's 6.3 s. RTF 0.31 is well inside real-time and no `FallingBehind`
+/// (#141) fired in any run.
+///
+/// This is the fresh-install default and the engine's download-failure
+/// fallback. An install that already has a settings file keeps whatever it was
+/// running — see `settings.rs::migrated_stt_model` — so no working install is
+/// pushed into an unrequested download.
+pub const DEFAULT_MODEL: &str = "large-v3-turbo-q5_0";
 
 /// Hugging Face repo hosting the official ggerganov/whisper.cpp models.
 const HF_REPO: &str = "https://huggingface.co/ggerganov/whisper.cpp";
