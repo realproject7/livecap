@@ -552,6 +552,9 @@ async fn start_inner(app: &AppHandle) -> Result<Option<String>, String> {
         // for contract completeness (it translates, it does not transcribe).
         "sourceLanguageCode": settings.source_language,
         "enginePref": settings.engine_pref,
+        // #203: the Claude model the CLI tier runs; the host clamps it again and
+        // passes it to buildClaudeArgs, so this is what reaches `--model`.
+        "claudeModel": settings.claude_model,
         "poolUsd": settings.pool_usd,
         "resetDay": settings.reset_day,
         "autoSwitch": settings.auto_switch,

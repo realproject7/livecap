@@ -202,6 +202,65 @@ describe("ClaudeCliEngine — real spawn/stdio (fake-cli replay)", () => {
     expect(totalCharged).toBeCloseTo(0.002, 6);
   });
 
+  // #203. Two claims the picker depends on, both measured against a REAL
+  // spawned process rather than a mock: the chosen model reaches the command
+  // line, and cost accounting does not change when it does.
+  it("spawns the chosen model and accounts cost identically to the default (#203)", async () => {
+    async function run(model: string | undefined): Promise<{ argv: string[]; usages: Usage[] }> {
+      const argvFile = join(tmpdir(), `livecap-argv-203-${model ?? "default"}-${process.pid}.json`);
+      const engine = new ClaudeCliEngine({
+        bin: FAKE_CLI,
+        cwd: tmpdir(),
+        env: {
+          ...process.env,
+          LIVECAP_FAKE_FIXTURE: fixturePath("session-without-partials.jsonl"),
+          LIVECAP_FAKE_ARGV_OUT: argvFile,
+        },
+        includePartialMessages: false,
+        ...(model ? { model } : {}),
+      });
+      const usages: Usage[] = [];
+      engine.onUsage((u) => usages.push(u));
+      await engine.start();
+      try {
+        await drain(engine);
+      } finally {
+        await engine.stop();
+      }
+      return { argv: JSON.parse(readFileSync(argvFile, "utf8")) as string[], usages };
+    }
+
+    const fallback = await run(undefined);
+    const chosen = await run("opus");
+
+    // The argv the fake CLI was ACTUALLY spawned with — not the return value of
+    // buildClaudeArgs, and not a stub. Omitting the config field still pins Haiku.
+    expect(fallback.argv[fallback.argv.indexOf("--model") + 1]).toBe("haiku");
+    expect(chosen.argv[chosen.argv.indexOf("--model") + 1]).toBe("opus");
+    // Exactly one --model reaches the CLI (a second occurrence would make which
+    // one wins a CLI implementation detail).
+    expect(chosen.argv.filter((a) => a === "--model")).toHaveLength(1);
+    // Changing the model changes ONLY the model: the isolation recipe is intact.
+    // The session id is masked too — each engine mints its own UUID by design,
+    // so it legitimately differs between the two runs.
+    const shape = (argv: string[]): string[] =>
+      argv.map((arg, i) =>
+        argv[i - 1] === "--model" || argv[i - 1] === "--session-id" ? `<${argv[i - 1]}>` : arg,
+      );
+    expect(shape(chosen.argv)).toEqual(shape(fallback.argv));
+
+    // Cost accounting is model-independent: the adapter reports whatever the CLI
+    // put in `total_cost_usd` and derives the per-turn delta from it, with no
+    // per-model rate table anywhere in the path (#203 forbids adding one). Same
+    // reported stream ⇒ byte-identical Usage on a non-default model.
+    //
+    // Boundary, stated rather than implied: this proves OUR accounting does not
+    // branch on the model. It cannot prove what Anthropic's real CLI reports for
+    // Opus — that needs credentials this suite deliberately does not have.
+    expect(chosen.usages).toEqual(fallback.usages);
+    expect(chosen.usages[0]?.turnCostUsd).toBeGreaterThan(0);
+  });
+
   it("summarizes a transcript and attaches usage", async () => {
     const engine = makeEngine("session-without-partials.jsonl", false);
     await engine.start();

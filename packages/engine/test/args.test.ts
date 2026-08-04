@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest";
 
-import { buildClaudeArgs } from "../src/args";
+import { buildClaudeArgs, CLAUDE_MODELS, DEFAULT_MODEL, sanitizedClaudeModel } from "../src/args";
 
 describe("buildClaudeArgs", () => {
   const base = { sessionId: "sess-123", systemPrompt: "SYS", includePartialMessages: true };
@@ -56,5 +56,40 @@ describe("buildClaudeArgs", () => {
     expect(buildClaudeArgs(base)).toContain("haiku");
     const i = buildClaudeArgs({ ...base, model: "sonnet" }).indexOf("--model");
     expect(buildClaudeArgs({ ...base, model: "sonnet" })[i + 1]).toBe("sonnet");
+  });
+
+  // #203: every curated pick has to survive into argv — a picker that changes a
+  // setting without changing the spawned command line is the failure this guards.
+  it("carries every curated model into --model", () => {
+    for (const model of CLAUDE_MODELS) {
+      const args = buildClaudeArgs({ ...base, model });
+      expect(args[args.indexOf("--model") + 1]).toBe(model);
+    }
+  });
+});
+
+describe("sanitizedClaudeModel (#203)", () => {
+  it("keeps every curated pick", () => {
+    for (const model of CLAUDE_MODELS) {
+      expect(sanitizedClaudeModel(model)).toBe(model);
+    }
+  });
+
+  // An unknown model does not fail locally — it spawns a CLI that 404s on every
+  // turn, i.e. a dead translation lane rather than a visible error. Clamping is
+  // what keeps a hand-edited settings.json from doing that.
+  it("clamps unknown values, absent values, and whitespace to the default", () => {
+    expect(sanitizedClaudeModel("claude-3-5-haiku-20241022")).toBe(DEFAULT_MODEL);
+    expect(sanitizedClaudeModel("opus-4-1")).toBe(DEFAULT_MODEL);
+    expect(sanitizedClaudeModel("Opus")).toBe(DEFAULT_MODEL); // exact match only
+    expect(sanitizedClaudeModel(undefined)).toBe(DEFAULT_MODEL);
+    expect(sanitizedClaudeModel(null)).toBe(DEFAULT_MODEL);
+    expect(sanitizedClaudeModel("   ")).toBe(DEFAULT_MODEL);
+    expect(sanitizedClaudeModel(" sonnet ")).toBe("sonnet"); // trimmed, not rejected
+  });
+
+  it("keeps the default inside the curated list", () => {
+    expect(CLAUDE_MODELS).toContain(DEFAULT_MODEL);
+    expect(DEFAULT_MODEL).toBe("haiku"); // #203 does not move the default
   });
 });

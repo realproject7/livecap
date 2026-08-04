@@ -18,6 +18,7 @@ export type {
 } from "./types";
 
 export { detectProxy, detectCustomEndpoint } from "./env";
+export { CLAUDE_MODELS, DEFAULT_MODEL, sanitizedClaudeModel } from "./args";
 export type { ClaudeArgsOptions } from "./args";
 export type { PromptOptions } from "./prompt";
 export { findCliBins, probeCapabilities, DEFAULT_CLI_NAMES } from "./detect";

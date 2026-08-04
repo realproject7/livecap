@@ -89,6 +89,10 @@ export type HostInbound =
       sourceLanguageCode: string;
       /** Engine tier to lead with (router default; §8.7 segmented control). */
       enginePref: EnginePref;
+      /** Claude model the CLI tier runs (#203): a curated tier alias — "haiku"
+       *  (default) | "sonnet" | "opus". Both sides clamp unknown values, and an
+       *  older shell that omits the field lands on the default. */
+      claudeModel: string;
       /** Agent SDK monthly pool in USD (PROPOSAL §6). */
       poolUsd: number;
       /** Billing reset day of month, 1–28 (§8.7 "resets Jul 1"). */

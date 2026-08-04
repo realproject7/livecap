@@ -76,6 +76,26 @@ fn default_capsule_content() -> String {
 /// `livecap_core::model::MODEL_NAMES`. Anything else sanitizes to the default.
 const STT_MODELS: &[&str] = &["small", "medium", "large-v3-turbo", "large-v3-turbo-q5_0"];
 
+/// Curated Claude model picks for the CLI tier (#203). These are the CLI's tier
+/// ALIASES, not dated snapshot ids, so LiveCap never pins a build that ages out.
+///
+/// Mirror of `CLAUDE_MODELS` in `packages/engine/src/args.ts` — the engine owns
+/// the `--model` contract, and this list must not drift from it. Kept in the
+/// cheapest-first order the picker shows.
+const CLAUDE_MODELS: &[&str] = &["haiku", "sonnet", "opus"];
+
+/// The Claude model the CLI tier runs unless the user picks another (#203).
+///
+/// Unlike `stt_model` (#202) this needs no migration split: before #203 the
+/// model was hard-pinned to Haiku in the engine with no way to change it, so
+/// "field absent" and "fresh install" describe installs that were BOTH already
+/// running Haiku. One default covers both, and nobody's behaviour changes until
+/// they touch the picker. Nothing is downloaded either way — the model runs on
+/// Anthropic's side, so a heavier pick costs plan budget, not disk.
+fn default_claude_model() -> String {
+    "haiku".into()
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
 pub struct AppSettings {
@@ -96,6 +116,16 @@ pub struct AppSettings {
     /// quantized turbo build (#202); an existing file keeps what it had.
     #[serde(default = "migrated_stt_model")]
     pub stt_model: String,
+    /// Claude model the CLI tier runs (#203): "haiku" | "sonnet" | "opus"
+    /// (curated tier aliases). Applies at the next session start; a heavier
+    /// model consumes the plan's budget faster but downloads nothing.
+    ///
+    /// No `#[serde(default = ...)]` of its own, unlike `stt_model` above: the
+    /// container default already yields Haiku, and here that IS the right
+    /// answer for an absent field, so a second override would be a no-op. The
+    /// STT field needs one only because its absent-field value deliberately
+    /// differs from the struct default (#202).
+    pub claude_model: String,
     /// Agent SDK monthly pool in USD (PROPOSAL §6; presets 20/100/200).
     pub pool_usd: f64,
     /// Billing reset day of month, 1–28.
@@ -126,6 +156,7 @@ impl Default for AppSettings {
             target_language: default_language(),
             source_language: default_source_language(),
             stt_model: default_stt_model(),
+            claude_model: default_claude_model(),
             pool_usd: default_pool(),
             reset_day: default_reset_day(),
             auto_switch: default_true(),
@@ -173,6 +204,16 @@ impl AppSettings {
             model.to_string()
         } else {
             migrated_stt_model()
+        };
+        // #203: only the curated tier aliases are valid. An unknown value would
+        // not fail here — it would spawn a CLI that 404s on every turn — so it
+        // clamps to the default. Unlike the STT clamp above there is no legacy
+        // split: Haiku is what every install was already running.
+        let claude = self.claude_model.trim();
+        self.claude_model = if CLAUDE_MODELS.contains(&claude) {
+            claude.to_string()
+        } else {
+            default_claude_model()
         };
         if !self.pool_usd.is_finite() || self.pool_usd <= 0.0 {
             self.pool_usd = default_pool();
@@ -306,6 +347,7 @@ mod tests {
             target_language: "ja".into(),
             source_language: "en".into(),
             stt_model: "medium".into(),
+            claude_model: "sonnet".into(),
             pool_usd: 100.0,
             reset_day: 15,
             auto_switch: false,
@@ -397,6 +439,59 @@ mod tests {
         assert_eq!(junk.sanitized().stt_model, "small");
     }
 
+    /// #203. The Claude pick is the ONE model choice that costs plan budget
+    /// rather than disk, so the clamp matters for a different reason than the
+    /// STT one: a bad value spawns a CLI that 404s every turn — a dead
+    /// translation lane, not a visible error.
+    #[test]
+    fn claude_model_defaults_to_haiku_and_clamps_unknown_values() {
+        // Absent field (every settings.json written before #203) → Haiku, which
+        // is what those installs were already running hard-pinned. No migration
+        // split is needed here, unlike #202.
+        let existing: AppSettings =
+            serde_json::from_str(r#"{ "onboardingComplete": true }"#).unwrap();
+        assert_eq!(existing.claude_model, "haiku");
+        assert_eq!(existing.sanitized().claude_model, "haiku");
+
+        // Every curated pick survives sanitize verbatim.
+        for chosen in CLAUDE_MODELS {
+            let parsed: AppSettings =
+                serde_json::from_str(&format!(r#"{{ "claudeModel": "{chosen}" }}"#)).unwrap();
+            assert_eq!(&parsed.sanitized().claude_model, chosen);
+        }
+
+        // Anything else clamps: a dated snapshot id, a tier that does not exist,
+        // wrong case (exact match only), and blank/whitespace.
+        for junk in [
+            "claude-opus-4-5-20251101",
+            "sonnet-4-5",
+            "gpt-5",
+            "Haiku",
+            "",
+            "   ",
+        ] {
+            let parsed: AppSettings =
+                serde_json::from_str(&format!(r#"{{ "claudeModel": "{junk}" }}"#)).unwrap();
+            assert_eq!(
+                parsed.sanitized().claude_model,
+                "haiku",
+                "unknown model {junk:?} must clamp to the default"
+            );
+        }
+
+        // The wire key is camelCase like every other field, so the webview
+        // mirror and this struct agree on the name.
+        let json = serde_json::to_string(&AppSettings::default()).unwrap();
+        assert!(json.contains(r#""claudeModel":"haiku""#));
+    }
+
+    /// The default must be a member of the curated list, or `sanitized()` would
+    /// clamp the default away on every load (same guard as the STT list).
+    #[test]
+    fn default_claude_model_is_a_curated_pick() {
+        assert!(CLAUDE_MODELS.contains(&default_claude_model().as_str()));
+    }
+
     #[test]
     fn defaults_match_the_product_contract() {
         let d = AppSettings::default();
@@ -405,6 +500,7 @@ mod tests {
         assert_eq!(d.target_language, "ko"); // KO default (§8.6)
         assert_eq!(d.source_language, "auto"); // #94: per-utterance auto-detect
         assert_eq!(d.stt_model, "large-v3-turbo-q5_0"); // #202: fresh install
+        assert_eq!(d.claude_model, "haiku"); // #203: default unchanged
         assert_eq!(d.pool_usd, 20.0); // Pro preset
         assert_eq!(d.reset_day, 1);
         assert!(d.auto_switch);
@@ -423,6 +519,9 @@ mod tests {
             target_language: "  PT-BR ".into(),
             source_language: "  EN ".into(),
             stt_model: "large-v9".into(),
+            // #203: a dated snapshot id is exactly the plausible hand-edit —
+            // it looks like a real model, and the curated list takes aliases.
+            claude_model: "claude-3-5-haiku-20241022".into(),
             pool_usd: f64::NAN,
             reset_day: 31,
             caption_size: "xxl".into(),
@@ -434,6 +533,7 @@ mod tests {
         assert_eq!(clean.target_language, "pt-br");
         assert_eq!(clean.source_language, "en");
         assert_eq!(clean.stt_model, "small"); // #202: unknown → LEGACY, not the new default
+        assert_eq!(clean.claude_model, "haiku"); // #203: unknown → the default
         assert_eq!(clean.pool_usd, 20.0);
         assert_eq!(clean.reset_day, 28);
         assert_eq!(clean.caption_size, "m");

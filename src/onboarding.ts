@@ -9,7 +9,7 @@
 
 import { invoke } from "@tauri-apps/api/core";
 
-import type { AppSettings, EnginePref } from "./app-settings";
+import { claudeModelLabel, type AppSettings, type EnginePref } from "./app-settings";
 import { DEFAULT_LANGUAGE_CODE } from "./languages";
 import type { ProbeResult } from "./protocol";
 
@@ -179,15 +179,20 @@ export function startOnboarding(options: OnboardingOptions): void {
   const engineToggle = el<HTMLButtonElement>(host, "#ob-engine-toggle");
   const startBtn = el<HTMLButtonElement>(host, "#ob-start");
 
+  // #203: the model the CLI path will run. Read from the same settings the
+  // Settings sheet edits and rendered through the same label table, so the two
+  // surfaces cannot disagree — and the local branches below name no Claude
+  // model at all, because none is used there.
+  const claudeModel = claudeModelLabel(settings.claudeModel);
+
   function renderEngine(): void {
     if (cliFound && engine === "cli") {
-      engineTitle.textContent = "✓ Claude CLI found";
+      engineTitle.textContent = `✓ Claude CLI found · ${claudeModel}`;
       // #4: no "uses your plan's SDK credits / N hrs" — in real use the
       // subscription covers CLI usage today; LiveCap only watches for a policy
       // change and falls back to the free local model if usage ever starts to
       // draw on Agent SDK credits.
-      engineBody.textContent =
-        "Signed in on your plan — covered by your Claude subscription. If Anthropic's policy changes, LiveCap falls back to the free local model automatically.";
+      engineBody.textContent = `Signed in on your plan — translating with ${claudeModel}, covered by your Claude subscription. If Anthropic's policy changes, LiveCap falls back to the free local model automatically. You can change the model in Settings.`;
       engineAlt.textContent = "";
       engineToggle.hidden = false;
       engineToggle.textContent = "Use the local model instead — free, 2.4 GB download";
@@ -196,7 +201,7 @@ export function startOnboarding(options: OnboardingOptions): void {
       engineBody.textContent = "Local model (Qwen3 4B, 2.4 GB) — free, downloads on first use. Everything stays on this Mac.";
       engineAlt.textContent = "";
       engineToggle.hidden = false;
-      engineToggle.textContent = "Use the Claude CLI instead — covered by your plan";
+      engineToggle.textContent = `Use the Claude CLI instead — ${claudeModel}, covered by your plan`;
     } else {
       engineTitle.textContent = "Use the local model";
       engineBody.textContent = "Local model (Qwen3 4B, 2.4 GB) — free, downloads on first use. Everything stays on this Mac.";

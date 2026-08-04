@@ -8,9 +8,12 @@ import { open as openDialog } from "@tauri-apps/plugin-dialog";
 
 import {
   applyCaptionSize,
+  CLAUDE_MODELS,
+  claudeModelLabel,
   gaugeAmountLabel,
   nextResetLabel,
   POOL_PRESETS,
+  sanitizedClaudeModel,
   sanitizedSttModel,
   STT_MODELS,
   type AppSettings,
@@ -62,6 +65,11 @@ export function createSettingsSheet(options: SettingsSheetOptions): SettingsShee
         m.note ? ` · ${m.note}` : ""
       }</button>`,
   ).join("");
+  // #203: Claude model picker — same segmented control as the engine and STT
+  // pickers. Nothing downloads; the note carries the plan-budget trade-off.
+  const claudeChoices = CLAUDE_MODELS.map(
+    (m) => `<button class="sh-seg-btn" data-claude="${m.value}">${m.label} · ${m.note}</button>`,
+  ).join("");
 
   host.innerHTML = `
     <div class="sh-head">
@@ -71,13 +79,18 @@ export function createSettingsSheet(options: SettingsSheetOptions): SettingsShee
     <div class="sh-scroll">
       <div class="sh-section">Engine</div>
       <div class="sh-seg" role="radiogroup" aria-label="Translation engine">
-        <button class="sh-seg-btn" data-engine="cli">Claude CLI · Haiku</button>
+        <!-- #203: the model half of this label is set in renderControls from the
+             actual pick (it used to hard-code "Haiku"). -->
+        <button class="sh-seg-btn" data-engine="cli" id="sh-engine-cli">Claude CLI</button>
         <button class="sh-seg-btn" data-engine="local">Local · Qwen 4B</button>
       </div>
+      <div class="sh-seg" role="radiogroup" aria-label="Claude model">${claudeChoices}</div>
       <div class="sh-engine-note t-meta">
         Claude CLI usage is currently covered by your Claude subscription. If
         Anthropic's policy changes so it draws on Agent SDK credits, LiveCap
-        falls back to the free local model automatically.
+        falls back to the free local model automatically. A heavier model spends
+        that budget faster — nothing extra is downloaded, and the fall-back
+        switch below still applies. Applies at the next session start.
       </div>
       <div class="sh-gauge">
         <span class="sh-gauge-label t-meta">Usage this month</span>
@@ -162,6 +175,8 @@ export function createSettingsSheet(options: SettingsSheetOptions): SettingsShee
 
   const segButtons = Array.from(host.querySelectorAll<HTMLButtonElement>(".sh-seg-btn[data-engine]"));
   const sttButtons = Array.from(host.querySelectorAll<HTMLButtonElement>(".sh-seg-btn[data-stt]"));
+  const claudeButtons = Array.from(host.querySelectorAll<HTMLButtonElement>(".sh-seg-btn[data-claude]"));
+  const engineCliBtn = el<HTMLButtonElement>(host, "#sh-engine-cli");
   const sizeButtons = Array.from(host.querySelectorAll<HTMLButtonElement>(".sh-size"));
   const capsuleButtons = Array.from(host.querySelectorAll<HTMLButtonElement>(".sh-capsule"));
   const gaugeFill = el<HTMLDivElement>(host, "#sh-gauge-fill");
@@ -208,6 +223,13 @@ export function createSettingsSheet(options: SettingsSheetOptions): SettingsShee
     const sttModel = sanitizedSttModel(s.sttModel);
     for (const btn of sttButtons) {
       btn.setAttribute("aria-pressed", String(btn.dataset.stt === sttModel));
+    }
+    // #203: the engine button names the model actually selected, and the picker
+    // marks it pressed. textContent, not markup — the value came off disk.
+    const claudeModel = sanitizedClaudeModel(s.claudeModel);
+    engineCliBtn.textContent = `Claude CLI · ${claudeModelLabel(claudeModel)}`;
+    for (const btn of claudeButtons) {
+      btn.setAttribute("aria-pressed", String(btn.dataset.claude === claudeModel));
     }
     for (const btn of sizeButtons) {
       btn.setAttribute("aria-pressed", String(btn.dataset.size === s.captionSize));
@@ -278,6 +300,10 @@ export function createSettingsSheet(options: SettingsSheetOptions): SettingsShee
   // #110: whisper model; downloads (with progress) at the next session start.
   for (const btn of sttButtons) {
     btn.addEventListener("click", () => save({ sttModel: btn.dataset.stt as string }));
+  }
+  // #203: Claude model; reaches `--model` at the next session start.
+  for (const btn of claudeButtons) {
+    btn.addEventListener("click", () => save({ claudeModel: btn.dataset.claude as string }));
   }
   for (const btn of sizeButtons) {
     btn.addEventListener("click", () => {
