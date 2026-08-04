@@ -60,6 +60,20 @@ export type {
   HeadroomUnknownReason,
   HeadroomWindow,
 } from "./headroom";
+// Codex quota → headroom seam (#204). Percentages only: Codex exposes no USD
+// anywhere, and no token→USD rate card is shipped to invent one.
+export {
+  CodexHeadroomSource,
+  readingFromRateLimits,
+  resetsAtMs,
+  toHeadroomWindow,
+  windowLabel,
+} from "./codex-headroom";
+export type {
+  CodexRateLimits,
+  CodexRateLimitsReader,
+  CodexRateLimitWindow,
+} from "./codex-headroom";
 export type {
   CreditConfig,
   CreditEvent,
