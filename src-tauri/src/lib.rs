@@ -346,12 +346,22 @@ pub fn run() {
             app.manage(session::GaugeCache::default());
             app.manage(ui_state::UiState::default());
 
+            // #191: builds before #147 mirrored caption text into
+            // <app-data>/ui-heartbeat.json and nothing ever removed it, so an
+            // upgraded install kept a plaintext caption line on disk until a new
+            // session happened to overwrite it. Sweep it here — during setup,
+            // before any session can start. Both errors are propagated on
+            // purpose: starting up while known caption residue is still readable
+            // would defeat the guarantee this cleanup exists to make.
+            let app_data_dir = app.path().app_data_dir()?;
+            ui_state::sweep_persisted_heartbeat(&app_data_dir)?;
+
             // Persisted app settings (#12): onboarding state + the Settings
             // sheet values, loaded once and managed for the whole app.
             let settings_path = settings::settings_path(app.handle())?;
             app.manage(settings::SettingsState::new(settings_path));
 
-            let config_path = app.path().app_data_dir()?.join(config::FILE_NAME);
+            let config_path = app_data_dir.join(config::FILE_NAME);
             let cfg = config::load(&config_path);
             let initial_mode = overlay::initial_mode(&window, &cfg);
             // Pin-on-top preference restored from disk (default true). The
