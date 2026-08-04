@@ -101,10 +101,17 @@ run("tightenArchivePermissions (#192 upgrade remediation)", () => {
     expect(result.tightened).toBeGreaterThanOrEqual(1);
   });
 
-  it("tightens the folder itself — a 0755 archive dir leaks meeting titles", () => {
+  // The archive folder can be any directory the user picked (`session.rs:463`
+  // returns it verbatim), so this migration must not re-permission it — only
+  // the session files inside it.
+  it("never changes the archive folder's own mode", () => {
     chmodSync(folder, 0o755);
-    tightenArchivePermissions({ fs, folder });
-    expect(mode(folder)).toBe(0o700);
+    plant("2026-07-05 0900 — Standup.md", "# S\n", 0o644);
+
+    const result = tightenArchivePermissions({ fs, folder });
+
+    expect(mode(folder)).toBe(0o755);
+    expect(result.tightened).toBe(1); // the file only
   });
 
   it("leaves an already-0600 file alone and reports nothing to do", () => {
@@ -135,12 +142,12 @@ run("tightenArchivePermissions (#192 upgrade remediation)", () => {
 
   it("is idempotent — a second run finds nothing left to do", () => {
     plant("2026-07-05 0900 — Standup.md", "# S\n", 0o644);
-    chmodSync(folder, 0o755);
+    plant("2026-07-06 0900 — Retro.md", "# R\n", 0o640);
 
     const first = tightenArchivePermissions({ fs, folder });
     const second = tightenArchivePermissions({ fs, folder });
 
-    expect(first.tightened).toBe(2); // the folder + the one file
+    expect(first.tightened).toBe(2); // both legacy files
     expect(second).toEqual({ tightened: 0, failed: 0 });
   });
 

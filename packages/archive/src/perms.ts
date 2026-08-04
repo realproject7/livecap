@@ -10,7 +10,7 @@
 // change mtime), and nothing is ever deleted — the archive is user-owned data.
 
 import type { ArchiveFs } from "./fs";
-import { DIR_MODE, FILE_MODE } from "./fs";
+import { FILE_MODE } from "./fs";
 import { isMissingFile } from "./retention";
 
 export interface TightenPermissionsOptions {
@@ -36,7 +36,8 @@ function isTooPermissive(mode: number): boolean {
 }
 
 /**
- * Tighten anything in `folder` that a pre-#148 build left group/other-readable.
+ * Tighten the session FILES in `folder` that a pre-#148 build left
+ * group/other-readable. The folder's own mode is never changed.
  *
  * Idempotent and silent when there is nothing to fix: a mode is read first and
  * chmod is issued ONLY when group/other bits are actually set, so a folder that
@@ -70,18 +71,11 @@ export function tightenArchivePermissions(
     return { tightened, failed: isMissingFile(error) ? failed : failed + 1 };
   }
 
-  // The directory itself, too: a pre-#148 folder is 0755, which lets any local
-  // account LIST the file names — and a name is a meeting title, i.e. user
-  // content by this ticket's own invariant.
-  try {
-    if (isTooPermissive(fs.mode(folder))) {
-      fs.chmod(folder, DIR_MODE);
-      tightened += 1;
-    }
-  } catch (error) {
-    if (!isMissingFile(error)) failed += 1;
-  }
-
+  // The directory's own mode is deliberately NOT touched (@head, Batch 50):
+  // `archiveDir` is whatever folder the user selected (`session.rs:463-465`
+  // returns it verbatim), so it may be a multi-purpose directory of theirs —
+  // chmod'ing it is outside this migration's boundary, which is pre-existing
+  // session files.
   for (const name of names) {
     if (!name.endsWith(".md") && !name.endsWith(".md.tmp")) continue;
     const path = fs.join(folder, name);

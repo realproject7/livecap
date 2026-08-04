@@ -43,9 +43,9 @@ export interface ArchiveFs {
 // meeting content, so on a shared/group-synced Mac they must not be world- or
 // group-readable. Applied at creation — new files/dirs are restricted; umask can
 // only remove further bits, never widen these.
+const DIR_MODE = 0o700;
 // Exported so the upgrade sweep (#192, perms.ts) tightens pre-#148 files to the
-// SAME modes the write path applies — one source, so the two cannot drift.
-export const DIR_MODE = 0o700;
+// SAME mode the write path applies — one source, so the two cannot drift.
 export const FILE_MODE = 0o600;
 
 /** A node-backed ArchiveFs for production use (the consumer wires this in). */
