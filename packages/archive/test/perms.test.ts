@@ -187,6 +187,30 @@ describe("tightenArchivePermissions result contract (#192)", () => {
     });
   });
 
+  // An unreadable FOLDER is not an empty one: reporting {0,0} would tell the
+  // caller everything is fine while every legacy 0644 transcript inside stays
+  // exposed and unmentioned.
+  it("an unreadable archive folder is a failure, not a clean sweep", () => {
+    const fs = new FakeFs();
+    fs.writeFile(`${FOLDER}/${SECRET_NAME}`, "# transcript\n");
+    fs.eaccesOnReaddir.add(FOLDER);
+
+    const result = tightenArchivePermissions({ fs, folder: FOLDER });
+
+    expect(result).toEqual({ tightened: 0, failed: 1 });
+    expect(JSON.stringify(result)).not.toContain("SECRET_MEETING_TITLE");
+  });
+
+  it("a folder that does not exist is the one tolerated case", () => {
+    const fs = new FakeFs();
+    fs.enoentOnReaddir.add(FOLDER);
+
+    expect(tightenArchivePermissions({ fs, folder: FOLDER })).toEqual({
+      tightened: 0,
+      failed: 0,
+    });
+  });
+
   it("one unreadable file does not stop the sweep reaching the others", () => {
     const fs = new FakeFs();
     const blocked = `${FOLDER}/${SECRET_NAME}`;

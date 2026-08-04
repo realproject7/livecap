@@ -79,7 +79,22 @@ export class FakeFs implements ArchiveFs {
     this.mtimes.delete(path);
   }
 
+  /** Dirs whose readdir should throw EACCES (an unreadable archive folder). */
+  readonly eaccesOnReaddir = new Set<string>();
+  /** Dirs whose readdir should throw ENOENT (folder not created yet). */
+  readonly enoentOnReaddir = new Set<string>();
+
   readdir(dir: string): string[] {
+    if (this.enoentOnReaddir.has(dir)) {
+      throw Object.assign(new Error(`ENOENT: no such file or directory, scandir '${dir}'`), {
+        code: "ENOENT",
+      });
+    }
+    if (this.eaccesOnReaddir.has(dir)) {
+      throw Object.assign(new Error(`EACCES: permission denied, scandir '${dir}'`), {
+        code: "EACCES",
+      });
+    }
     const prefix = dir.endsWith("/") ? dir : `${dir}/`;
     const names: string[] = [];
     for (const key of this.files.keys()) {

@@ -61,10 +61,13 @@ export function tightenArchivePermissions(
   let names: string[];
   try {
     names = fs.readdir(folder);
-  } catch {
-    // No archive folder yet (fresh install, or a folder the user moved away) —
-    // nothing to remediate.
-    return { tightened, failed };
+  } catch (error) {
+    // A folder that isn't there (fresh install, or one the user moved away) has
+    // nothing to remediate — the only tolerable case. ANY other failure means
+    // transcripts we could not even enumerate, let alone protect: report it, or
+    // an EACCES would render as "all clean" while legacy 0644 files stay
+    // exposed and the user is told nothing.
+    return { tightened, failed: isMissingFile(error) ? failed : failed + 1 };
   }
 
   // The directory itself, too: a pre-#148 folder is 0755, which lets any local
