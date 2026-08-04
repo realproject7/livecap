@@ -130,14 +130,31 @@ run("tightenArchivePermissions (#192 upgrade remediation)", () => {
   it("covers crash-left .md.tmp orphans and live (recording) files too", () => {
     const orphan = plant("2026-07-05 0900 — Standup.md.tmp", "partial\n", 0o644);
     const recording = plant("2026-07-06 0900 — (recording).md", "live\n", 0o644);
-    const unrelated = plant("notes.txt", "not ours\n", 0o644);
 
     tightenArchivePermissions({ fs, folder });
 
     expect(mode(orphan)).toBe(0o600);
     expect(mode(recording)).toBe(0o600);
-    // Not an archive entry — the sweep stays inside its own file types.
-    expect(mode(unrelated)).toBe(0o644);
+  });
+
+  // The archive folder can be a directory the user picked for other things too,
+  // so the migration must touch only files LiveCap demonstrably wrote — the
+  // date-prefixed grammar, never arbitrary `.md`.
+  it("never touches files LiveCap did not write", () => {
+    const notes = plant("notes.md", "my own notes\n", 0o644);
+    const draft = plant("todo.md.tmp", "draft\n", 0o644);
+    const noPrefix = plant("Standup.md", "someone else's\n", 0o644);
+    const wrongPrefix = plant("2026-07 — Standup.md", "not our grammar\n", 0o644);
+    const other = plant("notes.txt", "not markdown\n", 0o644);
+    const ours = plant("2026-07-05 0900 — Standup.md", "# ours\n", 0o644);
+
+    const result = tightenArchivePermissions({ fs, folder });
+
+    for (const theirs of [notes, draft, noPrefix, wrongPrefix, other]) {
+      expect(mode(theirs)).toBe(0o644);
+    }
+    expect(mode(ours)).toBe(0o600);
+    expect(result.tightened).toBe(1);
   });
 
   it("is idempotent — a second run finds nothing left to do", () => {

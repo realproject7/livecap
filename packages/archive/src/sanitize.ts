@@ -85,3 +85,19 @@ export function sanitizeTitle(raw: string): string {
 export function archiveFileName(fileNamePrefix: string, rawTitle: string): string {
   return `${fileNamePrefix} — ${sanitizeTitle(rawTitle)}.md`;
 }
+
+/**
+ * Whether `name` follows the grammar `archiveFileName` produces —
+ * `"<YYYY-MM-DD HHMM> — <title>.md"`, plus the `.md.tmp` a crash mid-rewrite
+ * leaves. Mirrors `src-tauri/src/dashboard.rs:is_session_file` (#144), which
+ * already refuses to treat arbitrary `.md` as a session.
+ *
+ * This matters wherever we act on the archive FOLDER rather than on a path we
+ * wrote ourselves: the folder is whatever directory the user selected in
+ * Settings (`session.rs:463` returns it verbatim), so it may hold their own
+ * notes and documents. Anything that mutates files there must first establish
+ * that LiveCap wrote them (#192).
+ */
+export function isSessionFileName(name: string): boolean {
+  return /^\d{4}-\d{2}-\d{2} \d{4} — .+\.md(\.tmp)?$/.test(name);
+}

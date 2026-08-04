@@ -12,6 +12,7 @@
 import type { ArchiveFs } from "./fs";
 import { FILE_MODE } from "./fs";
 import { isMissingFile } from "./retention";
+import { isSessionFileName } from "./sanitize";
 
 export interface TightenPermissionsOptions {
   fs: ArchiveFs;
@@ -77,7 +78,10 @@ export function tightenArchivePermissions(
   // chmod'ing it is outside this migration's boundary, which is pre-existing
   // session files.
   for (const name of names) {
-    if (!name.endsWith(".md") && !name.endsWith(".md.tmp")) continue;
+    // Only files LiveCap demonstrably wrote — the archive's own filename
+    // grammar, NOT arbitrary `.md`. The folder may be a directory the user
+    // picked for other things too, and their notes are not ours to chmod.
+    if (!isSessionFileName(name)) continue;
     const path = fs.join(folder, name);
     try {
       if (isTooPermissive(fs.mode(path))) {
