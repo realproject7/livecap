@@ -167,11 +167,12 @@ Runtime or an Apple-framework bridge. Worth noting `objc2 0.6` and friends are
 **already dependencies** (`Cargo.toml:52-56`), used today for the Core Audio process tap
 and TCC probes — so an Apple path is new bindings, not a new toolchain (§3.2).
 
-### 2.3 License — HOLDS for FluidVoice, not a blocker for the components
+### 2.3 License — HOLDS for the reference solution, not a blocker for the components
 
-FluidVoice is GPLv3, so no code may be copied into MIT LiveCap; any adoption is a
-clean-room reimplementation. The components themselves are permissive: sherpa-onnx is
-Apache-2.0 and `nvidia/parakeet-tdt-0.6b-v3` is CC-BY-4.0 **[vendor-claimed]**.
+The reference solution is GPLv3, so no code may be copied into MIT LiveCap; any
+adoption is a clean-room reimplementation. The components themselves are permissive:
+sherpa-onnx is Apache-2.0 and `nvidia/parakeet-tdt-0.6b-v3` is CC-BY-4.0
+**[vendor-claimed]**.
 
 ### 2.4 Pipeline entanglement — OVERSTATED for bleed suppression
 
@@ -234,10 +235,10 @@ The genuine engine-shaped contract is narrower:
   path.
 - **Maturity risk:** three competing Rust binding crates, all young; the C API they wrap
   is stable, the Rust layer is not.
-- **Unmeasured against our baseline:** FluidVoice rates Parakeet top-tier on speed and
-  accuracy **[vendor-claimed]** — but §1 shows speed is not our constraint, so the only
-  claim that would matter is accuracy on *real meeting audio in the languages we
-  support*, which nobody has measured on either side.
+- **Unmeasured against our baseline:** the reference solution rates Parakeet top-tier
+  on speed and accuracy **[vendor-claimed]** — but §1 shows speed is not our
+  constraint, so the only claim that would matter is accuracy on *real meeting audio in
+  the languages we support*, which nobody has measured on either side.
 
 ### 3.2 Apple SpeechAnalyzer (macOS 26+), via `objc2` or `speech-rs`
 
