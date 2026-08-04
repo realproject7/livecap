@@ -141,6 +141,17 @@ impl Default for AppSettings {
 }
 
 impl AppSettings {
+    /// Defaults for an install whose settings file EXISTS but could not be used
+    /// (#202). Identical to `default()` except for the model: the install has
+    /// run before, so it keeps the legacy one rather than being moved onto a new
+    /// download it never requested.
+    fn existing_install_default() -> Self {
+        Self {
+            stt_model: migrated_stt_model(),
+            ..Self::default()
+        }
+    }
+
     /// Clamp every field into its valid domain so a hand-edited or stale
     /// file can never wedge the app.
     pub fn sanitized(mut self) -> Self {
@@ -190,14 +201,25 @@ impl AppSettings {
     }
 }
 
-/// Load the settings; any read/parse failure yields the defaults so a damaged
-/// file never blocks launch (it also re-runs onboarding, which is safe).
+/// Load the settings; any read/parse failure yields defaults so a damaged file
+/// never blocks launch (it also re-runs onboarding, which is safe).
+///
+/// #202: "defaults" is not one thing. A file that is ABSENT means a fresh
+/// install, which gets the new default model. A file that exists but cannot be
+/// read or parsed still belongs to an install that has run before — the user
+/// has a model on disk and a working setup — so it falls back to the LEGACY
+/// model instead. Otherwise a single corrupt byte would silently switch a
+/// working install to a 547 MB download, which is the outcome the whole
+/// migration exists to prevent.
 pub fn load(path: &Path) -> AppSettings {
     match fs::read_to_string(path) {
         Ok(text) => serde_json::from_str::<AppSettings>(&text)
             .map(AppSettings::sanitized)
-            .unwrap_or_default(),
-        Err(_) => AppSettings::default(),
+            .unwrap_or_else(|_| AppSettings::existing_install_default()),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => AppSettings::default(),
+        // The file is there and we could not read it (permissions, I/O): an
+        // existing install, and the conservative branch is the same one.
+        Err(_) => AppSettings::existing_install_default(),
     }
 }
 
@@ -303,11 +325,18 @@ mod tests {
 
     #[test]
     fn missing_or_damaged_file_falls_back_to_defaults() {
+        // Absent file = fresh install: full defaults, including the new model.
         assert_eq!(load(Path::new("/nonexistent/livecap-settings.json")), AppSettings::default());
         let path = temp_path("damaged");
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::fs::write(&path, b"{not json").unwrap();
-        assert_eq!(load(&path), AppSettings::default());
+        // #202: a file that EXISTS but will not parse belongs to an install that
+        // has run before — defaults everywhere else, but the legacy model, so a
+        // corrupt byte cannot trigger an unrequested 547 MB download.
+        let damaged = load(&path);
+        assert_eq!(damaged.stt_model, "small");
+        assert_eq!(damaged, AppSettings::existing_install_default());
+        assert_ne!(damaged, AppSettings::default());
         std::fs::remove_dir_all(path.parent().unwrap()).ok();
     }
 
