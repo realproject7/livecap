@@ -68,11 +68,47 @@ create_identity() {
 
   # Bundle key+cert and import into the login keychain; -T pre-authorizes
   # /usr/bin/codesign to use the private key.
-  openssl pkcs12 -export -name "$IDENTITY" \
+  #
+  # The three legacy algorithm flags are REQUIRED, not an oversight (#193).
+  # OpenSSL 3.x defaults to AES-256-CBC + PBKDF2/SHA-256, which macOS
+  # `security import` (SecKeychainItemImport) cannot parse — it fails with
+  # "MAC verification failed during PKCS12 import (wrong password?)" even
+  # though the password is correct, and the script drops to the manual
+  # Keychain Access fallback on every fresh machine. PBE-SHA1-3DES/SHA-1 is
+  # what it can read.
+  #
+  # Yes, these are weak by modern standards, and that is fine HERE: this
+  # container lives for a few milliseconds inside a `mktemp -d` that the EXIT
+  # trap deletes, carries a throwaway local password, and exists only to hand
+  # a key we just generated to the keychain on the same machine. It never
+  # leaves the box and protects nothing at rest. Please do not "harden" these
+  # flags away — doing so re-breaks local signing (#193).
+  # Transport password for the container: generated fresh every run, never
+  # committed, never printed or logged. It exists only to get the key from
+  # openssl to the keychain a few lines below — nothing is left encrypted with
+  # it, since the trap removes $tmp on exit.
+  # The `|| return 1` is load-bearing: this function is called from
+  # `if ! create_identity || …`, and that context suppresses errexit for its
+  # whole body — so without it a failed generator would fall through and export
+  # the container with an EMPTY password instead of stopping. Returning
+  # non-zero is what routes the user to the manual fallback below. The
+  # emptiness check covers the same hole for a generator that "succeeds"
+  # silently. (`local` is declared separately because `local x=$(…)` would mask
+  # the assignment's exit status.)
+  local p12_pass
+  p12_pass=$(openssl rand -base64 24) || return 1
+  [ -n "$p12_pass" ] || return 1
+
+  # The env form keeps the value out of openssl's argv (and so out of `ps`);
+  # the prefix scopes it to this one command instead of exporting it. macOS
+  # `security` has no env option, so its -P is unavoidable — acceptable for a
+  # random per-run value that is dead by the time the function returns.
+  P12_PASS="$p12_pass" openssl pkcs12 -export -name "$IDENTITY" \
     -inkey "$tmp/key.pem" -in "$tmp/cert.pem" \
-    -out "$tmp/livecap-dev.p12" -passout pass:livecap-dev
+    -out "$tmp/livecap-dev.p12" -passout env:P12_PASS \
+    -certpbe PBE-SHA1-3DES -keypbe PBE-SHA1-3DES -macalg sha1
   security import "$tmp/livecap-dev.p12" -k "$LOGIN_KEYCHAIN" \
-    -P livecap-dev -T /usr/bin/codesign
+    -P "$p12_pass" -T /usr/bin/codesign
 
   # Trust the cert for code signing (user trust domain). macOS shows one GUI
   # password prompt for this; that is the single interactive step.
