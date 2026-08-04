@@ -44,10 +44,19 @@ export const STT_MODELS: { value: string; label: string; size: string; note?: st
   // picker copy.
   { value: "medium", label: "Medium", size: "~1.5 GB", note: "Turbo is faster & better" },
   { value: "large-v3-turbo", label: "Large v3 Turbo", size: "~1.6 GB" },
+  // #202: the quantized turbo build is the fresh-install default — turbo-class
+  // accuracy at +82 MB over Small, and a 0.29 s cold load instead of 6.3 s.
+  { value: "large-v3-turbo-q5_0", label: "Large v3 Turbo (compact)", size: "~547 MB" },
 ];
 
 /** The persisted model pick, defaulting to "small" when the field is absent
- *  (settings.json files predating #110) or holds an unknown value. */
+ *  (settings.json files predating #110) or holds an unknown value.
+ *
+ *  The fallback stays "small" and deliberately does NOT track the #202
+ *  fresh-install default: this function only ever sees settings that were
+ *  loaded from disk, i.e. an existing install, and mirrors the Rust
+ *  `migrated_stt_model` rather than `DEFAULT_MODEL`. A fresh install gets the
+ *  new default from the backend, not from here. */
 export function sanitizedSttModel(value: string | null | undefined): string {
   return STT_MODELS.some((m) => m.value === value) ? (value as string) : "small";
 }

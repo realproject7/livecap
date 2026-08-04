@@ -206,7 +206,7 @@ let appSettings: AppSettings = {
   engine: "cli",
   targetLanguage: "ko",
   sourceLanguage: "auto", // #94: per-utterance auto-detect until the user picks
-  sttModel: "small", // #110: default whisper model until the user picks
+  sttModel: "large-v3-turbo-q5_0", // #202 fresh-install default; get_settings overrides for existing installs
   poolUsd: DEFAULT_POOL_USD,
   resetDay: DEFAULT_RESET_DAY,
   autoSwitch: true,

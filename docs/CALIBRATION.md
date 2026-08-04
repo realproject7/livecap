@@ -31,12 +31,16 @@ RTF = processing wall-time ÷ audio duration. Lower is better; < 1.0 is real-tim
 | model | f1 | f2 | f3 | mean | cold load |
 |-------|----|----|----|------|-----------|
 | tiny | 0.098 | — | — | 0.10 (single fixture) | 0.13 s |
-| **small** (current default) | 0.191 | 0.251 | 0.251 | **0.23** | 0.24 s |
+| small | 0.191 | 0.251 | 0.251 | **0.23** | 0.24 s |
+| **large-v3-turbo-q5_0** (default since #202) | — | — | — | **0.31** | **0.29 s** |
 | large-v3-turbo | 0.206 | 0.307 | 0.281 | **0.26** | 6.3 s |
 | medium | 0.271 | 0.341 | 0.346 | **0.32** | 5.8 s |
 
-`large-v3-turbo` is faster than `medium` despite being larger — it is a
-distilled model. No `FallingBehind` (#141) event fired for any model, so all
+The `large-v3-turbo-q5_0` row carries only the mean and cold load: those are
+the figures the operator measured for the #202 default decision, and the
+per-fixture values were not published, so they are left blank rather than
+back-filled. `large-v3-turbo` is faster than `medium` despite being larger — it
+is a distilled model. No `FallingBehind` (#141) event fired for any model, so all
 three are comfortably real-time on this machine. Cold load is one-time per
 session; warm loads measured 0.6–0.9 s.
 
@@ -186,24 +190,38 @@ Two limitations to resolve before revisiting:
 
 ## Model recommendation
 
-**Recommend switching the default from `small` to `large-v3-turbo`** — an
-operator product decision, not applied in this document.
+**The default is `large-v3-turbo-q5_0`** — the quantized Large v3 Turbo,
+operator-approved and applied in #202.
+
+> **This supersedes an earlier recommendation in this document.** The original
+> version recommended the UNQUANTIZED `large-v3-turbo` and was written before
+> the quantized build was measured. The reasoning below is why the quantized one
+> won instead; the earlier objection it answers — a 1.5 GB download and a ~6 s
+> cold load — was correct and is what ruled the unquantized build out.
 
 For it:
-- Best accuracy of the three (only model correct on both domain vocabulary and
-  proper nouns).
-- Highest confidence in every single run (0.978–0.994).
-- Least damaged by the leading-silence stressor.
-- RTF 0.26 vs `small`'s 0.23 — a difference with no practical consequence at
-  these margins, and far from the `FallingBehind` threshold.
+- **Turbo-class accuracy at near-`small` cost.** 547 MB vs `small`'s 465 MB
+  (+82 MB), and a **0.29 s** cold load — `small`'s 0.24 s, not the unquantized
+  build's 6.3 s, which is the objection that had made turbo unshippable.
+- Correct on the domain vocabulary `small` gets wrong ("electrocardiogram", not
+  "electrocardogram").
+- On the leading-silence stressor: one fixture clean, a "Katie" prefix on the
+  other — comparable to the unquantized build's "CT" prefix, and better than
+  `small`'s invented "died long after".
+- RTF 0.31 — well inside real-time, and no `FallingBehind` (#141) event fired in
+  any run.
 
 Against it:
-- 1.5 GB download vs 465 MB — a real first-run cost on a metered connection.
-- ~6 s cold load vs 0.24 s. The app already surfaces
-  "preparing the caption model…" during this, but the wait is noticeable.
+- Slower than both `small` (0.23) and the unquantized turbo (0.26) at RTF 0.31.
+  Immaterial at these margins, but it is the one axis where it is not the best
+  of the set.
+- Its per-fixture RTF values were not published (see the throughput table), so
+  the 0.31 mean is a weaker figure than the three-fixture means beside it.
 
-`medium` is not recommended: slowest of the three, and the only model that
-corrupted a proper noun.
+`medium` is not recommended: slowest of the four, and the only model that
+corrupted a proper noun. The unquantized `large-v3-turbo` remains selectable for
+anyone who wants it, and existing installs keep whatever they were running —
+#202 moves the default for FRESH installs only.
 
 ## Discarded measurements
 
