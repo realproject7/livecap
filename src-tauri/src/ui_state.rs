@@ -33,12 +33,28 @@ const HEARTBEAT_FILES: [&str; 2] = ["ui-heartbeat.json", "ui-heartbeat.json.tmp"
 /// caption content was persisted by `ui_state.rs` alone (#54 introduced it,
 /// #147 removed it), so no other app-data file carries this residue class.
 ///
-/// Returns how many files were removed.
-pub fn sweep_persisted_heartbeat(app_data_dir: &Path) -> usize {
-    HEARTBEAT_FILES
-        .iter()
-        .filter(|name| std::fs::remove_file(app_data_dir.join(name)).is_ok())
-        .count()
+/// Returns how many files were cleaned. A removal that FAILS is an error, not a
+/// silent no-op: startup must not continue with unresolved caption residue, so
+/// only "the file isn't there" is tolerated (fresh install, or already swept).
+pub fn sweep_persisted_heartbeat(app_data_dir: &Path) -> std::io::Result<usize> {
+    let mut cleaned = 0;
+    for name in HEARTBEAT_FILES {
+        let path = app_data_dir.join(name);
+        match std::fs::remove_file(&path) {
+            Ok(()) => cleaned += 1,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            // Unlinking needs write permission on the DIRECTORY; emptying the
+            // file needs it on the FILE. Those fail independently, so a refused
+            // unlink can still be answered by truncating: it is the caption text
+            // that must go, not the inode. Only when both fail is the residue
+            // genuinely unresolved — and then the error propagates.
+            Err(unlink_err) => {
+                std::fs::write(&path, b"").map_err(|_| unlink_err)?;
+                cleaned += 1;
+            }
+        }
+    }
+    Ok(cleaned)
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -167,7 +183,7 @@ mod tests {
         std::fs::write(&beat, LEGACY_BEAT).unwrap();
         std::fs::write(&tmp, LEGACY_BEAT).unwrap();
 
-        assert_eq!(sweep_persisted_heartbeat(&dir), 2);
+        assert_eq!(sweep_persisted_heartbeat(&dir).unwrap(), 2);
 
         assert!(!beat.exists(), "legacy heartbeat still on disk");
         assert!(!tmp.exists(), "legacy heartbeat temp file still on disk");
@@ -197,11 +213,11 @@ mod tests {
         std::fs::create_dir_all(dir.join("models")).unwrap();
 
         // Fresh install: no heartbeat file at all — nothing removed, no error.
-        assert_eq!(sweep_persisted_heartbeat(&dir), 0);
+        assert_eq!(sweep_persisted_heartbeat(&dir).unwrap(), 0);
         // Idempotent: sweeping again after a real removal is still a no-op.
         std::fs::write(dir.join("ui-heartbeat.json"), LEGACY_BEAT).unwrap();
-        assert_eq!(sweep_persisted_heartbeat(&dir), 1);
-        assert_eq!(sweep_persisted_heartbeat(&dir), 0);
+        assert_eq!(sweep_persisted_heartbeat(&dir).unwrap(), 1);
+        assert_eq!(sweep_persisted_heartbeat(&dir).unwrap(), 0);
 
         assert_eq!(
             std::fs::read_to_string(dir.join("settings.json")).unwrap(),
@@ -209,6 +225,58 @@ mod tests {
         );
         assert!(dir.join("shell-state.json").exists());
         assert!(dir.join("models").is_dir());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A removal that genuinely FAILS must not be waved through as "nothing to
+    /// do" — startup propagates this error rather than continue with residue it
+    /// could not clear. Forced with an unremovable target (a directory at the
+    /// heartbeat's name, which neither `remove_file` nor a truncating write can
+    /// clear) so the test needs no permission tricks and no root.
+    #[test]
+    fn unclearable_residue_is_an_error_not_a_silent_pass() {
+        let dir = temp_dir("unclearable");
+        std::fs::create_dir_all(dir.join("ui-heartbeat.json")).unwrap();
+
+        let err = sweep_persisted_heartbeat(&dir)
+            .expect_err("a removal failure must surface, not read as a fresh install");
+        assert_ne!(
+            err.kind(),
+            std::io::ErrorKind::NotFound,
+            "only an absent file may be tolerated"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// When unlinking is refused but the files themselves are writable, the
+    /// caption text is still cleared — the text is what must go, not the inode.
+    /// A read-only DIRECTORY is what makes `remove_file` fail while a write to
+    /// an already-existing file inside it still succeeds.
+    #[cfg(unix)]
+    #[test]
+    fn a_refused_unlink_falls_back_to_emptying_the_files() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = temp_dir("refused-unlink");
+        let beat = dir.join("ui-heartbeat.json");
+        let tmp = dir.join("ui-heartbeat.json.tmp");
+        // Plant BOTH so neither name is merely absent — this test is about the
+        // refusal path, not the fresh-install path.
+        std::fs::write(&beat, LEGACY_BEAT).unwrap();
+        std::fs::write(&tmp, LEGACY_BEAT).unwrap();
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o555)).unwrap();
+
+        let swept = sweep_persisted_heartbeat(&dir);
+
+        // Restore write access before asserting, so a failed assert can never
+        // strand an unremovable temp directory.
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert_eq!(swept.unwrap(), 2);
+        assert!(beat.exists() && tmp.exists(), "unlink was refused");
+        for path in [&beat, &tmp] {
+            let body = std::fs::read_to_string(path).unwrap();
+            assert!(body.is_empty(), "caption text survived in {path:?}: {body}");
+        }
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
