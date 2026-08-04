@@ -113,17 +113,46 @@ mis-routes the channel and translates the wrong direction (`engine.rs:38-45`).
    auto_detect: 0.6 }` (`engine.rs:95-103`), and #111 **deliberately left them there**
    because the signal did not separate the cases (§1.1). There is no calibration for an
    engine switch to discard.
-2. The deeper point: the ticket treats "we would lose whisper's per-token
-   probabilities" as a major switching cost. Per §1.1 those probabilities **measurably
-   failed to discriminate** on every fixture tried. Losing a signal that did not
-   separate hallucinated from clean output is a much smaller loss than the ticket
-   implies.
+2. The ticket treats "we would lose whisper's per-token probabilities" as a major
+   switching cost. **How much of a loss that is depends on an unresolved question about
+   what #111 actually measured** — see §2.1.1. Under the reading the code supports, the
+   loss is smaller than the ticket implies; under #111's own caveat, it is untested
+   either way. It is not, on any reading, a *demonstrated* asset.
 
-That does **not** make the coupling free — the `auto_detect` floor still needs *some*
-language-confidence signal from any candidate, and #111 itself notes the per-utterance
-`confidence` is a heuristic rather than the per-token distribution originally specified,
-so a better whisper-side signal may still exist unexplored. But "the entire gate and
-calibration must be redesigned per engine" overstates what is actually at stake today.
+That does **not** make the coupling free: the `auto_detect` floor still needs some
+language-confidence signal from any candidate (§2.4).
+
+#### 2.1.1 Unresolved: what the 0.888–0.995 figures are
+
+**This spike could not settle this, and the answer changes how much §1.1 is worth.
+Flagging rather than picking the convenient reading.**
+
+`docs/CALIBRATION.md` (PR #199) states its `confidence` column is *"a heuristic
+per-utterance value, not the mean per-token probability #111 originally specified"*, and
+that separating clean from hallucinated output *"may need the per-token distribution,
+which this harness does not expose yet"*.
+
+**The code path appears to say otherwise** [source]: `model_bench.rs` reads
+`CaptionKind::Finalized { confidence }`; the pipeline fills that from
+`utterance.confidence` (`pipeline.rs:678`), where `utterance` is the engine's return
+value (`pipeline.rs:569`); and the engine sets it to `avg_confidence`
+(`whisper/engine.rs:396`, `:403`) — the per-segment mean of `full_get_token_prob`
+averaged across segments (`:334-369`). That is the **same value the floor gate compares**
+(`:385`). On this reading the bench measured the gate's real signal, and §1.1's
+conclusion — that it does not separate hallucinated from clean output — stands.
+
+Two ways to resolve, neither of which this spike is authorised to do:
+- If #111's caveat is describing a *different* value (a VAD-derived heuristic exists at
+  `vad.rs:22-27`, constants 0.8/0.9 — but those do not match the measured spread), the
+  gate's real signal is still unmeasured and §1.1 must be read as "the value #111 logged
+  did not separate the cases", not as a verdict on the gate.
+- If the caveat is simply out of date with the code, §1.1 stands as written and the
+  floors' failure to reject anything is a measured property of the shipped gate.
+
+**Either way the conclusion in §6 is unchanged**, because §6 does not rest on the gate
+being weak — it rests on speed not being the constraint, the accuracy gap being lexical,
+and the multilingual axis being unmeasured. This question should be settled in #111, not
+here.
 
 ### 2.2 Language-stack mismatch — HOLDS, but the FFI toolchain is already present
 
@@ -163,11 +192,28 @@ The genuine engine-shaped contract is narrower:
 
 ### 3.1 sherpa-onnx (Parakeet TDT / Nemotron), via `sherpa-rs` or the `sherpa_onnx` crate
 
-- **Confidence surface: YES** **[vendor-claimed]**. Token-level scores are exposed
-  (`ys_probs` on offline transducer results, `token_log_probs` on
-  `OfflineRecognitionResult`, per-token confidence via online `GetResult`);
-  `exp(log_prob)` yields the same `0..1` scale the current gate averages. Whether it
-  *discriminates* better than whisper's (§1.1) is unknown and unmeasured.
+- **Confidence surface: OFFLINE ONLY — and this is a design constraint, not a
+  footnote.** Checked against the C API the Rust crates wrap, not against feature
+  requests:
+  - `SherpaOnnxOfflineRecognizerResult` exposes *"optional token log probabilities,
+    parallel to `tokens_arr`"* — reachable from Rust, and `exp(log_prob)` yields the
+    same `0..1` scale the current gate averages.
+  - `SherpaOnnxOnlineRecognizerResult` — the **streaming** path — exposes text, tokens
+    and optional timestamps, and **no probability field**.
+
+  So sherpa cannot currently give LiveCap *both* native streaming partials *and* a
+  confidence signal on the same path. A design would have to emit partials from the
+  streaming recognizer and re-decode each finalized utterance offline to obtain the
+  gate input — extra compute per utterance, and a second decode path to keep
+  consistent. That is a materially larger integration than "swap the engine".
+  - **Correction to an earlier draft of this document:** it cited sherpa-onnx
+    PR #2897 (`token_log_probs` / `vocab_log_probs` on `OfflineRecognitionResult`) as
+    an available capability. **That PR is closed without merging** and must not be
+    counted on. Related work exists (`ys_probs` upstream; PR #2736 exposing it to
+    JNI/Kotlin/Java; PR #2843 token-level confidence), but the only thing this
+    document now relies on is what the C API header actually declares, above.
+  - Whether that signal *discriminates* better than whisper's (§1.1, §2.1.1) is
+    unknown and unmeasured on both sides.
 - **Language ID confidence: NOT equivalent.** Parakeet TDT v3 covers 25 European
   languages **[vendor-claimed]** but does not expose a per-utterance language posterior
   the way whisper's detection does. The `auto_detect` floor would need rebuilding —
@@ -176,8 +222,10 @@ The genuine engine-shaped contract is narrower:
   **[vendor-claimed]**.
 - **Size / license:** ~0.6 B params (~460 MB class); runtime Apache-2.0, model
   CC-BY-4.0 **[vendor-claimed]**.
-- **Streaming:** supported, which fits the 1200 ms partial cadence better than
-  whisper's fixed 30 s window.
+- **Streaming:** supported, and on its own it fits the 1200 ms partial cadence better
+  than whisper's fixed 30 s window — but see the confidence bullet above: the streaming
+  result carries no probabilities, so streaming and gating cannot come from the same
+  path.
 - **Maturity risk:** three competing Rust binding crates, all young; the C API they wrap
   is stable, the Rust layer is not.
 - **Unmeasured against our baseline:** FluidVoice rates Parakeet top-tier on speed and
@@ -229,7 +277,7 @@ Relative effort against the current pipeline, not calendar time.
 | Confidence gate | port scale; rebuild LID floor | recalibrate from scratch | unchanged |
 | Bleed suppression | unchanged (§2.4) | unchanged | unchanged |
 | VAD handoff | unchanged | overlaps `SpeechDetector` | unchanged |
-| Partials | native streaming (better) | native streaming | unchanged |
+| Partials | native streaming, but **no confidence on that path** — finals need a second, offline decode (§3.1) | native streaming | unchanged |
 | Model shipping | +~460 MB | OS-managed | 465 MB → 1.5 GB for turbo |
 | Platform floor | unchanged | **macOS 26+** | unchanged |
 | Calibration owed | full, new scale | full, new scale | already owed (§1.1) |
@@ -294,11 +342,13 @@ unsolved discrimination problem with a less-understood confidence scale.
 
 **C. A non-English accuracy gap is measured that `large-v3-turbo` does not close.**
 → **This is the branch that justifies engine work.** Open a separate ticket for the seam
-in §4.1, and evaluate **sherpa-onnx + Parakeet TDT** first: the only candidate that
-keeps a real per-token confidence surface, stays permissively licensed, and does not
-raise the platform floor. Its LID gap (§3.1) must be scoped in that ticket, because auto
-mode depends on it. **SpeechAnalyzer stays deferred** until the bindings question
-(§3.2) is answered by something other than a Swift helper binary.
+in §4.1, and evaluate **sherpa-onnx + Parakeet TDT** first: it is the candidate that
+keeps a per-token confidence surface reachable from Rust, stays permissively licensed,
+and does not raise the platform floor. **Three things must be scoped in that ticket, not
+assumed** (§3.1): the LID gap, because auto mode depends on it; the offline-only
+confidence surface, which forces streaming partials and gated finals onto two different
+decode paths; and the young Rust binding layer. **SpeechAnalyzer stays deferred** until
+the bindings question (§3.2) is answered by something other than a Swift helper binary.
 
 **In all branches:** any candidate must be measured against §1's fixtures before
 adoption, not against vendor benchmarks. Every competitor figure in this document is
@@ -315,7 +365,8 @@ Repository claims are cited inline to `main` @ `2ad4674`. Measured figures are f
 - [sherpa-onnx Rust bindings (`sherpa-rs`)](https://github.com/thewh1teagle/sherpa-rs)
 - [`sherpa_onnx` crate docs](https://docs.rs/sherpa-onnx/latest/sherpa_onnx/)
 - [`parakeet_rs` crate docs](https://docs.rs/parakeet-rs)
-- [sherpa-onnx: vocabulary/token log-probabilities API (PR #2897)](https://github.com/k2-fsa/sherpa-onnx/pull/2897)
+- [sherpa-onnx C API header — offline result declares optional token log probabilities; the online/streaming result does not](https://raw.githubusercontent.com/k2-fsa/sherpa-onnx/master/sherpa-onnx/c-api/c-api.h)
+- [sherpa-onnx PR #2897 — **closed without merging**; cited only to record that it must NOT be relied on](https://github.com/k2-fsa/sherpa-onnx/pull/2897)
 - [sherpa-onnx ASR engine overview](https://deepwiki.com/k2-fsa/sherpa-onnx/2.1-automatic-speech-recognition-(asr)-engine)
 - [sherpa-onnx Parakeet TDT support (issue #2183)](https://github.com/k2-fsa/sherpa-onnx/issues/2183)
 - [`nvidia/parakeet-tdt-0.6b-v3` (CC-BY-4.0)](https://huggingface.co/nvidia/parakeet-tdt-0.6b-v3)
