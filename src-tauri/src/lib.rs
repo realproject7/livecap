@@ -346,6 +346,15 @@ pub fn run() {
             app.manage(session::GaugeCache::default());
             app.manage(ui_state::UiState::default());
 
+            // #191: builds before #147 mirrored caption text into
+            // <app-data>/ui-heartbeat.json and nothing ever removed it, so an
+            // upgraded install kept a plaintext caption line on disk until a new
+            // session happened to overwrite it. Sweep it here — during setup,
+            // before any session can start.
+            if let Ok(dir) = app.path().app_data_dir() {
+                ui_state::sweep_persisted_heartbeat(&dir);
+            }
+
             // Persisted app settings (#12): onboarding state + the Settings
             // sheet values, loaded once and managed for the whole app.
             let settings_path = settings::settings_path(app.handle())?;
