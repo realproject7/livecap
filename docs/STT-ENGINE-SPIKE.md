@@ -117,8 +117,8 @@ mis-routes the channel and translates the wrong direction (`engine.rs:38-45`).
 1. #132 describes the floors as *"freshly calibrated in #111"*. They are not calibrated
    at all — all five families return the same `SEED_FLOORS { forced: 0.5,
    auto_detect: 0.6 }` (`engine.rs:95-103`), and #111 **deliberately left them there**
-   because the signal did not separate the cases (§1.1). There is no calibration for an
-   engine switch to discard.
+   because the values it logged did not separate the cases (§1.1, §2.1.1). There is no
+   calibration for an engine switch to discard.
 2. The ticket treats "we would lose whisper's per-token probabilities" as a major
    switching cost. **How much of a loss that is depends on an unresolved question about
    what #111 actually measured** — see §2.1.1. Under the reading the code supports, the
@@ -345,10 +345,13 @@ reported.**
 decision. Revisit only if real-world reports contradict the bench.
 
 **B. Phantom captions are confirmed on the mic channel in a verified-quiet room.**
-→ **Not an engine question first.** §1.1 shows the confidence gate does not separate
-these cases, so the fix is a *suppression* strategy — per-token distribution, or a
-non-confidence signal — filed as its own ticket. An engine swap would inherit the same
-unsolved discrimination problem with a less-understood confidence scale.
+→ **Not an engine question first.** No signal available today has been *shown* to
+separate these cases: the floors rejected nothing measured [measured], and whether the
+value #111 logged is the gate's own signal is unresolved (§2.1.1). So the first move is
+to establish what the gate's signal actually does — and, if it does not discriminate, to
+find a *suppression* strategy (the per-token distribution, or a non-confidence signal) —
+filed as its own ticket. An engine swap would not answer that question; it would
+re-pose it against a less-understood confidence scale.
 
 **C. A non-English accuracy gap is measured that `large-v3-turbo` does not close.**
 → **This is the branch that justifies engine work.** Open a separate ticket for the seam
