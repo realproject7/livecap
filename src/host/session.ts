@@ -288,6 +288,11 @@ export class HostSession {
         cwd,
         env: process.env,
         includePartialMessages: cli.includePartialMessages,
+        // #203: the user's Claude model pick, clamped in resolveStartConfig.
+        // Both CLI lanes below spread this config, so the translate and
+        // extras/summary sessions always run the SAME model — a split would
+        // make the gauge's single cumulative figure span two rates.
+        model: resolved.claudeModel,
         targetLanguage: resolved.targetLanguage,
         // Bound the translate session's per-turn input (#136): trim the redundant
         // recent-context pairs (the persistent session remembers them) via the

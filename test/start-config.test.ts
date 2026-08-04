@@ -17,6 +17,7 @@ function startMessage(overrides: Partial<StartMessage> = {}): StartMessage {
     targetLanguageCode: "ko",
     sourceLanguageCode: "auto",
     enginePref: "cli",
+    claudeModel: "haiku",
     poolUsd: 20,
     resetDay: 1,
     autoSwitch: true,
@@ -108,6 +109,25 @@ describe("resolveStartConfig — gauge + router mapping", () => {
     expect(resolveStartConfig(startMessage({ enginePref: "local" })).enginePref).toBe("local");
     expect(resolveStartConfig(startMessage()).enginePref).toBe("cli");
     expect(resolveStartConfig(startMessage({ autoSwitch: false })).autoSwitch).toBe(false);
+  });
+
+  // #203: this is the last clamp before the value becomes `--model` argv, so an
+  // unknown pick must not survive it — the CLI would 404 every turn instead of
+  // failing visibly.
+  it("carries the Claude model through and clamps unknown picks (#203)", () => {
+    for (const model of ["haiku", "sonnet", "opus"]) {
+      expect(resolveStartConfig(startMessage({ claudeModel: model })).claudeModel).toBe(model);
+    }
+    expect(resolveStartConfig(startMessage({ claudeModel: " sonnet " })).claudeModel).toBe("sonnet");
+    expect(resolveStartConfig(startMessage({ claudeModel: "claude-opus-4-5-20251101" })).claudeModel).toBe(
+      "haiku",
+    );
+    expect(resolveStartConfig(startMessage({ claudeModel: "" })).claudeModel).toBe("haiku");
+    // An older shell omits the field entirely; the default is what it was
+    // already running, so this is a no-op rather than a switch.
+    const legacy = startMessage();
+    delete (legacy as Partial<StartMessage>).claudeModel;
+    expect(resolveStartConfig(legacy).claudeModel).toBe("haiku");
   });
 
   it("maps the archive group (auto-save, retention)", () => {

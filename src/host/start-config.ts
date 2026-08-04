@@ -4,7 +4,7 @@
 // archive header labels, CreditAccountant config, router defaults. Pure and
 // headless so the language/gauge plumbing is unit-testable.
 
-import { DEFAULT_EXTRAS_BUDGET_USD } from "@livecap/engine";
+import { DEFAULT_EXTRAS_BUDGET_USD, sanitizedClaudeModel } from "@livecap/engine";
 
 import { DEFAULT_POOL_USD, DEFAULT_RESET_DAY } from "../defaults.ts";
 import { languageByCode, SOURCE_AUTO_CODE } from "../languages.ts";
@@ -36,6 +36,9 @@ export interface ResolvedStartConfig {
   sourceLangCode: string;
   targetLangCode: string;
   enginePref: EnginePref;
+  /** Claude model the CLI tier runs (#203), already clamped to a curated pick.
+   *  Reaches `--model` in the built argv via the engine config. */
+  claudeModel: string;
   /** CreditAccountant config (engine package receives these as-is). */
   poolUsd: number;
   resetDay: number;
@@ -70,6 +73,10 @@ export function resolveStartConfig(message: StartMessage): ResolvedStartConfig {
     sourceLangCode: source ? source.archiveLabel : AUTO_SOURCE_LABEL,
     targetLangCode: language.archiveLabel,
     enginePref: message.enginePref === "local" ? "local" : "cli",
+    // #203: an unknown or hand-edited model would spawn a CLI that 404s every
+    // turn, so it clamps to Haiku here rather than reaching argv. An older
+    // shell omits the field entirely and lands on the same default.
+    claudeModel: sanitizedClaudeModel(message.claudeModel),
     poolUsd: Number.isFinite(message.poolUsd) && message.poolUsd > 0 ? message.poolUsd : DEFAULT_POOL_USD,
     resetDay: clampResetDay(message.resetDay),
     autoSwitch: message.autoSwitch !== false,

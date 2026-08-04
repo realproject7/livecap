@@ -19,6 +19,10 @@ export interface AppSettings {
   /** Whisper STT model (#110): "small" | "medium" | "large-v3-turbo".
    *  Downloaded on first use at session start; applies to the next session. */
   sttModel: string;
+  /** Claude model the CLI tier runs (#203): "haiku" | "sonnet" | "opus".
+   *  Applies at the next session start; downloads nothing (the model runs on
+   *  Anthropic's side), but a heavier tier spends the plan's budget faster. */
+  claudeModel: string;
   poolUsd: number;
   resetDay: number;
   autoSwitch: boolean;
@@ -59,6 +63,51 @@ export const STT_MODELS: { value: string; label: string; size: string; note?: st
  *  new default from the backend, not from here. */
 export function sanitizedSttModel(value: string | null | undefined): string {
   return STT_MODELS.some((m) => m.value === value) ? (value as string) : "small";
+}
+
+/** The Claude model a fresh install runs (#203) — unchanged from the value the
+ *  engine hard-pinned before the picker existed. Mirrors `DEFAULT_MODEL` in
+ *  packages/engine/src/args.ts; test/claude-model.test.ts fails if they drift.
+ *
+ *  The webview cannot import @livecap/engine (that package reaches for node
+ *  builtins and never enters the browser bundle), so this is a deliberate
+ *  mirror rather than a re-export — the same arrangement STT_MODELS has with
+ *  the Rust sanitizer. */
+export const DEFAULT_CLAUDE_MODEL = "haiku";
+
+/** Curated Claude picks for the CLI tier (#203); values mirror the Rust
+ *  sanitizer's CLAUDE_MODELS and the engine's list. Tier ALIASES, not dated
+ *  snapshot ids, so a pick keeps resolving to the current build of that tier.
+ *
+ *  `note` carries the cost/quality trade-off, which is the whole reason this is
+ *  a choice: nothing downloads, but a heavier tier spends the plan faster. */
+export const CLAUDE_MODELS: { value: string; label: string; note: string }[] = [
+  { value: "haiku", label: "Haiku", note: "fastest · lightest on your plan" },
+  { value: "sonnet", label: "Sonnet", note: "stronger · uses more of your plan" },
+  { value: "opus", label: "Opus", note: "strongest · uses the most" },
+];
+
+/** The persisted Claude pick, defaulting to Haiku when the field is absent
+ *  (settings.json files predating #203) or holds an unknown value.
+ *
+ *  Absence gets the default with no migration caveat, unlike
+ *  {@link sanitizedSttModel}: before #203 the model was hard-pinned to Haiku in
+ *  the engine, so an older file's silence and a fresh install describe the same
+ *  running state. Nobody is moved anywhere by this default. */
+export function sanitizedClaudeModel(value: string | null | undefined): string {
+  // Trimmed before matching, so this agrees with the Rust sanitizer and the
+  // engine's clamp on every input (both trim). Case is NOT folded: the CLI's
+  // aliases are lowercase and an exact match is what reaches `--model`.
+  const model = (value ?? "").trim();
+  return CLAUDE_MODELS.some((m) => m.value === model) ? model : DEFAULT_CLAUDE_MODEL;
+}
+
+/** The picker label for a persisted pick, e.g. "Haiku" (#203). Both the
+ *  Settings sheet's engine button and the onboarding engine card render the
+ *  model through this, so the two surfaces cannot disagree. */
+export function claudeModelLabel(value: string | null | undefined): string {
+  const model = sanitizedClaudeModel(value);
+  return CLAUDE_MODELS.find((m) => m.value === model)?.label ?? model;
 }
 
 /** Pool presets (PROPOSAL §6) — the single source for the plan dollar amounts

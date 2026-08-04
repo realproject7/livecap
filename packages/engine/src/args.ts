@@ -17,7 +17,31 @@ export const ISOLATION_ARGS: readonly string[] = [
   '{"disableAllHooks":true,"alwaysThinkingEnabled":false}',
 ];
 
+/** Curated model picks the app may run (#203). These are the CLI's tier
+ *  ALIASES, not dated snapshot ids: the alias resolves to the current build of
+ *  each tier, so LiveCap never pins a snapshot that ages out from under it.
+ *  Ordered cheapest-first — the order the picker shows. */
+export const CLAUDE_MODELS: readonly string[] = ["haiku", "sonnet", "opus"];
+
+/** Model the CLI runs unless the user picks another (#203 keeps this at Haiku:
+ *  fast enough for live captions, and the cheapest against the plan). */
 export const DEFAULT_MODEL = "haiku";
+
+/**
+ * Clamp a persisted/hand-edited model to a curated pick (#203).
+ *
+ * This is the LAST gate before the value becomes `--model` argv: an unknown
+ * value would not fail locally, it would spawn a CLI that 404s on every turn,
+ * which surfaces as a dead translation lane rather than an obvious error. The
+ * Rust sanitizer (`src-tauri/src/settings.rs`) clamps the same list on the way
+ * in; this one holds even if a start message arrives from an older shell.
+ */
+export function sanitizedClaudeModel(value: string | null | undefined): string {
+  // Trimmed before matching so this agrees with the Rust sanitizer on every
+  // input (it trims too) — and so stray whitespace can never become argv.
+  const model = (value ?? "").trim();
+  return CLAUDE_MODELS.includes(model) ? model : DEFAULT_MODEL;
+}
 
 export interface ClaudeArgsOptions {
   /** App-generated session id (UUID) for `--session-id`. */
