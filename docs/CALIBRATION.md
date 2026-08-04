@@ -174,13 +174,47 @@ false evidence.
 
 The system-channel half of that run is valid — nothing was played, and the
 system tap only receives application audio — and recorded **zero** phantom
-captions for all three models over 10 minutes each.
+captions for all three models over 10 minutes each. The full row was later
+re-measured cleanly in a confirmed-quiet room; see "Row 1 phantom measurement"
+above.
 
-**Still outstanding:** microphone-channel phantom measurement (#111 row 1)
-requires a genuinely quiet room and cannot be synthesized: digital silence and
-synthetic noise are not classified as speech by Silero, so the VAD never invokes
-whisper and any such test passes vacuously. It must be run in a confirmed-quiet
-window, with the room state recorded alongside the numbers.
+### Row 1 phantom measurement — COMPLETE (both channels)
+
+Re-run 2026-08-04 21:39–22:15 (KST) in an operator-confirmed quiet room, 10 min
+per model after a 90 s warm-up:
+
+| model | system-channel phantoms | mic-channel phantoms |
+|---|---|---|
+| `small` | 0 | 0 |
+| `medium` | 0 | 0 |
+| `large-v3-turbo` | 0 | 0 |
+
+Each model was gated behind a **readiness check** before its silence window —
+a spoken sentence had to be transcribed first, so a model that failed to load
+could not score a false zero. (An earlier run reported `large-v3-turbo` as
+producing nothing at all; that turned out to be a 25 s warm-up that was too
+short for a 1.5 GB model, not a defect. The readiness gate exists because of it.)
+
+Session liveness during each silence window was verified rather than assumed:
+the archive file was still being written at 21:50:59, i.e. to the end of the
+window, and the final count was taken before the app was stopped. The 2-minute
+span shown in the archive header is the last **brief** timestamp, not the
+session length — silence produces no content to summarise, so `endClock` stops
+advancing (`packages/archive/src/writer.ts:178-179`).
+
+**One honest gap in this run:** the readiness check exercises the SYSTEM channel
+only (a played sentence). Mic-channel liveness during the window is supported by
+`captureMic: true`, by the absence of a channel-off note in the archive header
+(#53 writes one when a channel is disabled), and by the same build capturing
+real mic speech earlier the same evening — but it was not positively confirmed
+*inside* the measurement window. A dead mic stream would also score zero. The
+harness should grow a mic-channel readiness check before this row is treated as
+airtight.
+
+**Superseded:** an earlier attempt at this row was discarded. Its
+microphone-channel numbers (2, then 10 captions against `small`) were real
+speech in the room, confirmed by the operator, not hallucination — see
+"Discarded measurements" below.
 
 Rows 2 and 3 of the #111 matrix (forced-English on English audio; auto mode on
 JA/ZH clips) also remain outstanding — they need non-English source audio that
