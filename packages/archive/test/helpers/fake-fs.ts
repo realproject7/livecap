@@ -112,4 +112,26 @@ export class FakeFs implements ArchiveFs {
   setMtime(path: string, mtimeMs: number): void {
     this.mtimes.set(path, mtimeMs);
   }
+
+  /** Permission bits per path; defaults to the owner-only write-path mode. */
+  readonly modes = new Map<string, number>();
+  /** Paths whose chmod should throw EACCES (simulate a locked-down file). */
+  readonly eaccesOnChmod = new Set<string>();
+
+  mode(path: string): number {
+    if (this.enoentOnStat.has(path)) throw new Error(`ENOENT: ${path}`);
+    if (this.eaccesOnStat.has(path)) {
+      throw Object.assign(new Error(`EACCES: permission denied, stat '${path}'`), { code: "EACCES" });
+    }
+    return this.modes.get(path) ?? 0o600;
+  }
+
+  chmod(path: string, mode: number): void {
+    if (this.eaccesOnChmod.has(path)) {
+      throw Object.assign(new Error(`EACCES: permission denied, chmod '${path}'`), { code: "EACCES" });
+    }
+    this.modes.set(path, mode);
+    // chmod changes ctime, never mtime — the fake must not bump the clock, or
+    // tests could pass while the real sweep silently rewrote mtimes.
+  }
 }

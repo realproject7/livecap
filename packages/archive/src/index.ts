@@ -8,6 +8,8 @@ export { sweepOldArchives, isInProgressRecording, recordingPrefix } from "./rete
 export type { RetentionOptions, RetentionResult } from "./retention";
 export { adoptOrphanRecordings } from "./adopt";
 export type { AdoptionOptions, AdoptionResult } from "./adopt";
+export { tightenArchivePermissions } from "./perms";
+export type { TightenPermissionsOptions, TightenPermissionsResult } from "./perms";
 export { sanitizeTitle, archiveFileName, MAX_TITLE_BYTES, FALLBACK_TITLE } from "./sanitize";
 export { nodeArchiveFs } from "./fs";
 export type { ArchiveFs } from "./fs";
