@@ -79,7 +79,22 @@ export class FakeFs implements ArchiveFs {
     this.mtimes.delete(path);
   }
 
+  /** Dirs whose readdir should throw EACCES (an unreadable archive folder). */
+  readonly eaccesOnReaddir = new Set<string>();
+  /** Dirs whose readdir should throw ENOENT (folder not created yet). */
+  readonly enoentOnReaddir = new Set<string>();
+
   readdir(dir: string): string[] {
+    if (this.enoentOnReaddir.has(dir)) {
+      throw Object.assign(new Error(`ENOENT: no such file or directory, scandir '${dir}'`), {
+        code: "ENOENT",
+      });
+    }
+    if (this.eaccesOnReaddir.has(dir)) {
+      throw Object.assign(new Error(`EACCES: permission denied, scandir '${dir}'`), {
+        code: "EACCES",
+      });
+    }
     const prefix = dir.endsWith("/") ? dir : `${dir}/`;
     const names: string[] = [];
     for (const key of this.files.keys()) {
@@ -111,5 +126,27 @@ export class FakeFs implements ArchiveFs {
   /** Set a file's mtime directly (for retention/adoption tests). */
   setMtime(path: string, mtimeMs: number): void {
     this.mtimes.set(path, mtimeMs);
+  }
+
+  /** Permission bits per path; defaults to the owner-only write-path mode. */
+  readonly modes = new Map<string, number>();
+  /** Paths whose chmod should throw EACCES (simulate a locked-down file). */
+  readonly eaccesOnChmod = new Set<string>();
+
+  mode(path: string): number {
+    if (this.enoentOnStat.has(path)) throw new Error(`ENOENT: ${path}`);
+    if (this.eaccesOnStat.has(path)) {
+      throw Object.assign(new Error(`EACCES: permission denied, stat '${path}'`), { code: "EACCES" });
+    }
+    return this.modes.get(path) ?? 0o600;
+  }
+
+  chmod(path: string, mode: number): void {
+    if (this.eaccesOnChmod.has(path)) {
+      throw Object.assign(new Error(`EACCES: permission denied, chmod '${path}'`), { code: "EACCES" });
+    }
+    this.modes.set(path, mode);
+    // chmod changes ctime, never mtime — the fake must not bump the clock, or
+    // tests could pass while the real sweep silently rewrote mtimes.
   }
 }

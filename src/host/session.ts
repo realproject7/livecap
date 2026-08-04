@@ -34,6 +34,7 @@ import {
   nodeArchiveFs,
   SessionArchiveWriter,
   sweepOldArchives,
+  tightenArchivePermissions,
 } from "@livecap/archive";
 import type { BoardData, CaptionEntry, MetricsData } from "@livecap/archive";
 
@@ -409,6 +410,32 @@ export class HostSession {
         folder: config.archiveDir,
         maxAgeDays: resolved.archiveRetentionDays,
         nowMs: Date.now(),
+      });
+    }
+
+    // Repair pre-#148 archive permissions (#192). #148 hardened the WRITE path,
+    // so only files written since then are owner-only; anything an older build
+    // archived stayed world-readable and no upgrade ever fixed it. Runs
+    // unconditionally (unlike retention, which is opt-in) because this is a
+    // security repair, not a preference — and it is idempotent and silent once
+    // the folder is clean. Before adoption, so a promoted recording carries the
+    // tightened mode through its rename.
+    const perms = tightenArchivePermissions({
+      fs: nodeArchiveFs(),
+      folder: config.archiveDir,
+    });
+    // COUNTS ONLY: archive file names are built from meeting titles, so a name
+    // is user content and must never reach a status line (#192).
+    if (perms.tightened > 0) {
+      this.emit({
+        type: "status",
+        detail: `tightened permissions on ${perms.tightened} archived file(s)`,
+      });
+    }
+    if (perms.failed > 0) {
+      this.emit({
+        type: "status",
+        detail: `could not tighten permissions on ${perms.failed} archived file(s)`,
       });
     }
 

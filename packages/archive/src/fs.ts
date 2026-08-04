@@ -33,6 +33,10 @@ export interface ArchiveFs {
   mtimeMs(path: string): number;
   /** Bump a file's last-modified time to now (liveness heartbeat, #69). */
   touch(path: string): void;
+  /** Permission bits of a path (mode & 0o777). */
+  mode(path: string): number;
+  /** Set a path's permission bits. Content, name and mtime are untouched. */
+  chmod(path: string, mode: number): void;
 }
 
 // Owner-only permissions for the archive (#148, N-6): transcripts hold private
@@ -40,7 +44,9 @@ export interface ArchiveFs {
 // group-readable. Applied at creation — new files/dirs are restricted; umask can
 // only remove further bits, never widen these.
 const DIR_MODE = 0o700;
-const FILE_MODE = 0o600;
+// Exported so the upgrade sweep (#192, perms.ts) tightens pre-#148 files to the
+// SAME mode the write path applies — one source, so the two cannot drift.
+export const FILE_MODE = 0o600;
 
 /** A node-backed ArchiveFs for production use (the consumer wires this in). */
 export function nodeArchiveFs(): ArchiveFs {
@@ -67,5 +73,7 @@ export function nodeArchiveFs(): ArchiveFs {
       const now = new Date();
       fs.utimesSync(p, now, now);
     },
+    mode: (p) => fs.statSync(p).mode & 0o777,
+    chmod: (p, mode) => fs.chmodSync(p, mode),
   };
 }
