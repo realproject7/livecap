@@ -13,9 +13,15 @@ import type { AppSettings, EnginePref } from "./app-settings";
 import { DEFAULT_LANGUAGE_CODE } from "./languages";
 import type { ProbeResult } from "./protocol";
 
+// #168 tri-state: system audio is "granted" only on a positive signal (real
+// audio off the tap). "unknown" means granted-vs-quiet could not be told apart,
+// "denied" that no tap exists at all — both need remediation, and a denial is
+// never rendered as granted.
+type SystemAudioStatus = "granted" | "denied" | "unknown";
+
 interface AudioAccess {
   mic: string;
-  systemAudio: boolean;
+  systemAudio: SystemAudioStatus;
 }
 
 export interface OnboardingOptions {
@@ -46,6 +52,7 @@ export function startOnboarding(options: OnboardingOptions): void {
       <h2 class="ob-title">LiveCap hears two things</h2>
       <div class="ob-row"><span class="ob-ico">🔊</span> What you hear — system audio <span class="ob-status" id="ob-sys-status"></span></div>
       <div class="ob-row"><span class="ob-ico">🎤</span> What you say — microphone <span class="ob-status" id="ob-mic-status"></span></div>
+      <p class="ob-note" id="ob-sys-hint" hidden></p>
       <p class="ob-note">Both stay on this Mac. Nothing is uploaded.</p>
       <div class="ob-links">
         <button class="ob-link" id="ob-open-sys" hidden>Open System Settings</button>
@@ -82,8 +89,9 @@ export function startOnboarding(options: OnboardingOptions): void {
   const next1 = el<HTMLButtonElement>(host, "#ob-next1");
   const openSys = el<HTMLButtonElement>(host, "#ob-open-sys");
   const recheck = el<HTMLButtonElement>(host, "#ob-recheck");
+  const sysHint = el<HTMLParagraphElement>(host, "#ob-sys-hint");
 
-  let systemGranted = false;
+  let systemStatus: SystemAudioStatus | null = null;
 
   function renderMic(status: string): void {
     micStatus.textContent =
@@ -92,15 +100,25 @@ export function startOnboarding(options: OnboardingOptions): void {
     if (status === "denied" || status === "restricted") openSys.hidden = false;
   }
 
-  function renderSystem(granted: boolean, probed: boolean): void {
-    systemGranted = granted;
-    sysStatus.textContent = granted ? "✓" : probed ? "✕ no access" : "";
+  // Called only with a probed verdict. Anything but "granted" — including the
+  // ambiguous "unknown" — shows the remediation path (#168): before, a denial
+  // rendered as ✓ and this branch was unreachable.
+  function renderSystem(status: SystemAudioStatus): void {
+    systemStatus = status;
+    const granted = status === "granted";
+    sysStatus.textContent = granted ? "✓" : status === "denied" ? "✕ no access" : "⚠ not confirmed";
     sysStatus.classList.toggle("ok", granted);
-    if (probed && !granted) {
+    sysHint.hidden = granted;
+    sysHint.textContent = granted
+      ? ""
+      : status === "denied"
+        ? "No system audio. Turn on “System Audio Recording” for LiveCap in System Settings, then check again."
+        : "Couldn’t confirm system audio — the tap heard only silence, which looks the same as no access. Play some audio and check again, or turn on “System Audio Recording” for LiveCap.";
+    if (granted) {
+      recheck.hidden = true;
+    } else {
       openSys.hidden = false;
       recheck.hidden = false;
-    } else if (granted) {
-      recheck.hidden = true;
     }
   }
 
@@ -123,10 +141,10 @@ export function startOnboarding(options: OnboardingOptions): void {
     void invoke<AudioAccess>("request_audio_access").then(
       (access) => {
         renderMic(access.mic);
-        renderSystem(access.systemAudio, true);
+        renderSystem(access.systemAudio);
         if (access.mic === "undetermined") pollMic(); // TCC sheet still up
         grantBtn.textContent = "Grant audio access";
-        grantBtn.disabled = access.mic === "granted" && access.systemAudio;
+        grantBtn.disabled = access.mic === "granted" && access.systemAudio === "granted";
         next1.hidden = false; // never a dead end
       },
       () => {
@@ -138,13 +156,13 @@ export function startOnboarding(options: OnboardingOptions): void {
   });
 
   openSys.addEventListener("click", () => {
-    const section = systemGranted ? "microphone" : "system-audio";
+    const section = systemStatus === "granted" ? "microphone" : "system-audio";
     void invoke("open_privacy_settings", { section });
     recheck.hidden = false;
   });
 
   recheck.addEventListener("click", () => {
-    void invoke<boolean>("probe_system_audio").then((granted) => renderSystem(granted, true), () => undefined);
+    void invoke<SystemAudioStatus>("probe_system_audio").then(renderSystem, () => undefined);
     void invoke<string>("mic_permission_status").then(renderMic, () => undefined);
   });
 
