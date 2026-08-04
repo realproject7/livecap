@@ -87,8 +87,17 @@ create_identity() {
   # committed, never printed or logged. It exists only to get the key from
   # openssl to the keychain a few lines below — nothing is left encrypted with
   # it, since the trap removes $tmp on exit.
+  # The `|| return 1` is load-bearing: this function is called from
+  # `if ! create_identity || …`, and that context suppresses errexit for its
+  # whole body — so without it a failed generator would fall through and export
+  # the container with an EMPTY password instead of stopping. Returning
+  # non-zero is what routes the user to the manual fallback below. The
+  # emptiness check covers the same hole for a generator that "succeeds"
+  # silently. (`local` is declared separately because `local x=$(…)` would mask
+  # the assignment's exit status.)
   local p12_pass
-  p12_pass=$(openssl rand -base64 24)
+  p12_pass=$(openssl rand -base64 24) || return 1
+  [ -n "$p12_pass" ] || return 1
 
   # The env form keeps the value out of openssl's argv (and so out of `ps`);
   # the prefix scopes it to this one command instead of exporting it. macOS
