@@ -138,17 +138,41 @@ The floors sit at 0.50/0.60, far below the entire measured range, so **they
 rejected nothing in any run** — including the output that invented a phrase
 (0.888). That is the operative fact today.
 
-A floor placed between 0.8884 and 0.9557 would remove the single worst output
-without rejecting any clean one. But that is the *tail*, not the *classes*: six
-damaged utterances (three excluding fixture artifacts) sit above the lowest clean
-score and no threshold can reach them without discarding good captions. A floor
-can trim the worst hallucination; it cannot be the mechanism that tells damaged
-from clean.
+A floor placed just under the lowest clean score (0.9557) would reject **five of
+the eleven damaged utterances (45%) and none of the nine clean ones** — and none
+of those five is a fixture artifact:
 
-Therefore: **the per-family floor table is left at the seed values.** Setting one
-at ~0.90 would be fitting a threshold to a single observation (0.888) from five
-over-articulated TTS fixtures, and it would buy only the tail while leaving the
-overlap untouched.
+| conf | run | damage |
+|---|---|---|
+| 0.8884 | f3-pad / `small` | invented "died long after" |
+| 0.9134 | f1-pad / `medium` | invented "AT HE"; "Sarah" → "SBA" |
+| 0.9330 | f3 / `small` | "electrocardogram"; "2 weeks" |
+| 0.9465 | f1-pad / `small` | swallowed the opening clause |
+| 0.9479 | f3 / `medium` | "wor sen" split |
+
+That includes **both** invented-text hallucinations that fall below the clean
+range. So the honest statement is not "a floor would only trim the tail" — on
+this data a floor looks genuinely attractive.
+
+**We still should not set one**, for three reasons that survive the arithmetic:
+
+1. **It is fitted to where nine clean samples happened to land.** The band exists
+   only because no clean utterance scored below 0.9557. A single additional clean
+   sample anywhere below that collapses it entirely — and nine samples from five
+   over-articulated TTS fixtures is nowhere near enough to bet a caption gate on.
+2. **It cannot reach the overlap.** Six damaged utterances (three excluding
+   fixture artifacts) sit ABOVE the lowest clean score, where no threshold can
+   touch them without discarding good captions. A floor addresses the low tail,
+   not the classes.
+3. **Three of the five are lexical slips**, not invented content
+   ("electrocardogram", "wor sen", a swallowed clause). Dropping the entire
+   utterance serves the user worse than showing an imperfect caption; only the
+   two invented-text cases are clearly worth suppressing.
+
+Therefore: **the per-family floor table is left at the seed values** — not
+because a floor would buy nothing, but because what it would buy is measured
+against too few clean samples to be trusted, and it leaves the actual
+discrimination problem untouched.
 
 Two limitations to resolve before revisiting:
 
