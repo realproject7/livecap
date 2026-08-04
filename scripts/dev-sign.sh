@@ -83,12 +83,23 @@ create_identity() {
   # a key we just generated to the keychain on the same machine. It never
   # leaves the box and protects nothing at rest. Please do not "harden" these
   # flags away — doing so re-breaks local signing (#193).
-  openssl pkcs12 -export -name "$IDENTITY" \
+  # Transport password for the container: generated fresh every run, never
+  # committed, never printed or logged. It exists only to get the key from
+  # openssl to the keychain a few lines below — nothing is left encrypted with
+  # it, since the trap removes $tmp on exit.
+  local p12_pass
+  p12_pass=$(openssl rand -base64 24)
+
+  # The env form keeps the value out of openssl's argv (and so out of `ps`);
+  # the prefix scopes it to this one command instead of exporting it. macOS
+  # `security` has no env option, so its -P is unavoidable — acceptable for a
+  # random per-run value that is dead by the time the function returns.
+  P12_PASS="$p12_pass" openssl pkcs12 -export -name "$IDENTITY" \
     -inkey "$tmp/key.pem" -in "$tmp/cert.pem" \
-    -out "$tmp/livecap-dev.p12" -passout pass:livecap-dev \
+    -out "$tmp/livecap-dev.p12" -passout env:P12_PASS \
     -certpbe PBE-SHA1-3DES -keypbe PBE-SHA1-3DES -macalg sha1
   security import "$tmp/livecap-dev.p12" -k "$LOGIN_KEYCHAIN" \
-    -P livecap-dev -T /usr/bin/codesign
+    -P "$p12_pass" -T /usr/bin/codesign
 
   # Trust the cert for code signing (user trust domain). macOS shows one GUI
   # password prompt for this; that is the single interactive step.
