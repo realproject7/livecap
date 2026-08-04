@@ -237,12 +237,30 @@ could not score a false zero. (An earlier run reported `large-v3-turbo` as
 producing nothing at all; that turned out to be a 25 s warm-up that was too
 short for a 1.5 GB model, not a defect. The readiness gate exists because of it.)
 
-Session liveness during each silence window was verified rather than assumed:
-the archive file was still being written at 21:50:59, i.e. to the end of the
-window, and the final count was taken before the app was stopped. The 2-minute
-span shown in the archive header is the last **brief** timestamp, not the
-session length — silence produces no content to summarise, so `endClock` stops
-advancing (`packages/archive/src/writer.ts:178-179`).
+Session liveness during each silence window was verified rather than assumed —
+and the two facts below need two different citations, which an earlier draft ran
+together into a contradiction ("silence produces nothing to write" cannot explain
+"the file was written at 21:50:59"):
+
+- **The write proves the session was live.** A session heartbeat runs every
+  10 s (`RECORDING_HEARTBEAT_MS`, `src/host/session.ts:72`, timer at `:510`)
+  calling `writer.heartbeat()`, which touches the working file
+  (`packages/archive/src/writer.ts:95-98`). It is **audio-independent** and a
+  no-op only before `open()` or after `finalize()` — so an mtime of 21:50:59, at
+  the end of the window, proves the writer was open and not yet finalized at that
+  moment. (It exists for #69 orphan adoption, not for this measurement, which is
+  what makes it good evidence — it was not built to prove anything here.)
+- **The frozen header explains itself separately.** The 2-minute span in the
+  archive header is the last **brief** timestamp, not the session length: silence
+  produces no content to summarise, so `endClock` stops advancing
+  (`packages/archive/src/writer.ts:178-179`).
+
+The final caption count was taken before the app was stopped, so the file was
+still at its working path when it was read.
+
+*(Credit: both reviewers independently found the heartbeat mechanism and pointed
+out that the original paragraph used one citation to explain two different
+things.)*
 
 **The mic-channel result is NOT claimed as complete, and the zero above must not
 be read as one.** The readiness check exercises the SYSTEM channel only (a played
