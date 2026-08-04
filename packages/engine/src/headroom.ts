@@ -139,10 +139,17 @@ export function quotaHeadroom(
   // `usable` is non-empty, so the loop always assigns.
   const { window, hours } = binding as { window: HeadroomWindow; hours: number };
   const used = Math.round(Math.min(100, window.usedPercent));
+  // Name the binding window ONLY when there is more than one (#204): with two
+  // windows "90% used" is ambiguous about which wall is being hit, and the whole
+  // point of the minimum is that the answer is not obvious. With a single window
+  // — the shape a real `prolite` plan reports — the label adds nothing but
+  // noise, so it is omitted. This is the field's reader: `label` is consumed
+  // here, not merely populated.
+  const prefix = usable.length > 1 ? `${window.label}: ` : "";
   return {
     known: true,
     hoursRemaining: hours,
-    nativeDetail: `${used}% used${formatResetsIn(window.resetsAt, nowMs)}`,
+    nativeDetail: `${prefix}${used}% used${formatResetsIn(window.resetsAt, nowMs)}`,
   };
 }
 

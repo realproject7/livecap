@@ -148,6 +148,20 @@ describe("CodexHeadroomSource (#204 → #205 seam)", () => {
     expect(headroom.nativeDetail).toContain("resets in");
   });
 
+  // Ties windowLabel to the detail line: on a two-window plan the binding
+  // window is NAMED, so the user can tell which wall they are hitting. This is
+  // what makes `windowLabel` a producer with a consumer rather than dead mapping.
+  it("names the binding window end-to-end when a plan reports two", async () => {
+    const source = new CodexHeadroomSource(async () => ({
+      primary: { usedPercent: 10, windowDurationMins: 300 }, // 5h window, healthy
+      secondary: { usedPercent: 95, windowDurationMins: 10_080 }, // weekly, the wall
+    }));
+    const headroom = quotaHeadroom(await source.read(), 3, NOW);
+    expect(headroom.nativeDetail).toBe("weekly: 95% used");
+    // The minimum governs: the weekly window, not the healthy rolling one.
+    expect(headroom.known && headroom.hoursRemaining).toBeCloseTo(5 / (95 / 3), 6);
+  });
+
   // The #205 contract: a headroom failure must never escape into the caption
   // stream, and unknown must not be mistaken for empty.
   it("turns a rejecting reader into an explicit unknown", async () => {

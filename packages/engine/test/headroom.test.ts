@@ -103,8 +103,22 @@ describe("quotaHeadroom (#205 quota derivation)", () => {
     );
     // weekly: 90% used over 2h ⇒ 45%/hr, 10% left ⇒ 0.222h.
     expect(headroom.known && headroom.hoursRemaining).toBeCloseTo(10 / 45, 10);
-    // The binding window is the one named in the detail line.
-    expect(headroom.nativeDetail.startsWith("90%")).toBe(true);
+    // #204: with MORE THAN ONE window the binding one is named, because "90%
+    // used" alone does not say which wall is being hit. This is the reader for
+    // `HeadroomWindow.label` — without it the field would be written and never
+    // consumed, which looks like it works.
+    expect(headroom.nativeDetail).toBe("weekly: 90% used");
+  });
+
+  // ...and with a single window (what a real plan reports) the label is omitted
+  // rather than padding every line with a name that disambiguates nothing.
+  it("omits the window name when there is only one window", () => {
+    const headroom = quotaHeadroom(
+      { known: true, windows: [{ label: "weekly", usedPercent: 90 }] },
+      2,
+      NOW,
+    );
+    expect(headroom.nativeDetail).toBe("90% used");
   });
 
   it("is unaffected by window order", () => {
