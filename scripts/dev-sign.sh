@@ -68,9 +68,25 @@ create_identity() {
 
   # Bundle key+cert and import into the login keychain; -T pre-authorizes
   # /usr/bin/codesign to use the private key.
+  #
+  # The three legacy algorithm flags are REQUIRED, not an oversight (#193).
+  # OpenSSL 3.x defaults to AES-256-CBC + PBKDF2/SHA-256, which macOS
+  # `security import` (SecKeychainItemImport) cannot parse — it fails with
+  # "MAC verification failed during PKCS12 import (wrong password?)" even
+  # though the password is correct, and the script drops to the manual
+  # Keychain Access fallback on every fresh machine. PBE-SHA1-3DES/SHA-1 is
+  # what it can read.
+  #
+  # Yes, these are weak by modern standards, and that is fine HERE: this
+  # container lives for a few milliseconds inside a `mktemp -d` that the EXIT
+  # trap deletes, carries a throwaway local password, and exists only to hand
+  # a key we just generated to the keychain on the same machine. It never
+  # leaves the box and protects nothing at rest. Please do not "harden" these
+  # flags away — doing so re-breaks local signing (#193).
   openssl pkcs12 -export -name "$IDENTITY" \
     -inkey "$tmp/key.pem" -in "$tmp/cert.pem" \
-    -out "$tmp/livecap-dev.p12" -passout pass:livecap-dev
+    -out "$tmp/livecap-dev.p12" -passout pass:livecap-dev \
+    -certpbe PBE-SHA1-3DES -keypbe PBE-SHA1-3DES -macalg sha1
   security import "$tmp/livecap-dev.p12" -k "$LOGIN_KEYCHAIN" \
     -P livecap-dev -T /usr/bin/codesign
 
