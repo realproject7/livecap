@@ -70,17 +70,23 @@ This spike did not re-run them.
 
 ### 1.1 The finding that most changes this assessment
 
-**The confidence gate is not currently doing the job the ticket credits it with.**
+**The confidence gate has not been shown to do the job the ticket credits it with.**
 
-Every utterance measured — clean and hallucinated alike — scored **0.888–0.995**. The
-floors (`forced = 0.50`, `auto_detect = 0.60`) therefore **rejected nothing in any
-run**, including output containing invented text ("died long after", 0.888). Catching
-that case would need a threshold above 0.888, which sits between legitimate outputs
-measured at 0.913 and 0.933. On this evidence the confidence signal **does not cleanly
-separate hallucinated from clean output** — the ranges overlap — and #111 accordingly
-left the floor table at its seed values.
+Every utterance measured — clean and hallucinated alike — scored **0.888–0.995**
+[measured]. The floors (`forced = 0.50`, `auto_detect = 0.60`) therefore **rejected
+nothing in any run**, including output containing invented text ("died long after",
+0.888). Catching that case would need a threshold above 0.888, which sits between
+legitimate outputs measured at 0.913 and 0.933. On the values #111 logged, the
+confidence signal **does not cleanly separate hallucinated from clean output** — the
+ranges overlap — and #111 accordingly left the floor table at its seed values.
 
-This matters for #132 far more than it looks (§2.1).
+**Read that claim precisely.** It is a statement about the values #111 logged. Whether
+those values *are* the gate's own signal is the open question in §2.1.1, and this
+document does not settle it. What holds under either answer: the shipped floors rejected
+nothing that was measured, and nothing has demonstrated that the signal separates the
+two cases.
+
+This matters for #132 more than it looks (§2.1).
 
 ---
 
@@ -321,9 +327,12 @@ an engine swap being the lever:
   **[measured]**. An alternative engine cannot be justified on throughput.
 - **The accuracy gap that exists is lexical and moved by model tier**, and #111 already
   recommends the tier change that addresses it **[measured]**.
-- **The confidence gate the ticket treats as the expensive coupling is not currently
-  discriminating** (§1.1), so it is neither a strong asset to protect nor an expensive
-  thing to lose.
+- **The confidence gate the ticket treats as the expensive coupling is not a
+  demonstrated asset.** The floors rejected nothing in any measured run [measured]; what
+  remains genuinely unresolved is whether the value #111 logged is the gate's own signal
+  or a different heuristic (§2.1.1). Under either reading it has not been shown to
+  separate hallucinated from clean output — which is enough for this conclusion, and no
+  more than that should be claimed for it.
 - **The one axis where an alternative might genuinely win — multilingual real-meeting
   accuracy — is unmeasured on both sides.**
 
