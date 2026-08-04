@@ -106,38 +106,56 @@ Confidence is the value the harness prints per finalized utterance.
 
 Regenerate any row with the command in **Method** above.
 
-### What this does and does not show
+### What the table shows
 
-The floors sit at 0.50/0.60, far below the **entire** measured range
-(0.888–0.995), so **they rejected nothing in any run** — including the output
-that invented a phrase (0.888). That much is certain and is the operative fact.
+Sorting the 20 rows by confidence and marking each as damaged or clean settles
+the question the earlier drafts of this document got wrong twice:
 
-**A previous version of this document claimed the clean and hallucinated ranges
-"overlap" and that confidence "does not cleanly separate" the two. That claim is
-withdrawn — the published numbers do not support it, and two of the values it
-cited as "legitimate output" (0.913, 0.933) are damaged outputs by this
-document's own tables.** For ranges to overlap, some clean utterance would have
-to score below some damaged one. Nothing measured here does. If anything the
-table points the other way: the most damaged output (0.888, an invented phrase)
-sits at the very bottom of the range, and the four highest scores (0.988–0.995)
-all have no damage found.
+- clean utterances span **0.9557 – 0.9949** (n=9)
+- damaged utterances span **0.8884 – 0.9936** (n=11)
 
-What the data actually supports is narrower: **the margins are far too small to
-tune a gate on.** The worst output scored 0.888 and a merely-imperfect one
-scored 0.913 — about 0.02 apart, from five over-articulated TTS fixtures. A
-floor placed in that gap would be fitted to noise.
+**The ranges overlap.** Six damaged utterances score ABOVE the lowest clean one
+(0.9557): 0.9698, 0.9786, 0.9813, 0.9879, 0.9921, 0.9936. Three of those six are
+the f1 fixture-artifact rows, so excluding them entirely — the most sceptical
+reading — three still remain (0.9786 "Katie" prefix, 0.9813 "CT" prefix, 0.9879
+"wor sen"). The conclusion holds either way.
 
-Therefore: **the per-family floor table is left at the seed values** — because
-the floors are inert at their current setting and the evidence is too thin to
-move them, NOT because confidence has been shown to be uninformative. Model
-choice is the lever that demonstrably moved damage severity here.
+So **confidence does not separate damaged from clean output.** Most damage lands
+squarely inside the clean range.
+
+> **Correction history, kept deliberately.** The first draft asserted this
+> overlap but cited two damaged runs (0.913, 0.933) as if they were "legitimate
+> output" — a real error, caught in review. The second draft over-corrected and
+> WITHDREW the overlap claim entirely, and additionally stated that "the four
+> highest scores all have no damage found", which the table above falsifies: the
+> top four are 0.9893 clean, 0.9921 damaged, 0.9936 damaged, 0.9949 clean. Both
+> corrections came from review, not from the author. The claim is right; the
+> first draft simply had not published the data that proves it.
+
+### What a floor could and could not do
+
+The floors sit at 0.50/0.60, far below the entire measured range, so **they
+rejected nothing in any run** — including the output that invented a phrase
+(0.888). That is the operative fact today.
+
+A floor placed between 0.8884 and 0.9557 would remove the single worst output
+without rejecting any clean one. But that is the *tail*, not the *classes*: six
+damaged utterances (three excluding fixture artifacts) sit above the lowest clean
+score and no threshold can reach them without discarding good captions. A floor
+can trim the worst hallucination; it cannot be the mechanism that tells damaged
+from clean.
+
+Therefore: **the per-family floor table is left at the seed values.** Setting one
+at ~0.90 would be fitting a threshold to a single observation (0.888) from five
+over-articulated TTS fixtures, and it would buy only the tail while leaving the
+overlap untouched.
 
 Two limitations to resolve before revisiting:
 
 1. `confidence` is a heuristic per-utterance value, not the mean per-token
-   probability #111 originally specified. The ordering seen above is suggestive
-   enough that the per-token distribution is worth measuring — it may well
-   separate the cases, which would make the existing gate materially stronger.
+   probability #111 originally specified. Since the heuristic demonstrably does
+   NOT separate the classes, measuring the per-token distribution is the
+   substantive next step — it is the remaining candidate for a real gate.
 2. `say` TTS is over-articulated relative to real speech. Real meetings should
    widen the gaps between models, so these numbers are a **lower bound** on the
    differences.
@@ -178,7 +196,7 @@ captions for all three models over 10 minutes each. The full row was later
 re-measured cleanly in a confirmed-quiet room; see "Row 1 phantom measurement"
 above.
 
-### Row 1 phantom measurement — COMPLETE (both channels)
+### Row 1 phantom measurement — system channel COMPLETE, mic channel INCONCLUSIVE
 
 Re-run 2026-08-04 21:39–22:15 (KST) in an operator-confirmed quiet room, 10 min
 per model after a 90 s warm-up:
@@ -202,14 +220,22 @@ span shown in the archive header is the last **brief** timestamp, not the
 session length — silence produces no content to summarise, so `endClock` stops
 advancing (`packages/archive/src/writer.ts:178-179`).
 
-**One honest gap in this run:** the readiness check exercises the SYSTEM channel
-only (a played sentence). Mic-channel liveness during the window is supported by
-`captureMic: true`, by the absence of a channel-off note in the archive header
-(#53 writes one when a channel is disabled), and by the same build capturing
-real mic speech earlier the same evening — but it was not positively confirmed
-*inside* the measurement window. A dead mic stream would also score zero. The
-harness should grow a mic-channel readiness check before this row is treated as
-airtight.
+**The mic-channel result is NOT claimed as complete, and the zero above must not
+be read as one.** The readiness check exercises the SYSTEM channel only (a played
+sentence). Mic liveness inside the window is *circumstantially* supported —
+`captureMic: true`, no channel-off note in the archive header (#53 writes one
+when a channel is disabled), and the same build captured real mic speech earlier
+the same evening — but it was never positively confirmed **inside** the
+measurement window, and a dead mic stream produces exactly the same zero. Until
+the harness grows a mic-channel readiness check, this row is:
+
+- **system channel: complete** — 0 phantoms, all three models, 10 min each, with
+  a positive readiness control
+- **mic channel: inconclusive** — 0 observed, but the negative control is
+  unverified
+
+Treating the mic half as done would be the same vacuous-zero mistake the
+readiness gate exists to prevent.
 
 **Superseded:** an earlier attempt at this row was discarded. Its
 microphone-channel numbers (2, then 10 captions against `small`) were real
