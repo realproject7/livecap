@@ -45,6 +45,44 @@ function runCommand(bin: string, args: string[]): Promise<CommandResult> {
   });
 }
 
+/** A detected `codex` binary (#204). Deliberately narrower than
+ *  {@link DetectedCli}: presence and version only. */
+export interface DetectedCodexCli {
+  bin: string;
+  version: string;
+}
+
+/**
+ * Find a usable `codex` binary, or null when Codex must not be offered (#204).
+ *
+ * **Binary-presence detection only.** This never reads, and must never read,
+ * any credential, token, or login state — auth lives entirely inside the user's
+ * own `codex` login, and LiveCap's whole defensibility argument rests on never
+ * touching it. `--version` is a pure capability probe: it starts no session,
+ * spends no quota, and reveals nothing about the account.
+ *
+ * A null return means the option is hidden entirely rather than shown disabled
+ * (#204 AC: "with no codex binary present, nothing about the option is
+ * visible").
+ */
+export async function detectCodexCli(envPath: string | undefined): Promise<DetectedCodexCli | null> {
+  const bins = findCliBins({
+    path: augmentedPath(envPath),
+    isExecutable: isExecutableFile,
+    names: ["codex"],
+  });
+  for (const bin of bins) {
+    try {
+      const result = await runCommand(bin, ["--version"]);
+      const version = result.stdout.trim();
+      if (result.code === 0 && version !== "") return { bin, version };
+    } catch {
+      // Probe failure: try the next PATH match.
+    }
+  }
+  return null;
+}
+
 /** Find a usable `claude` binary, or null when the local tier should lead. */
 export async function detectClaudeCli(envPath: string | undefined): Promise<DetectedCli | null> {
   const bins = findCliBins({

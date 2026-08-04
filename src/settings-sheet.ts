@@ -253,8 +253,21 @@ export function createSettingsSheet(options: SettingsSheetOptions): SettingsShee
     const s = options.getSettings();
     const spent = lastGauge?.spentUsd ?? 0;
     const pool = lastGauge?.poolUsd ?? s.poolUsd;
-    gaugeAmount.textContent = gaugeAmountLabel(spent, pool);
-    gaugeFill.style.width = `${Math.round(Math.min(1, pool > 0 ? spent / pool : 1) * 100)}%`;
+    // #204: prefer the engine-tagged detail over the USD figures. On a
+    // quota-metered tier the dollars are structurally meaningless — not merely
+    // zero — so rendering "$0.00 / $20.00" with an empty bar would tell the
+    // user their budget is untouched for an entire session while the real
+    // constraint sits in nativeDetail. The USD string is itself the Claude
+    // tier's nativeDetail, so both tiers go through one path.
+    const detail = lastGauge?.nativeDetail;
+    gaugeAmount.textContent = detail ?? gaugeAmountLabel(spent, pool);
+    // Unknown headroom shows no fill rather than an empty bar implying a full
+    // allowance; the amount line already says "usage unknown".
+    const fraction =
+      lastGauge?.headroomKnown === false
+        ? 0
+        : (lastGauge?.fractionUsed ?? (pool > 0 ? Math.min(1, spent / pool) : 1));
+    gaugeFill.style.width = `${Math.round(Math.min(1, Math.max(0, fraction)) * 100)}%`;
     // #4: the gauge is an OPTIONAL usage indicator that is only meaningful IF
     // Agent SDK credits ever start applying — it is not a live charge meter
     // today, so don't lead with cost/"hours left". State the conditional plainly.

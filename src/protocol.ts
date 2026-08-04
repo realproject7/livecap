@@ -170,6 +170,18 @@ export interface GaugeWire {
   extrasSpentUsd?: number;
   /** The per-session extras budget cap the spend above is metered against (#55). */
   extrasCapUsd?: number;
+  /** Whether `estimatedHoursRemaining` is a real measurement (#205/#204).
+   *  Optional — absent on pre-#204 gauges, which are always USD-derived and
+   *  therefore always known. */
+  headroomKnown?: boolean;
+  /** Engine-tagged display string: `"$3.40 of $20.00"` on the Claude tier,
+   *  `"62% used, resets in 3h"` on a quota tier (#205 scope 6).
+   *
+   *  Display surfaces MUST prefer this over the USD fields. On a non-USD tier
+   *  `poolUsd`/`spentUsd`/`remainingUsd`/`dollarsPerHour` are structurally
+   *  meaningless — not merely zero — because that engine reports no dollars at
+   *  all; rendering them shows a full untouched budget for the whole session. */
+  nativeDetail?: string;
 }
 
 /** Messages emitted by the host on stdout; Rust forwards each to the webview

@@ -238,7 +238,7 @@ export class CreditAccountant {
     // default until metered, then `remaining / rate` — lifted so the quota
     // derivation cannot drift from it. Claude behaviour stays bit-for-bit.
     const dollarsPerHour = ratePerHour(spent, meteredHours, this.defaultDollarsPerHour);
-    const fractionUsed = pool > 0 ? Math.min(1, spent / pool) : 1;
+    const usdFractionUsed = pool > 0 ? Math.min(1, spent / pool) : 1;
     // A configured headroom source REPLACES the USD derivation of hours; without
     // one, the USD path is authoritative and always known.
     const headroom: Headroom = this.config.headroomSource
@@ -246,6 +246,7 @@ export class CreditAccountant {
       : {
           known: true,
           hoursRemaining: hoursFromRate(remaining, dollarsPerHour),
+          fractionUsed: usdFractionUsed,
           nativeDetail: usdNativeDetail(spent, pool),
         };
     return {
@@ -257,7 +258,11 @@ export class CreditAccountant {
       // Never Infinity: unknown headroom reads 0, which
       // `isBelowThreshold`/`evaluate` refuse to act on (#205 scope 5).
       estimatedHoursRemaining: headroom.known ? headroom.hoursRemaining : 0,
-      fractionUsed,
+      // #204: on a non-USD tier the ledger's dollars are structurally
+      // meaningless, so the bar's fraction comes from the headroom source
+      // instead of `spent / pool` — which would sit permanently at 0 and read
+      // as "budget untouched" for an entire session.
+      fractionUsed: headroom.known ? headroom.fractionUsed : 0,
       headroomKnown: headroom.known,
       nativeDetail: headroom.nativeDetail,
     };

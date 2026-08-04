@@ -61,7 +61,16 @@ export interface HeadroomSource {
  * structurally and the decision path refuses to switch on it.
  */
 export type Headroom =
-  | { known: true; hoursRemaining: number; nativeDetail: string }
+  | {
+      known: true;
+      hoursRemaining: number;
+      /** 0–1 of the BINDING window's allowance consumed (#204). The gauge bar
+       *  needs a fraction, and on a non-USD tier the ledger's `fractionUsed` is
+       *  computed from dollars that do not exist — a permanently empty bar that
+       *  reads as "budget untouched". This is the real one. */
+      fractionUsed: number;
+      nativeDetail: string;
+    }
   | { known: false; reason: HeadroomUnknownReason; nativeDetail: string };
 
 /**
@@ -149,6 +158,7 @@ export function quotaHeadroom(
   return {
     known: true,
     hoursRemaining: hours,
+    fractionUsed: Math.min(1, Math.max(0, used / 100)),
     nativeDetail: `${prefix}${used}% used${formatResetsIn(window.resetsAt, nowMs)}`,
   };
 }
