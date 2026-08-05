@@ -199,8 +199,21 @@ mod tests {
         let json = serde_json::to_value(&mapped).unwrap();
         assert_eq!(json["type"], "cleared");
         assert_eq!(json["channel"], "me");
-        // A cleared event is webview-only — it never enters the translation queue.
-        assert!(mapped.host_message().is_none());
+        // #195 CHANGED THIS DELIBERATELY. A cleared event used to be
+        // webview-only, because nothing downstream cared that an utterance was
+        // cancelled. Now it does: any translation units already released for
+        // that utterance must be discarded, or they attach to whatever the
+        // channel says next and corrupt that line (#62 + #195).
+        let host = mapped
+            .host_message()
+            .expect("cleared must reach the host (#195)");
+        assert_eq!(host["type"], "captionCleared");
+        assert_eq!(host["channel"], "me");
+        // Still no id: it cancels an utterance, it does not start one. The
+        // `next_id` closure above panics if consulted, so this is enforced.
+        assert!(host.get("id").is_none());
+        // And it carries no text — cancelling must never move caption content.
+        assert!(host.get("text").is_none());
     }
 
     #[test]
