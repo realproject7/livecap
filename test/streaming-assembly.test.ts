@@ -1,0 +1,152 @@
+import { describe, expect, it } from "vitest";
+
+import { StreamingAssembler } from "../src/host/streaming-assembly";
+
+// #195: a streamed utterance is translated in pieces, but the archive stores ONE
+// line per utterance (#137's 1:1 mapping). These cover the ordering that puts
+// the pieces back together — including the cases where a piece is late, never
+// arrives, or belongs to a cancelled utterance.
+
+const MIC = "mic";
+
+describe("StreamingAssembler — the happy path", () => {
+  it("joins unit translations with the tail, in spoken order", () => {
+    const a = new StreamingAssembler();
+    a.noteUnit(MIC, 1, "we are committed to the dual mandate.");
+    a.noteUnitResult(1, "우리는 이중 책무에 전념합니다.");
+
+    // 7 words already covered; the finalized line has 11.
+    const plan = a.onFinalized(MIC, 100, "we are committed to the dual mandate. and we will adjust", 7);
+    expect(plan.tailText).toBe("and we will adjust");
+    expect(plan.ready).toBe(false); // the tail is not translated yet
+
+    a.noteTailResult(100, "그리고 우리는 조정할 것입니다");
+    expect(a.tryAssemble(100)).toBe("우리는 이중 책무에 전념합니다. 그리고 우리는 조정할 것입니다");
+  });
+
+  it("needs no tail turn when the units covered the whole utterance", () => {
+    const a = new StreamingAssembler();
+    a.noteUnit(MIC, 1, "we are committed to the dual mandate.");
+    a.noteUnitResult(1, "우리는 이중 책무에 전념합니다.");
+
+    const plan = a.onFinalized(MIC, 100, "we are committed to the dual mandate.", 7);
+    expect(plan.tailText).toBe("");
+    // Everything is in hand, so the finalize turn costs nothing.
+    expect(plan.ready).toBe(true);
+    expect(a.tryAssemble(100)).toBe("우리는 이중 책무에 전념합니다.");
+  });
+
+  it("assembles several units in dispatch order", () => {
+    const a = new StreamingAssembler();
+    a.noteUnit(MIC, 1, "first clause.");
+    a.noteUnit(MIC, 2, "second clause.");
+    a.noteUnitResult(2, "두 번째.");
+    a.noteUnitResult(1, "첫 번째.");
+    a.onFinalized(MIC, 100, "first clause. second clause.", 4);
+    // Result ORDER follows dispatch order, not arrival order.
+    expect(a.tryAssemble(100)).toBe("첫 번째. 두 번째.");
+  });
+});
+
+describe("StreamingAssembler — pieces that are late or missing", () => {
+  it("waits for a unit that is still in flight at finalize", () => {
+    const a = new StreamingAssembler();
+    a.noteUnit(MIC, 1, "we are committed to the dual mandate.");
+    // No result yet — the utterance finalizes first.
+    const plan = a.onFinalized(MIC, 100, "we are committed to the dual mandate. and more words here", 7);
+    expect(plan.ready).toBe(false);
+
+    a.noteTailResult(100, "그리고 더");
+    // Tail is in, but the unit is not: still not assemblable.
+    expect(a.tryAssemble(100)).toBeNull();
+
+    a.noteUnitResult(1, "우리는 이중 책무에 전념합니다.");
+    expect(a.tryAssemble(100)).toBe("우리는 이중 책무에 전념합니다. 그리고 더");
+  });
+
+  // A failed unit must not leave a hole in the archived line. Re-translating
+  // that span is a deliberate exception to never-translate-twice: paying twice
+  // is recoverable, an archive missing what the speaker said is not.
+  it("folds a failed unit's source back into the tail for retry", () => {
+    const a = new StreamingAssembler();
+    a.noteUnit(MIC, 1, "we are committed to the dual mandate.");
+    a.noteUnitFailed(1);
+
+    const plan = a.onFinalized(MIC, 100, "we are committed to the dual mandate. and we will adjust", 7);
+    expect(plan.tailText).toBe("we are committed to the dual mandate. and we will adjust");
+    a.noteTailResult(100, "전체 번역");
+    expect(a.tryAssemble(100)).toBe("전체 번역");
+  });
+
+  it("force-assembles from what arrived rather than losing the line", () => {
+    const a = new StreamingAssembler();
+    a.noteUnit(MIC, 1, "first clause.");
+    a.noteUnit(MIC, 2, "second clause.");
+    a.noteUnitResult(1, "첫 번째.");
+    a.onFinalized(MIC, 100, "first clause. second clause.", 4);
+    // Unit 2 never returns and the drain deadline fires.
+    expect(a.tryAssemble(100)).toBeNull();
+    expect(a.forceAssemble(100)).toBe("첫 번째.");
+  });
+
+  it("returns null rather than an empty line when nothing arrived", () => {
+    const a = new StreamingAssembler();
+    a.noteUnit(MIC, 1, "first clause.");
+    a.onFinalized(MIC, 100, "first clause.", 2);
+    expect(a.forceAssemble(100)).toBeNull();
+  });
+
+  it("cannot assemble the same caption twice", () => {
+    const a = new StreamingAssembler();
+    a.noteUnit(MIC, 1, "first clause.");
+    a.noteUnitResult(1, "첫 번째.");
+    a.onFinalized(MIC, 100, "first clause.", 2);
+    expect(a.tryAssemble(100)).toBe("첫 번째.");
+    expect(a.tryAssemble(100)).toBeNull();
+  });
+});
+
+describe("StreamingAssembler — channel and utterance boundaries", () => {
+  it("keeps channels separate", () => {
+    const a = new StreamingAssembler();
+    a.noteUnit("mic", 1, "mic clause.");
+    a.noteUnit("system", 2, "system clause.");
+    a.noteUnitResult(1, "마이크.");
+    a.noteUnitResult(2, "시스템.");
+
+    a.onFinalized("mic", 100, "mic clause.", 2);
+    expect(a.tryAssemble(100)).toBe("마이크.");
+    a.onFinalized("system", 101, "system clause.", 2);
+    expect(a.tryAssemble(101)).toBe("시스템.");
+  });
+
+  // #56/#62: a suppressed mic utterance is cancelled after streaming partials.
+  // Its units must not attach to whatever the channel says next.
+  it("drops a cancelled utterance's units instead of attaching them to the next", () => {
+    const a = new StreamingAssembler();
+    a.noteUnit(MIC, 1, "bleed clause.");
+    a.noteUnitResult(1, "누출.");
+    a.dropChannel(MIC);
+
+    const plan = a.onFinalized(MIC, 100, "a completely different utterance follows here now", 0);
+    expect(plan.tailText).toBe("a completely different utterance follows here now");
+    a.noteTailResult(100, "완전히 다른 발화");
+    expect(a.tryAssemble(100)).toBe("완전히 다른 발화");
+  });
+
+  // A recognizer that revises text downward at finalize must never cause real
+  // words to be skipped as "already translated".
+  it("clamps a pretranslated count larger than the finalized text", () => {
+    const a = new StreamingAssembler();
+    const plan = a.onFinalized(MIC, 100, "three words only", 99);
+    expect(plan.tailText).toBe("");
+    expect(plan.ready).toBe(true);
+  });
+
+  it("treats a zero pretranslated count as the whole line needing translation", () => {
+    const a = new StreamingAssembler();
+    const plan = a.onFinalized(MIC, 100, "we are committed to the dual mandate", 0);
+    expect(plan.tailText).toBe("we are committed to the dual mandate");
+    expect(plan.ready).toBe(false);
+  });
+});
