@@ -552,6 +552,9 @@ async fn start_inner(app: &AppHandle) -> Result<Option<String>, String> {
         // for contract completeness (it translates, it does not transcribe).
         "sourceLanguageCode": settings.source_language,
         "enginePref": settings.engine_pref,
+        // #195: translation cadence. Sanitized to a shipped step already; the
+        // host clamps again so the held `live` mode is unreachable end to end.
+        "translationMode": settings.translation_mode,
         // #203: the Claude model the CLI tier runs; the host clamps it again and
         // passes it to buildClaudeArgs, so this is what reaches `--model`.
         "claudeModel": settings.claude_model,
@@ -572,9 +575,17 @@ async fn start_inner(app: &AppHandle) -> Result<Option<String>, String> {
 
     // #94: force whisper to the chosen spoken language ("auto" → per-utterance
     // detection), improving STT accuracy and eliminating auto-misdetection (#93).
+    // #195: the cadence decides whether the pipeline releases early translation
+    // units at all. `from_str_or_default` maps anything unshipped — including a
+    // hand-edited "live" that survived the sanitizer — to Relaxed, today's
+    // behaviour.
+    let translation_mode = livecap_core::stable_prefix::TranslationMode::from_str_or_default(
+        &settings.translation_mode,
+    );
     let config = PipelineConfig::new(models_dir)
         .with_model(&stt_model)
-        .with_source_language(&settings.source_language);
+        .with_source_language(&settings.source_language)
+        .with_translation_mode(translation_mode);
     let (mut pipeline, mut events_rx) = match CaptionPipeline::new(config).await {
         Ok(built) => built,
         Err(error) => {

@@ -30,6 +30,16 @@ pub enum BridgeCaption {
     /// channel's streaming block; never enters the translation queue.
     #[serde(rename_all = "camelCase")]
     Cleared { channel: &'static str },
+    /// A settled span of an in-flight utterance, released early for TRANSLATION
+    /// ONLY (#195). Never rendered as a caption and never archived: the webview
+    /// ignores it entirely, and only the host acts on it. Emitted solely in the
+    /// Balanced cadence; Relaxed never produces one.
+    #[serde(rename_all = "camelCase")]
+    TranslationUnit {
+        id: u64,
+        channel: &'static str,
+        text: String,
+    },
     #[serde(rename_all = "camelCase")]
     Finalized {
         id: u64,
@@ -41,6 +51,10 @@ pub enum BridgeCaption {
         /// Spoken duration in ms (`end_ms - start_ms`), for the post-meeting
         /// talk-ratio + Smooth Score metrics (#81/#78). NOT wall-clock epoch_ms.
         duration_ms: u64,
+        /// Leading words already translated as units (#195). The host archives
+        /// the FULL text as before and translates only the tail beyond this, so
+        /// no span is paid for twice. Always 0 in the Relaxed cadence.
+        pretranslated_words: usize,
     },
 }
 
@@ -58,12 +72,21 @@ impl BridgeCaption {
         match event.kind {
             CaptionKind::Partial(text) => Some(BridgeCaption::Partial { channel, text }),
             CaptionKind::PartialDropped => Some(BridgeCaption::Cleared { channel }),
+            // #195: units take an id from the same monotonic sequence as
+            // captions, so the host can correlate a dispatch with its result
+            // without a second id space.
+            CaptionKind::TranslationUnit { text } => Some(BridgeCaption::TranslationUnit {
+                id: next_id(),
+                channel,
+                text,
+            }),
             CaptionKind::Finalized {
                 text,
                 lang,
                 confidence,
                 start_ms,
                 end_ms,
+                pretranslated_words,
             } => Some(BridgeCaption::Finalized {
                 id: next_id(),
                 channel,
@@ -74,6 +97,7 @@ impl BridgeCaption {
                 // Spoken duration; saturating so a malformed (end < start) span
                 // never underflows into a huge u64.
                 duration_ms: end_ms.saturating_sub(start_ms),
+                pretranslated_words,
             }),
             // Not a caption — surfaced as a session status by the events task.
             CaptionKind::FallingBehind => None,
@@ -85,6 +109,14 @@ impl BridgeCaption {
     pub fn host_message(&self) -> Option<serde_json::Value> {
         match self {
             BridgeCaption::Partial { .. } | BridgeCaption::Cleared { .. } => None,
+            // #195: translation-only. Distinct message type from "caption" so
+            // the archive/transcript path is untouched by it.
+            BridgeCaption::TranslationUnit { id, channel, text } => Some(serde_json::json!({
+                "type": "translationUnit",
+                "id": id,
+                "channel": channel,
+                "text": text,
+            })),
             BridgeCaption::Finalized {
                 id,
                 channel,
@@ -92,6 +124,7 @@ impl BridgeCaption {
                 low_confidence,
                 epoch_ms,
                 duration_ms,
+                pretranslated_words,
                 ..
             } => Some(serde_json::json!({
                 "type": "caption",
@@ -101,6 +134,10 @@ impl BridgeCaption {
                 "lowConfidence": low_confidence,
                 "epochMs": epoch_ms,
                 "durationMs": duration_ms,
+                // #195: how much of this line the host already translated as
+                // units. The full text above is unchanged, so the archive keeps
+                // storing one line per utterance exactly as before.
+                "pretranslatedWords": pretranslated_words,
             })),
         }
     }
@@ -119,6 +156,7 @@ mod tests {
                 confidence,
                 start_ms: 0,
                 end_ms: 900,
+                pretranslated_words: 0,
             },
         }
     }
