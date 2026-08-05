@@ -480,16 +480,32 @@ export class CodexAppServerEngine {
     if (typeof contextWindow === "number" && contextWindow > 0) {
       this.modelContextWindow = contextWindow;
     }
-    const inputTokens = numberOr(last.inputTokens, 0);
+    // NAMING MATTERS HERE, so it is spelled out: `last.inputTokens` is not the
+    // size of the new message — it is the WHOLE context sent to the model for
+    // this turn, which on a multi-turn thread already includes every prior turn.
+    // Measured on codex-cli 0.146.0 with a short → LONG → short sequence:
+    //
+    //     turn 1 (short)  inputTokens = 5,158
+    //     turn 2 (LONG)   inputTokens = 7,106
+    //     turn 3 (short)  inputTokens = 7,159   <- does NOT fall back to ~5,158
+    //
+    // Turn 3's short message still carries turn 2's bulk, so this single value
+    // IS the accumulated thread context. Summing it across turns would not
+    // measure context — it would measure work done, and would cross any
+    // window-derived threshold absurdly early (30 turns summed to 168,769
+    // against a 258,400 window while the real context was only 6,088).
+    const contextTokens = numberOr(last.inputTokens, 0);
     const outputTokens = numberOr(last.outputTokens, 0);
-    this.cumulativeInputTokens += inputTokens;
+    this.cumulativeInputTokens += contextTokens;
     this.cumulativeOutputTokens += outputTokens;
 
     // Rollover trigger (#204 scope 4): the thread grows ~31 tokens/turn, so a
-    // long meeting walks toward the context wall. Flagged here, applied before
-    // the NEXT turn so the in-flight one is never interrupted.
+    // long meeting walks toward the context wall. Compared against the window
+    // directly, because the value above is already the accumulated context.
+    // Flagged here, applied before the NEXT turn so the in-flight one is never
+    // interrupted.
     const fraction = this.config.rolloverAtContextFraction ?? CODEX_ROLLOVER_CONTEXT_FRACTION;
-    if (this.modelContextWindow > 0 && inputTokens >= this.modelContextWindow * fraction) {
+    if (this.modelContextWindow > 0 && contextTokens >= this.modelContextWindow * fraction) {
       this.rolloverPending = true;
     }
 
@@ -498,7 +514,7 @@ export class CodexAppServerEngine {
       // decision comes from the #205 headroom seam, not from this field.
       cumulativeCostUsd: 0,
       turnCostUsd: 0,
-      inputTokens,
+      inputTokens: contextTokens,
       outputTokens,
       cacheReadInputTokens: numberOr(last.cachedInputTokens, 0),
     };

@@ -31,6 +31,12 @@ if (argvOut) writeFileSync(argvOut, JSON.stringify(process.argv));
 
 const REPLY = process.env.LIVECAP_FAKE_CODEX_REPLY ?? "우리는 이중 책무에 전념하고 있습니다.";
 const INPUT_TOKENS = Number(process.env.LIVECAP_FAKE_CODEX_INPUT ?? 5168);
+// Tokens added per turn, modelling how a real thread accumulates: each turn's
+// reported inputTokens is the WHOLE context sent to the model, so it grows as
+// the conversation does (measured: 5,168 -> 6,088 over 30 turns). Resets when a
+// new thread starts, exactly as a real rollover does.
+const GROWTH_PER_TURN = Number(process.env.LIVECAP_FAKE_CODEX_GROW ?? 0);
+let turnsOnThread = 0;
 const WINDOW = Number(process.env.LIVECAP_FAKE_CODEX_WINDOW ?? 258400);
 const FAIL_TURN = process.env.LIVECAP_FAKE_CODEX_FAIL_TURN === "1";
 
@@ -78,6 +84,7 @@ createInterface({ input: process.stdin }).on("line", (line) => {
     case "thread/start":
       threadSeq += 1;
       currentThread = `thr_fake_${threadSeq}`;
+      turnsOnThread = 0; // a fresh thread starts from a fresh context
       reply(id, { threadId: currentThread });
       return;
 
@@ -97,18 +104,21 @@ createInterface({ input: process.stdin }).on("line", (line) => {
       for (const [i, word] of words.entries()) {
         notify("item/agentMessage/delta", { delta: i === 0 ? word : ` ${word}` });
       }
+      // The turn's context = base + accumulated growth on THIS thread.
+      const contextTokens = INPUT_TOKENS + GROWTH_PER_TURN * turnsOnThread;
+      turnsOnThread += 1;
       notify("thread/tokenUsage/updated", {
         threadId: currentThread,
         turnId: `turn_${threadSeq}`,
         tokenUsage: {
           last: {
-            inputTokens: INPUT_TOKENS,
-            cachedInputTokens: Math.floor(INPUT_TOKENS * 0.66),
+            inputTokens: contextTokens,
+            cachedInputTokens: Math.floor(contextTokens * 0.66),
             outputTokens: 16,
             reasoningOutputTokens: 0,
-            totalTokens: INPUT_TOKENS + 16,
+            totalTokens: contextTokens + 16,
           },
-          total: { inputTokens: INPUT_TOKENS, outputTokens: 16 },
+          total: { inputTokens: contextTokens, outputTokens: 16 },
           modelContextWindow: WINDOW,
         },
       });

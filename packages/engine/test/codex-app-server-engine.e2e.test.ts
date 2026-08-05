@@ -162,6 +162,81 @@ describe("CodexAppServerEngine — real spawn/stdio (fake app-server)", () => {
     }
   });
 
+  // RE1's requested aggregate multi-turn test, encoding what the protocol
+  // actually reports. `last.inputTokens` is the WHOLE context for the turn, not
+  // the new message — measured short → LONG → short on codex-cli 0.146.0:
+  // 5,158 → 7,106 → 7,159, i.e. turn 3 does NOT fall back after the long turn.
+  // So context accumulation shows up as that value RISING across turns, and
+  // rollover must fire when the rising value crosses the threshold — which is
+  // what this drives, over several turns rather than one.
+  it("rolls over from ACCUMULATED thread growth across many turns", async () => {
+    // window 10,000 × 0.6 ⇒ threshold 6,000. Base 5,000, +400 context per turn:
+    // turns report 5,000 / 5,400 / 5,800 / 6,200 — the fourth crosses.
+    const engine = new CodexAppServerEngine({
+      bin: FAKE,
+      cwd: tmpdir(),
+      env: {
+        ...process.env,
+        LIVECAP_FAKE_CODEX_INPUT: "5000",
+        LIVECAP_FAKE_CODEX_GROW: "400",
+        LIVECAP_FAKE_CODEX_WINDOW: "10000",
+      },
+      targetLanguage: "Korean",
+      rolloverAtContextFraction: 0.6,
+      turnTimeoutMs: 15_000,
+    });
+    await engine.start();
+    try {
+      // No single turn's context is over the threshold until growth carries it
+      // there, so the thread must survive the early turns.
+      await drain(engine); // 5,000
+      expect(engine.currentThreadId()).toBe("thr_fake_1");
+      await drain(engine); // 5,400
+      expect(engine.currentThreadId()).toBe("thr_fake_1");
+      await drain(engine); // 5,800 — still under 6,000
+      expect(engine.currentThreadId()).toBe("thr_fake_1");
+      await drain(engine); // 6,200 — crosses, flags a rollover
+      expect(engine.currentThreadId()).toBe("thr_fake_1"); // in-flight turn untouched
+      await drain(engine); // fresh thread starts first, context resets
+      expect(engine.currentThreadId()).toBe("thr_fake_2");
+      // And the fresh thread is genuinely fresh: it does not immediately
+      // re-trip, which a cumulative-sum trigger would.
+      await drain(engine);
+      expect(engine.currentThreadId()).toBe("thr_fake_2");
+    } finally {
+      await engine.stop();
+    }
+  });
+
+  // The trigger must NOT be a running total of per-turn inputs. Summing them
+  // measures work done, not context: 30 turns summed to 168,769 against a
+  // 258,400 window while the real context was 6,088 — a sum-based trigger would
+  // roll over every ~28 turns and destroy continuity for no reason.
+  it("does not roll over merely because summed turn inputs exceed the window", async () => {
+    const engine = new CodexAppServerEngine({
+      bin: FAKE,
+      cwd: tmpdir(),
+      env: {
+        ...process.env,
+        LIVECAP_FAKE_CODEX_INPUT: "3000", // 4 turns sum to 12,000 > 10,000...
+        LIVECAP_FAKE_CODEX_GROW: "0", // ...but the CONTEXT never grows
+        LIVECAP_FAKE_CODEX_WINDOW: "10000",
+      },
+      targetLanguage: "Korean",
+      rolloverAtContextFraction: 0.6, // threshold 6,000
+      turnTimeoutMs: 15_000,
+    });
+    await engine.start();
+    try {
+      for (let i = 0; i < 4; i += 1) await drain(engine);
+      // Summed input is 12,000 — over the window — yet real context stayed at
+      // 3,000, so the thread must be intact.
+      expect(engine.currentThreadId()).toBe("thr_fake_1");
+    } finally {
+      await engine.stop();
+    }
+  });
+
   it("does NOT roll over while comfortably inside the window", async () => {
     const engine = new CodexAppServerEngine({
       bin: FAKE,
