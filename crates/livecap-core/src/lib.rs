@@ -23,6 +23,7 @@ pub mod model;
 pub mod pipeline;
 pub mod resample;
 pub mod stable_prefix;
+pub mod stable_prefix_measure;
 mod suppression;
 pub mod vad;
 pub mod whisper;

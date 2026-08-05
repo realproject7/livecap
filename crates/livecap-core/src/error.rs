@@ -27,7 +27,9 @@ pub enum CoreError {
     UnknownModel(String),
 
     /// A downloaded model failed checksum verification.
-    #[error("model checksum mismatch for {model}: expected sha256:{expected}, got sha256:{actual}")]
+    #[error(
+        "model checksum mismatch for {model}: expected sha256:{expected}, got sha256:{actual}"
+    )]
     ModelChecksumMismatch {
         model: String,
         expected: String,

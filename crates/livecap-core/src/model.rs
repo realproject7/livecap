@@ -195,9 +195,14 @@ impl ModelManager {
         marker: &Path,
         mut on_progress: impl FnMut(u64),
     ) -> Result<()> {
-        fs::create_dir_all(&self.models_dir).await.with_context(|| {
-            format!("Failed to create models directory {}", self.models_dir.display())
-        })?;
+        fs::create_dir_all(&self.models_dir)
+            .await
+            .with_context(|| {
+                format!(
+                    "Failed to create models directory {}",
+                    self.models_dir.display()
+                )
+            })?;
 
         let expected = fetch_expected_sha256(filename).await?;
         let url = blob_url(&blob_base_url(), filename);
@@ -364,11 +369,7 @@ async fn sha256_of_file(path: &Path) -> Result<String> {
 /// Minimal lowercase-hex encoding (avoids an extra dependency).
 mod hex {
     pub fn encode(bytes: impl AsRef<[u8]>) -> String {
-        bytes
-            .as_ref()
-            .iter()
-            .map(|b| format!("{b:02x}"))
-            .collect()
+        bytes.as_ref().iter().map(|b| format!("{b:02x}")).collect()
     }
 }
 

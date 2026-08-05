@@ -23,7 +23,10 @@ pub struct MicCapture {
 impl MicCapture {
     /// Start capturing from `device` (or the default input device when
     /// `None`), sending mono chunks to `out`.
-    pub fn start(device: Option<AudioDevice>, out: mpsc::UnboundedSender<AudioChunk>) -> Result<Self> {
+    pub fn start(
+        device: Option<AudioDevice>,
+        out: mpsc::UnboundedSender<AudioChunk>,
+    ) -> Result<Self> {
         let device = match device {
             Some(d) => d,
             None => default_input_device()?,

@@ -120,10 +120,14 @@ impl SuppressionConfig {
     }
 
     fn with_overrides(mut self, get: impl Fn(&str) -> Option<String>) -> Self {
-        if let Some(v) = env_override::<f32>(&get, "LIVECAP_BLEED_SPEECH_FLOOR").filter(|v| v.is_finite()) {
+        if let Some(v) =
+            env_override::<f32>(&get, "LIVECAP_BLEED_SPEECH_FLOOR").filter(|v| v.is_finite())
+        {
             self.speech_floor_rms = v;
         }
-        if let Some(v) = env_override::<f32>(&get, "LIVECAP_BLEED_ATTEN_RATIO").filter(|v| v.is_finite()) {
+        if let Some(v) =
+            env_override::<f32>(&get, "LIVECAP_BLEED_ATTEN_RATIO").filter(|v| v.is_finite())
+        {
             self.atten_ratio = v;
         }
         if let Some(v) = env_override::<u64>(&get, "LIVECAP_BLEED_ENERGY_WINDOW_MS") {
@@ -135,10 +139,14 @@ impl SuppressionConfig {
         if let Some(v) = env_override::<u64>(&get, "LIVECAP_BLEED_DEDUP_WINDOW_MS") {
             self.dedup_window_ms = v;
         }
-        if let Some(v) = env_override::<f32>(&get, "LIVECAP_BLEED_DEDUP_SIMILARITY").filter(|v| v.is_finite()) {
+        if let Some(v) =
+            env_override::<f32>(&get, "LIVECAP_BLEED_DEDUP_SIMILARITY").filter(|v| v.is_finite())
+        {
             self.dedup_similarity = v;
         }
-        if let Some(v) = env_override::<f32>(&get, "LIVECAP_BLEED_DEDUP_COVERAGE").filter(|v| v.is_finite()) {
+        if let Some(v) =
+            env_override::<f32>(&get, "LIVECAP_BLEED_DEDUP_COVERAGE").filter(|v| v.is_finite())
+        {
             self.dedup_coverage = v;
         }
         if let Some(v) = env_override::<usize>(&get, "LIVECAP_BLEED_DEDUP_COVERAGE_MIN_TOKENS") {
@@ -217,7 +225,10 @@ impl CrossChannelSuppressor {
             return;
         }
         let mut inner = self.inner.lock().expect("suppressor mutex poisoned");
-        inner.finals.push_back(SystemFinal { recorded_ms: now_ms, norm });
+        inner.finals.push_back(SystemFinal {
+            recorded_ms: now_ms,
+            norm,
+        });
         inner.prune_finals(now_ms, self.cfg.dedup_window_ms);
     }
 
@@ -430,7 +441,10 @@ mod tests {
         assert!(approx(token_jaccard("a b c", "a b c"), 1.0));
         assert!(approx(token_jaccard("", ""), 1.0));
         // {quick,brown,fox} vs {the,quick,brown,fox,jumps} = 3/5
-        assert!(approx(token_jaccard("quick brown fox", "the quick brown fox jumps"), 0.6));
+        assert!(approx(
+            token_jaccard("quick brown fox", "the quick brown fox jumps"),
+            0.6
+        ));
         assert!(approx(token_jaccard("a b", "c d"), 0.0));
     }
 
@@ -504,7 +518,12 @@ mod tests {
             "And Justin's talk really set the tone for the whole panel today",
         );
         // 3 tokens, all present in the system line, but Jaccard ≈ 3/11 < 0.6.
-        assert!(token_jaccard("and justins talk", &normalize_text("And Justin's talk really set the tone for the whole panel today")) < 0.6);
+        assert!(
+            token_jaccard(
+                "and justins talk",
+                &normalize_text("And Justin's talk really set the tone for the whole panel today")
+            ) < 0.6
+        );
         assert!(s.mic_text_is_duplicate(2_400, "And Justin's talk"));
     }
 
@@ -526,10 +545,7 @@ mod tests {
         // below both the Jaccard and the coverage thresholds → preserved.
         let s = suppressor();
         s.record_system_final(2_000, "the budget review is scheduled for next quarter");
-        assert!(!s.mic_text_is_duplicate(
-            2_300,
-            "can we revisit the hiring plan instead"
-        ));
+        assert!(!s.mic_text_is_duplicate(2_300, "can we revisit the hiring plan instead"));
     }
 
     #[test]

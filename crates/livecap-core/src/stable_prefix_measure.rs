@@ -1,0 +1,394 @@
+//! Cadence measurement for the three translation modes (#195).
+//!
+//! The operator's requirement is that each mode's Settings copy carries a
+//! **measured** multiplier — "about 2× the translation requests of Relaxed" —
+//! rather than a vague "may use more tokens". This module produces those
+//! numbers from a scripted fixture, so the figure in the UI is reproducible and
+//! re-derivable rather than an estimate somebody once wrote down.
+//!
+//! # What is and is not measured here
+//!
+//! **Turns are measured exactly.** Given a fixture, the number of units a mode
+//! dispatches is deterministic, and turns are what the engine bills per
+//! request. That is the headline multiplier, and it is what the UI copy states.
+//!
+//! **Words are measured exactly**, as the volume of text translated.
+//!
+//! **Tokens are NOT counted here.** Tokenizing needs the real engine, and a
+//! translate turn measured 165 input tokens for a single sentence on the Claude
+//! tier — so per-turn overhead dominates short units and the turn multiplier is
+//! the honest proxy. Anything claiming a token count from this module would be
+//! an estimate dressed as a measurement.
+//!
+//! **Latency is in fixture time**, i.e. milliseconds from a word first being
+//! heard in a partial to the unit carrying it being dispatched. It measures the
+//! scheduling win, which is what the modes actually change; it excludes engine
+//! round-trip, which is identical across modes.
+
+use crate::stable_prefix::{StablePrefixTracker, TranslationMode};
+
+/// One scripted step of continuous speech: the partial text as it stands at
+/// `at_ms`, and whether the utterance finalizes at that point.
+#[derive(Debug, Clone)]
+pub struct ScriptStep {
+    pub at_ms: u64,
+    pub text: String,
+    pub finalizes: bool,
+}
+
+/// What a mode cost and how quickly it responded on one fixture.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CadenceMeasurement {
+    pub mode: TranslationMode,
+    /// Units dispatched — one engine turn each. The billable quantity.
+    pub turns: usize,
+    /// Words of source text released across those turns.
+    pub words: usize,
+    /// Fixture duration, for per-minute rates.
+    pub speech_ms: u64,
+    /// Per-word latency: heard → dispatched, sorted ascending.
+    latencies_ms: Vec<u64>,
+}
+
+impl CadenceMeasurement {
+    pub fn turns_per_minute(&self) -> f64 {
+        if self.speech_ms == 0 {
+            return 0.0;
+        }
+        self.turns as f64 * 60_000.0 / self.speech_ms as f64
+    }
+
+    pub fn words_per_minute(&self) -> f64 {
+        if self.speech_ms == 0 {
+            return 0.0;
+        }
+        self.words as f64 * 60_000.0 / self.speech_ms as f64
+    }
+
+    /// Latency percentile in fixture milliseconds. `p` is 0..=100.
+    pub fn latency_p(&self, p: usize) -> u64 {
+        if self.latencies_ms.is_empty() {
+            return 0;
+        }
+        // Nearest-rank: the smallest value at or above the p-th percentile.
+        let rank = (p * self.latencies_ms.len()).div_ceil(100).max(1);
+        self.latencies_ms[rank - 1]
+    }
+
+    /// Turn multiplier against a baseline (Relaxed). This is the number the UI
+    /// copy states, so it is deliberately the plain ratio of billable turns.
+    pub fn turn_multiplier(&self, baseline: &CadenceMeasurement) -> f64 {
+        if baseline.turns == 0 {
+            return 0.0;
+        }
+        self.turns as f64 / baseline.turns as f64
+    }
+}
+
+/// Replay a script through one mode and measure what it cost.
+///
+/// The same script drives every mode, which is what makes the multipliers
+/// comparable: any difference is the mode's scheduling, not a different input.
+pub fn measure(mode: TranslationMode, script: &[ScriptStep]) -> CadenceMeasurement {
+    let mut tracker = StablePrefixTracker::new(mode);
+    let mut turns = 0usize;
+    let mut words = 0usize;
+    let mut latencies_ms: Vec<u64> = Vec::new();
+    // When each word index of the current utterance was FIRST heard, so latency
+    // is measured from the speaker, not from when the tracker settled it.
+    let mut first_heard_ms: Vec<u64> = Vec::new();
+    let mut dispatched_words = 0usize;
+
+    let record = |unit_words: usize,
+                  now_ms: u64,
+                  dispatched: &mut usize,
+                  heard: &[u64],
+                  lat: &mut Vec<u64>| {
+        for index in *dispatched..(*dispatched + unit_words) {
+            let heard_at = heard.get(index).copied().unwrap_or(now_ms);
+            lat.push(now_ms.saturating_sub(heard_at));
+        }
+        *dispatched += unit_words;
+    };
+
+    for step in script {
+        // Note when each newly-appearing word was first heard.
+        let count = step.text.split_whitespace().count();
+        while first_heard_ms.len() < count {
+            first_heard_ms.push(step.at_ms);
+        }
+
+        if step.finalizes {
+            let released_before = tracker.released_words();
+            if let Some(unit) = tracker.on_finalize(&step.text) {
+                let unit_words = unit.text.split_whitespace().count();
+                turns += 1;
+                words += unit_words;
+                record(
+                    unit_words,
+                    step.at_ms,
+                    &mut dispatched_words,
+                    &first_heard_ms,
+                    &mut latencies_ms,
+                );
+            }
+            let _ = released_before;
+            // A finalized utterance ends the word-timing frame.
+            first_heard_ms.clear();
+            dispatched_words = 0;
+        } else if let Some(unit) = tracker.on_partial(&step.text, step.at_ms) {
+            let unit_words = unit.text.split_whitespace().count();
+            turns += 1;
+            words += unit_words;
+            record(
+                unit_words,
+                step.at_ms,
+                &mut dispatched_words,
+                &first_heard_ms,
+                &mut latencies_ms,
+            );
+        }
+    }
+
+    latencies_ms.sort_unstable();
+    CadenceMeasurement {
+        mode,
+        turns,
+        words,
+        speech_ms: script.last().map(|s| s.at_ms).unwrap_or(0),
+        latencies_ms,
+    }
+}
+
+/// Build a continuous-speech script: a speaker who never pauses long enough to
+/// finalize, so the partial keeps growing until the 30 s force-cut.
+///
+/// This is the case #195 exists for — the one where today's behaviour leaves the
+/// viewer with no translation at all for up to half a minute.
+pub fn continuous_speech_script(clauses: &[&str], partial_interval_ms: u64) -> Vec<ScriptStep> {
+    let mut steps = Vec::new();
+    let mut spoken = String::new();
+    let mut at_ms = 0u64;
+    for clause in clauses {
+        for word in clause.split_whitespace() {
+            if !spoken.is_empty() {
+                spoken.push(' ');
+            }
+            spoken.push_str(word);
+            at_ms += partial_interval_ms / 4; // ~4 words per partial interval
+                                              // A partial is only produced every `partial_interval_ms`.
+            if at_ms % partial_interval_ms < partial_interval_ms / 4 {
+                steps.push(ScriptStep {
+                    at_ms,
+                    text: spoken.clone(),
+                    finalizes: false,
+                });
+            }
+        }
+        // Each clause boundary still produces a partial, so Balanced can see it.
+        steps.push(ScriptStep {
+            at_ms,
+            text: spoken.clone(),
+            finalizes: false,
+        });
+        steps.push(ScriptStep {
+            at_ms: at_ms + partial_interval_ms,
+            text: spoken.clone(),
+            finalizes: false,
+        });
+        at_ms += partial_interval_ms;
+    }
+    // The utterance finally finalizes (a pause, or the 30 s force-cut).
+    steps.push(ScriptStep {
+        at_ms: at_ms + 800,
+        text: spoken,
+        finalizes: true,
+    });
+    steps
+}
+
+/// Build a natural-speech script: the speaker pauses between clauses, so each
+/// clause finalizes as its own utterance.
+///
+/// This is the TYPICAL case, and it is the other half of an honest measurement.
+/// Relaxed already spends a turn per utterance here, so the streaming modes have
+/// far less headroom to add — measuring only continuous speech would report a
+/// worst case as if it were the everyday one.
+pub fn natural_speech_script(clauses: &[&str], partial_interval_ms: u64) -> Vec<ScriptStep> {
+    let mut steps = Vec::new();
+    let mut at_ms = 0u64;
+    for clause in clauses {
+        let mut spoken = String::new();
+        for word in clause.split_whitespace() {
+            if !spoken.is_empty() {
+                spoken.push(' ');
+            }
+            spoken.push_str(word);
+            at_ms += partial_interval_ms / 4;
+            steps.push(ScriptStep {
+                at_ms,
+                text: spoken.clone(),
+                finalizes: false,
+            });
+        }
+        // The speaker pauses: this utterance finalizes on its own.
+        at_ms += 800;
+        steps.push(ScriptStep {
+            at_ms,
+            text: spoken,
+            finalizes: true,
+        });
+    }
+    steps
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// One clause set, used by BOTH fixtures so the two speech patterns are
+    /// compared on identical text.
+    const CLAUSES: &[&str] = &[
+        "we are committed to the dual mandate of maximum employment and stable prices.",
+        "inflation has moderated over the past year but remains above our longer run goal.",
+        "the committee will remain data dependent as it assesses incoming information.",
+        "we will adjust the stance of policy as appropriate to achieve our objectives.",
+        "labor market conditions have come into better balance over recent months.",
+    ];
+
+    /// A ~25 s monologue with no pause long enough to finalize — the case #195
+    /// exists for.
+    fn fixture() -> Vec<ScriptStep> {
+        continuous_speech_script(CLAUSES, 1_200)
+    }
+
+    #[test]
+    fn relaxed_is_one_turn_per_utterance_and_the_full_text() {
+        let relaxed = measure(TranslationMode::Relaxed, &fixture());
+        // Today's behaviour: nothing until finalize, then exactly one turn.
+        assert_eq!(relaxed.turns, 1);
+        assert_eq!(relaxed.turn_multiplier(&relaxed), 1.0);
+    }
+
+    /// The operator's check: a DISPATCH COUNT over a scripted continuous
+    /// utterance, not an inspection of the code.
+    #[test]
+    fn no_span_is_dispatched_twice_in_any_mode() {
+        let script = fixture();
+        let total_words = script
+            .last()
+            .map(|s| s.text.split_whitespace().count())
+            .unwrap_or(0);
+        for mode in [
+            TranslationMode::Relaxed,
+            TranslationMode::Balanced,
+            TranslationMode::Live,
+        ] {
+            let m = measure(mode, &script);
+            // Every word is translated exactly once: the words released across
+            // all turns equal the utterance's word count. Fewer would mean
+            // untranslated text; more would mean paying twice.
+            assert_eq!(
+                m.words, total_words,
+                "{mode:?} released {} words for a {total_words}-word utterance",
+                m.words
+            );
+        }
+    }
+
+    #[test]
+    fn streaming_modes_respond_faster_than_relaxed() {
+        let script = fixture();
+        let relaxed = measure(TranslationMode::Relaxed, &script);
+        let balanced = measure(TranslationMode::Balanced, &script);
+        let live = measure(TranslationMode::Live, &script);
+
+        // The whole point of the feature: the first words are translated long
+        // before the utterance finalizes.
+        assert!(
+            balanced.latency_p(95) < relaxed.latency_p(95),
+            "balanced p95 {} should beat relaxed p95 {}",
+            balanced.latency_p(95),
+            relaxed.latency_p(95)
+        );
+        assert!(
+            live.latency_p(95) <= balanced.latency_p(95),
+            "live p95 {} should be at least as fast as balanced p95 {}",
+            live.latency_p(95),
+            balanced.latency_p(95)
+        );
+    }
+
+    /// The multiplier is dominated by how the speaker talks, not by the mode
+    /// alone — which is why a single number would have been misleading.
+    ///
+    /// Continuous speech is the WORST case for cost (Relaxed spends one turn for
+    /// a whole 25 s monologue) and the BEST case for latency (that is the
+    /// half-minute wait #195 exists to remove). Natural speech is the typical
+    /// case: Relaxed already spends a turn per clause, so streaming adds little.
+    #[test]
+    fn the_cost_multiplier_depends_on_speech_pattern_not_mode_alone() {
+        let continuous = fixture();
+        let natural = natural_speech_script(CLAUSES, 1_200);
+
+        let cont_relaxed = measure(TranslationMode::Relaxed, &continuous);
+        let cont_balanced = measure(TranslationMode::Balanced, &continuous);
+        let nat_relaxed = measure(TranslationMode::Relaxed, &natural);
+        let nat_balanced = measure(TranslationMode::Balanced, &natural);
+
+        // Continuous: Relaxed is one turn for the entire monologue, so any
+        // streaming at all is a large relative increase.
+        assert_eq!(cont_relaxed.turns, 1);
+        assert!(cont_balanced.turn_multiplier(&cont_relaxed) > 3.0);
+
+        // Natural: Relaxed already pays per clause, so the streaming modes add
+        // nothing like the same proportion.
+        assert!(
+            nat_balanced.turn_multiplier(&nat_relaxed) <= 1.5,
+            "natural-speech multiplier was {:.2}x",
+            nat_balanced.turn_multiplier(&nat_relaxed)
+        );
+    }
+
+    /// Prints the table that the PR body and the Settings copy quote. Run with
+    /// `cargo test -p livecap-core --lib cadence_table -- --nocapture`.
+    #[test]
+    fn cadence_table() {
+        for (label, script) in [
+            ("continuous speech (no pause)", fixture()),
+            (
+                "natural speech (pauses)",
+                natural_speech_script(CLAUSES, 1_200),
+            ),
+        ] {
+            println!("\n=== {label} ===");
+            print_table(&script);
+        }
+    }
+
+    fn print_table(script: &[ScriptStep]) {
+        let relaxed = measure(TranslationMode::Relaxed, script);
+        println!(
+            "\n{:<9} {:>6} {:>7} {:>10} {:>10} {:>9}",
+            "mode", "turns", "words", "turns/min", "p50 (ms)", "p95 (ms)"
+        );
+        for mode in [
+            TranslationMode::Relaxed,
+            TranslationMode::Balanced,
+            TranslationMode::Live,
+        ] {
+            let m = measure(mode, script);
+            println!(
+                "{:<9} {:>6} {:>7} {:>10.1} {:>10} {:>9}   {:.1}x turns vs Relaxed",
+                format!("{mode:?}"),
+                m.turns,
+                m.words,
+                m.turns_per_minute(),
+                m.latency_p(50),
+                m.latency_p(95),
+                m.turn_multiplier(&relaxed),
+            );
+        }
+        println!("(fixture: {} ms of continuous speech)\n", relaxed.speech_ms);
+    }
+}
