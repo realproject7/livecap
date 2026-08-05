@@ -75,10 +75,20 @@ This spike did not re-run them.
 Every utterance measured — clean and hallucinated alike — scored **0.888–0.995**
 [measured]. The floors (`forced = 0.50`, `auto_detect = 0.60`) therefore **rejected
 nothing in any run**, including output containing invented text ("died long after",
-0.888). Catching that case would need a threshold above 0.888, which sits between
-legitimate outputs measured at 0.913 and 0.933. On the values #111 logged, the
-confidence signal **does not cleanly separate hallucinated from clean output** — the
-ranges overlap — and #111 accordingly left the floor table at its seed values.
+0.888). Catching that case would need a threshold above 0.888 — and the two nearest
+scores above it, **0.9134 and 0.9330, are damaged outputs as well**, not legitimate
+ones (0.9134 invented an "AT HE" prefix and corrupted "Sarah"; 0.9330 produced
+"electrocardogram"). An earlier draft of this section had them the other way round;
+`docs/CALIBRATION.md` now publishes the labelled table.
+
+Labelled and sorted, clean utterances span **0.9557–0.9949** (n=9) and damaged ones
+**0.8884–0.9936** (n=11). A floor placed just under the lowest clean score would
+therefore reject **five of the eleven damaged utterances and none of the nine clean
+ones** — a real band, and a narrower claim than "a floor would buy nothing". It still
+does not settle the question: six damaged utterances score ABOVE the lowest clean one,
+where no threshold reaches them. So on the values #111 logged, the confidence signal
+**does not cleanly separate hallucinated from clean output** — the ranges overlap —
+and #111 accordingly left the floor table at its seed values.
 
 **Read that claim precisely.** It is a statement about the values #111 logged. Whether
 those values *are* the gate's own signal is the open question in §2.1.1, and this
