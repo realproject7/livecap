@@ -636,4 +636,56 @@ mod tests {
         }
         println!("(fixture: {} ms of continuous speech)\n", relaxed.speech_ms);
     }
+    /// #211's acceptance criterion: escalation must not oscillate on speech that
+    /// ALTERNATES punctuated and unpunctuated stretches. The unit tests pin the
+    /// property on a hand-built timeline; this drives it over a realistic script
+    /// and counts what actually happened.
+    #[test]
+    fn escalation_does_not_oscillate_on_alternating_speech() {
+        let bare = unpunctuated(CLAUSES);
+        // Two punctuated clauses, three bare, two punctuated, three bare.
+        let clauses: Vec<&str> = vec![
+            CLAUSES[0], CLAUSES[1], &bare[2], &bare[3], &bare[4], CLAUSES[0], CLAUSES[1], &bare[2],
+            &bare[3], &bare[4],
+        ];
+        let script = continuous_speech_script(&clauses, 1_200);
+
+        let mut tracker = StablePrefixTracker::new(TranslationMode::Balanced);
+        let mut was = false;
+        let mut escalations: Vec<u64> = Vec::new();
+        let mut flips = 0;
+        for step in &script {
+            if step.finalizes {
+                tracker.on_finalize(&step.text);
+            } else {
+                tracker.on_partial(&step.text, step.at_ms);
+            }
+            let now = tracker.is_escalated();
+            if now != was {
+                flips += 1;
+                if now {
+                    escalations.push(step.at_ms);
+                }
+                was = now;
+            }
+        }
+        println!("alternating: {flips} transitions, escalated at {escalations:?}");
+
+        // Consecutive ESCALATIONS must be at least one window apart. This is the
+        // no-oscillation guarantee expressed on real input: escalating twice in
+        // quick succession is the failure mode, and it cannot happen because
+        // escalation needs ESCALATE_AFTER_MS of boundary-free waiting each time.
+        for pair in escalations.windows(2) {
+            assert!(
+                pair[1] - pair[0] >= ESCALATE_AFTER_MS,
+                "escalated twice only {}ms apart ({escalations:?})",
+                pair[1] - pair[0]
+            );
+        }
+        // And the state changed a handful of times, not once per partial.
+        assert!(
+            flips <= 4,
+            "escalation state flipped {flips} times on alternating speech"
+        );
+    }
 }
