@@ -95,6 +95,10 @@ export class TranslationRunner {
   private readonly pendingIds = new Set<number>();
   /** Ids in the currently-running batch — for dedup while a batch is in flight. */
   private readonly inFlightIds = new Set<number>();
+  /** Ids whose failure is being reported right now — see {@link reportFailed}. */
+  private readonly failingIds = new Set<number>();
+  /** Retries taken during a failure report, flushed once the batch clears. */
+  private readonly retryAfterFailure: RunnerSentence[] = [];
 
   constructor(options: RunnerOptions) {
     this.engine = options.engine;
@@ -108,6 +112,17 @@ export class TranslationRunner {
   }
 
   enqueue(sentence: RunnerSentence): void {
+    // Re-enqueueing an id from inside its own failure report is a RETRY, and it
+    // has to survive the dedup below: at that moment the id is still in the
+    // failing batch, so the guard would discard the retry silently and the
+    // caller would believe it had retried (#195). Stage it for the batch's
+    // `finally` instead. Scoped to the ids being reported, during the report
+    // only, so #139's dedup is unchanged for every other caller — and there is
+    // no separate "retry" entry point a caller can forget to reach for.
+    if (this.failingIds.has(sentence.id)) {
+      this.retryAfterFailure.push(sentence);
+      return;
+    }
     // Dedup (#139): an id already waiting or in flight must not be queued again —
     // it would otherwise land twice, even twice in one batch.
     if (this.pendingIds.has(sentence.id) || this.inFlightIds.has(sentence.id)) return;
@@ -219,10 +234,15 @@ export class TranslationRunner {
       this.callbacks.onBatchDone(results);
     } catch (error) {
       // Engine errors are content-free by contract (#23); forward the message.
-      this.callbacks.onFailed(ids, error instanceof Error ? error.message : String(error));
+      this.reportFailed(ids, error instanceof Error ? error.message : String(error));
     } finally {
       this.running = false;
       for (const id of ids) this.inFlightIds.delete(id);
+      // Only now is a staged retry dispatchable: its id has just left the batch.
+      if (this.retryAfterFailure.length > 0) {
+        const staged = this.retryAfterFailure.splice(0, this.retryAfterFailure.length);
+        for (const sentence of staged) this.enqueue(sentence);
+      }
       this.pump();
     }
   }
@@ -258,10 +278,26 @@ export class TranslationRunner {
       } catch (error) {
         // Content-free by contract (#23); the host preserves the source and a
         // later retranslate can fill the target — never a shifted mapping.
-        this.callbacks.onFailed([id], error instanceof Error ? error.message : String(error));
+        this.reportFailed([id], error instanceof Error ? error.message : String(error));
       }
     }
     if (results.length > 0) this.callbacks.onBatchDone(results);
+  }
+
+  /**
+   * Report a failed turn, with the ids marked as failing for the duration.
+   *
+   * Both failure sites go through here so a retry taken from `onFailed` behaves
+   * the same whether the batch failed as a whole or one-to-one — a per-site fix
+   * would have left runOneToOne's retries silently deduped.
+   */
+  private reportFailed(ids: number[], detail: string): void {
+    for (const id of ids) this.failingIds.add(id);
+    try {
+      this.callbacks.onFailed(ids, detail);
+    } finally {
+      for (const id of ids) this.failingIds.delete(id);
+    }
   }
 
   private settleIfIdle(): void {

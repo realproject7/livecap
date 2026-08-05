@@ -412,9 +412,13 @@ mod tests {
         }
         all_segments.extend(processor.flush().expect("Flush failed"));
 
-        assert!(!all_segments.is_empty(), "Expected at least 1 speech segment");
-        assert!(all_segments.iter().all(|s| !s.samples.is_empty()
-            && s.end_timestamp_ms > s.start_timestamp_ms));
+        assert!(
+            !all_segments.is_empty(),
+            "Expected at least 1 speech segment"
+        );
+        assert!(all_segments
+            .iter()
+            .all(|s| !s.samples.is_empty() && s.end_timestamp_ms > s.start_timestamp_ms));
     }
 
     #[test]

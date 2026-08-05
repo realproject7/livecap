@@ -30,6 +30,16 @@ pub enum BridgeCaption {
     /// channel's streaming block; never enters the translation queue.
     #[serde(rename_all = "camelCase")]
     Cleared { channel: &'static str },
+    /// A settled span of an in-flight utterance, released early for TRANSLATION
+    /// ONLY (#195). Never rendered as a caption and never archived: the webview
+    /// ignores it entirely, and only the host acts on it. Emitted solely in the
+    /// Balanced cadence; Relaxed never produces one.
+    #[serde(rename_all = "camelCase")]
+    TranslationUnit {
+        id: u64,
+        channel: &'static str,
+        text: String,
+    },
     #[serde(rename_all = "camelCase")]
     Finalized {
         id: u64,
@@ -41,6 +51,10 @@ pub enum BridgeCaption {
         /// Spoken duration in ms (`end_ms - start_ms`), for the post-meeting
         /// talk-ratio + Smooth Score metrics (#81/#78). NOT wall-clock epoch_ms.
         duration_ms: u64,
+        /// Leading words already translated as units (#195). The host archives
+        /// the FULL text as before and translates only the tail beyond this, so
+        /// no span is paid for twice. Always 0 in the Relaxed cadence.
+        pretranslated_words: usize,
     },
 }
 
@@ -58,12 +72,21 @@ impl BridgeCaption {
         match event.kind {
             CaptionKind::Partial(text) => Some(BridgeCaption::Partial { channel, text }),
             CaptionKind::PartialDropped => Some(BridgeCaption::Cleared { channel }),
+            // #195: units take an id from the same monotonic sequence as
+            // captions, so the host can correlate a dispatch with its result
+            // without a second id space.
+            CaptionKind::TranslationUnit { text } => Some(BridgeCaption::TranslationUnit {
+                id: next_id(),
+                channel,
+                text,
+            }),
             CaptionKind::Finalized {
                 text,
                 lang,
                 confidence,
                 start_ms,
                 end_ms,
+                pretranslated_words,
             } => Some(BridgeCaption::Finalized {
                 id: next_id(),
                 channel,
@@ -74,6 +97,7 @@ impl BridgeCaption {
                 // Spoken duration; saturating so a malformed (end < start) span
                 // never underflows into a huge u64.
                 duration_ms: end_ms.saturating_sub(start_ms),
+                pretranslated_words,
             }),
             // Not a caption — surfaced as a session status by the events task.
             CaptionKind::FallingBehind => None,
@@ -84,7 +108,22 @@ impl BridgeCaption {
     /// only finalized sentences enter the translation queue).
     pub fn host_message(&self) -> Option<serde_json::Value> {
         match self {
-            BridgeCaption::Partial { .. } | BridgeCaption::Cleared { .. } => None,
+            BridgeCaption::Partial { .. } => None,
+            // #195/#62: the host must learn about a cancelled utterance so it
+            // can discard any translation units already released for it. Before
+            // #195 nothing downstream cared, so this was dropped here.
+            BridgeCaption::Cleared { channel } => Some(serde_json::json!({
+                "type": "captionCleared",
+                "channel": channel,
+            })),
+            // #195: translation-only. Distinct message type from "caption" so
+            // the archive/transcript path is untouched by it.
+            BridgeCaption::TranslationUnit { id, channel, text } => Some(serde_json::json!({
+                "type": "translationUnit",
+                "id": id,
+                "channel": channel,
+                "text": text,
+            })),
             BridgeCaption::Finalized {
                 id,
                 channel,
@@ -92,6 +131,7 @@ impl BridgeCaption {
                 low_confidence,
                 epoch_ms,
                 duration_ms,
+                pretranslated_words,
                 ..
             } => Some(serde_json::json!({
                 "type": "caption",
@@ -101,6 +141,10 @@ impl BridgeCaption {
                 "lowConfidence": low_confidence,
                 "epochMs": epoch_ms,
                 "durationMs": duration_ms,
+                // #195: how much of this line the host already translated as
+                // units. The full text above is unchanged, so the archive keeps
+                // storing one line per utterance exactly as before.
+                "pretranslatedWords": pretranslated_words,
             })),
         }
     }
@@ -119,6 +163,7 @@ mod tests {
                 confidence,
                 start_ms: 0,
                 end_ms: 900,
+                pretranslated_words: 0,
             },
         }
     }
@@ -154,8 +199,21 @@ mod tests {
         let json = serde_json::to_value(&mapped).unwrap();
         assert_eq!(json["type"], "cleared");
         assert_eq!(json["channel"], "me");
-        // A cleared event is webview-only — it never enters the translation queue.
-        assert!(mapped.host_message().is_none());
+        // #195 CHANGED THIS DELIBERATELY. A cleared event used to be
+        // webview-only, because nothing downstream cared that an utterance was
+        // cancelled. Now it does: any translation units already released for
+        // that utterance must be discarded, or they attach to whatever the
+        // channel says next and corrupt that line (#62 + #195).
+        let host = mapped
+            .host_message()
+            .expect("cleared must reach the host (#195)");
+        assert_eq!(host["type"], "captionCleared");
+        assert_eq!(host["channel"], "me");
+        // Still no id: it cancels an utterance, it does not start one. The
+        // `next_id` closure above panics if consulted, so this is enforced.
+        assert!(host.get("id").is_none());
+        // And it carries no text — cancelling must never move caption content.
+        assert!(host.get("text").is_none());
     }
 
     #[test]
@@ -183,6 +241,7 @@ mod tests {
                 // Inverted span (end < start) must not underflow.
                 start_ms: 900,
                 end_ms: 100,
+                pretranslated_words: 0,
             },
         };
         let mapped = BridgeCaption::from_event(event, || 1, 0).unwrap();

@@ -336,15 +336,8 @@ mod macos {
                 ns_key(kAudioAggregateDeviceTapListKey),
             ];
             let key_refs: Vec<&NSString> = keys.iter().map(|k| &**k).collect();
-            let values: [&AnyObject; 7] = [
-                &yes,
-                &no,
-                &yes,
-                &agg_name,
-                &output_uid,
-                &agg_uid,
-                &tap_list,
-            ];
+            let values: [&AnyObject; 7] =
+                [&yes, &no, &yes, &agg_name, &output_uid, &agg_uid, &tap_list];
             let agg_desc: Retained<NSDictionary<NSString, AnyObject>> =
                 NSDictionary::from_slices(&key_refs, &values);
 

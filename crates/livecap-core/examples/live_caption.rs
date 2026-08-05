@@ -132,10 +132,29 @@ async fn main() -> anyhow::Result<()> {
                     CaptionKind::PartialDropped => {
                         println!("[{t:8.2}s] [{who}] ⨯ (partial suppressed)");
                     }
-                    CaptionKind::Finalized { text, lang, confidence, start_ms, end_ms } => {
+                    CaptionKind::Finalized {
+                        text,
+                        lang,
+                        confidence,
+                        start_ms,
+                        end_ms,
+                        pretranslated_words,
+                    } => {
+                        // #195: `pretranslated_words` is how much of this line was
+                        // already released for early translation. Shown here as a
+                        // marker so the example makes the streaming visible.
+                        let streamed = if pretranslated_words > 0 {
+                            format!(" [{pretranslated_words}w streamed]")
+                        } else {
+                            String::new()
+                        };
                         println!(
-                            "[{t:8.2}s] [{who}] ✓ ({lang}, conf {confidence:.2}, {start_ms}–{end_ms}ms) {text}"
+                            "[{t:8.2}s] [{who}] ✓ ({lang}, conf {confidence:.2}, {start_ms}–{end_ms}ms){streamed} {text}"
                         );
+                    }
+                    CaptionKind::TranslationUnit { text } => {
+                        // Translation-only (#195): never a caption, never archived.
+                        println!("[{t:8.2}s] [{who}] » (unit) {text}");
                     }
                     CaptionKind::FallingBehind => {
                         println!("[{t:8.2}s] ⚠ transcription falling behind — a smaller model may keep up");

@@ -175,9 +175,16 @@ mod tests {
         // #178: detection is case-insensitive, so stripping must be too — a
         // differently-cased suffix must not be left stuck on the device name (which
         // would fail the exact-match lookup in get_device_and_config).
-        for raw in ["Studio Mic (Input)", "Studio Mic (INPUT)", "Studio Mic (input)"] {
+        for raw in [
+            "Studio Mic (Input)",
+            "Studio Mic (INPUT)",
+            "Studio Mic (input)",
+        ] {
             let d = AudioDevice::from_name(raw).unwrap();
-            assert_eq!(d.name, "Studio Mic", "case variant {raw:?} must strip cleanly");
+            assert_eq!(
+                d.name, "Studio Mic",
+                "case variant {raw:?} must strip cleanly"
+            );
             assert_eq!(d.device_type, DeviceType::Input);
         }
         let d = AudioDevice::from_name("Big Speaker (Output)").unwrap();

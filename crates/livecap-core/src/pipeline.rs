@@ -33,6 +33,7 @@ use crate::debug_dump::ChannelDump;
 use crate::event::{CaptionEvent, CaptionKind, Channel};
 use crate::model::ModelManager;
 use crate::resample::StreamResampler;
+use crate::stable_prefix::{StablePrefixTracker, TranslationMode};
 use crate::suppression::{rms, CrossChannelSuppressor, SuppressionConfig};
 use crate::vad::{ContinuousVadProcessor, VAD_SAMPLE_RATE};
 use crate::whisper::WhisperEngine;
@@ -57,6 +58,10 @@ pub struct PipelineConfig {
     pub vad_redemption_ms: u32,
     /// Utterances longer than this are force-finalized in slices.
     pub max_utterance_ms: u64,
+    /// How eagerly translation follows the speaker (#195). Relaxed — the
+    /// default — never releases a unit from a partial, so token spend is
+    /// unchanged for anyone who has not opted in.
+    pub translation_mode: TranslationMode,
 }
 
 impl PipelineConfig {
@@ -68,7 +73,14 @@ impl PipelineConfig {
             partial_interval_ms: 1200,
             vad_redemption_ms: 800,
             max_utterance_ms: 30_000,
+            translation_mode: TranslationMode::default(),
         }
+    }
+
+    /// Set the streaming-translation mode (#195).
+    pub fn with_translation_mode(mut self, mode: TranslationMode) -> Self {
+        self.translation_mode = mode;
+        self
     }
 
     /// Set the whisper model by name (#110); see [`crate::model::MODEL_NAMES`].
@@ -109,7 +121,10 @@ struct TranscribeRequest {
 
 enum RequestKind {
     Partial,
-    Finalized { start_ms: u64, end_ms: u64 },
+    Finalized {
+        start_ms: u64,
+        end_ms: u64,
+    },
     /// A mic utterance that had already streamed partials was energy-gated as
     /// bleed (#56): no transcription, but the worker must tell consumers to drop
     /// the orphaned streaming block (#62). Routed through the same queue so it
@@ -147,11 +162,10 @@ impl CaptionPipeline {
         let model_path = manager.ensure_model(&config.model).await?;
 
         let model_name = config.model.clone();
-        let engine = tokio::task::spawn_blocking(move || {
-            WhisperEngine::load(&model_path, &model_name)
-        })
-        .await
-        .map_err(|e| anyhow!("Model load task failed: {e}"))??;
+        let engine =
+            tokio::task::spawn_blocking(move || WhisperEngine::load(&model_path, &model_name))
+                .await
+                .map_err(|e| anyhow!("Model load task failed: {e}"))??;
         let engine = Arc::new(engine);
 
         let (events_tx, events_rx) = mpsc::unbounded_channel();
@@ -167,6 +181,7 @@ impl CaptionPipeline {
             events_tx.clone(),
             suppressor.clone(),
             start,
+            config.translation_mode,
         ));
 
         Ok((
@@ -294,7 +309,8 @@ async fn channel_worker(
     suppressor: Arc<CrossChannelSuppressor>,
     start: Instant,
 ) {
-    if let Err(e) = channel_worker_inner(channel, rx, transcribe_tx, params, suppressor, start).await
+    if let Err(e) =
+        channel_worker_inner(channel, rx, transcribe_tx, params, suppressor, start).await
     {
         log::error!("Channel worker for {channel} failed: {e:#}");
     }
@@ -415,8 +431,7 @@ async fn channel_worker_inner(
                     last_partial_len = 0;
                     streamed_partial = false;
                 }
-            } else if current_len >= min_partial && current_len >= last_partial_len + partial_step
-            {
+            } else if current_len >= min_partial && current_len >= last_partial_len + partial_step {
                 last_partial_len = current_len;
                 let partial_samples = vad.current_speech().to_vec();
                 let duration_ms = (current_len / samples_per_ms) as u64;
@@ -499,6 +514,7 @@ async fn transcribe_worker(
     events_tx: mpsc::UnboundedSender<CaptionEvent>,
     suppressor: Arc<CrossChannelSuppressor>,
     start: Instant,
+    translation_mode: TranslationMode,
 ) {
     // Per-channel language pinned for the in-progress utterance (#140, M1). In
     // AUTO mode the first partial's detected language is pinned so subsequent
@@ -506,6 +522,11 @@ async fn transcribe_worker(
     // always re-detects. Keyed by channel because mic and system utterances
     // interleave through this one worker.
     let mut pinned_lang: HashMap<Channel, String> = HashMap::new();
+    // Per-channel streaming-translation state (#195). Keyed by channel for the
+    // same reason as pinned_lang: mic and system utterances interleave through
+    // this one worker, and one channel's watermark must never leak into the
+    // other's. Relaxed keeps these inert.
+    let mut prefix_trackers: HashMap<Channel, StablePrefixTracker> = HashMap::new();
     // AUTO mode = the session did not force a specific language. `with_source_
     // language` normalises "auto"/"" to `None`; `"auto-translate"` is NOT auto
     // (it force-translates) and must not be pinned.
@@ -600,7 +621,13 @@ async fn transcribe_worker(
                 RequestKind::Finalized { .. } => {
                     pinned_lang.remove(&req.channel);
                 }
-                RequestKind::DropPartial => {}
+                RequestKind::DropPartial => {
+                    // #195: the orphaned utterance is cancelled, so its
+                    // released-words watermark must not carry into the next one.
+                    if let Some(tracker) = prefix_trackers.get_mut(&req.channel) {
+                        tracker.reset();
+                    }
+                }
             }
         }
 
@@ -631,7 +658,28 @@ async fn transcribe_worker(
             // Handled above (no transcription) and `continue`d past — it never
             // reaches this transcription-result match.
             RequestKind::DropPartial => unreachable!("DropPartial is handled before transcription"),
-            RequestKind::Partial => CaptionKind::Partial(utterance.text),
+            RequestKind::Partial => {
+                // #195: feed the partial to this channel's tracker. A released
+                // unit is emitted as its own translation-only event BEFORE the
+                // partial, so the host can start translating the settled span
+                // while the caption keeps scrolling. Relaxed releases nothing.
+                let tracker = prefix_trackers
+                    .entry(req.channel)
+                    .or_insert_with(|| StablePrefixTracker::new(translation_mode));
+                let now_ms = start.elapsed().as_millis() as u64;
+                if let Some(unit) = tracker.on_partial(&utterance.text, now_ms) {
+                    if events_tx
+                        .send(CaptionEvent {
+                            channel: req.channel,
+                            kind: CaptionKind::TranslationUnit { text: unit.text },
+                        })
+                        .is_err()
+                    {
+                        break;
+                    }
+                }
+                CaptionKind::Partial(utterance.text)
+            }
             RequestKind::Finalized { start_ms, end_ms } => {
                 let text = utterance.text;
                 let now_ms = start.elapsed().as_millis() as u64;
@@ -672,12 +720,22 @@ async fn transcribe_worker(
                     req.queued_at.elapsed().as_millis(),
                     text.chars().count()
                 );
+                // #195: how much of this utterance was already released as
+                // translation units. The consumer archives the FULL text as
+                // before and translates only the tail beyond this count.
+                // on_finalize also resets the tracker, so the next utterance
+                // never inherits this one's watermark.
+                let pretranslated_words = prefix_trackers
+                    .entry(req.channel)
+                    .or_insert_with(|| StablePrefixTracker::new(translation_mode))
+                    .take_released_on_finalize(&text);
                 CaptionKind::Finalized {
                     text,
                     lang: utterance.lang,
                     confidence: utterance.confidence,
                     start_ms,
                     end_ms,
+                    pretranslated_words,
                 }
             }
         };
@@ -726,7 +784,10 @@ mod tests {
         assert_eq!(fires, 1, "should notify exactly once when it first crosses");
         // Still slow → debounced, no repeat.
         for _ in 0..RtfWatch::WINDOW {
-            assert!(!w.record_final(1.5), "must not re-fire while still notified");
+            assert!(
+                !w.record_final(1.5),
+                "must not re-fire while still notified"
+            );
         }
     }
 
@@ -747,16 +808,32 @@ mod tests {
                 refires += 1;
             }
         }
-        assert_eq!(refires, 1, "should re-fire after recovering and falling behind again");
+        assert_eq!(
+            refires, 1,
+            "should re-fire after recovering and falling behind again"
+        );
     }
 
     #[test]
     fn source_language_auto_maps_to_none() {
         // #94: "auto" (and empty) keep per-utterance auto-detection.
         let dir = std::path::PathBuf::from("/tmp/livecap-models");
-        assert_eq!(PipelineConfig::new(&dir).with_source_language("auto").language, None);
-        assert_eq!(PipelineConfig::new(&dir).with_source_language("").language, None);
-        assert_eq!(PipelineConfig::new(&dir).with_source_language("  AUTO ").language, None);
+        assert_eq!(
+            PipelineConfig::new(&dir)
+                .with_source_language("auto")
+                .language,
+            None
+        );
+        assert_eq!(
+            PipelineConfig::new(&dir).with_source_language("").language,
+            None
+        );
+        assert_eq!(
+            PipelineConfig::new(&dir)
+                .with_source_language("  AUTO ")
+                .language,
+            None
+        );
     }
 
     #[test]
@@ -766,11 +843,15 @@ mod tests {
         // and silently disable translation. The engine matches the exact string.
         let dir = std::path::PathBuf::from("/tmp/livecap-models");
         assert_eq!(
-            PipelineConfig::new(&dir).with_source_language("auto-translate").language,
+            PipelineConfig::new(&dir)
+                .with_source_language("auto-translate")
+                .language,
             Some("auto-translate".to_string())
         );
         assert_eq!(
-            PipelineConfig::new(&dir).with_source_language("  Auto-Translate ").language,
+            PipelineConfig::new(&dir)
+                .with_source_language("  Auto-Translate ")
+                .language,
             Some("auto-translate".to_string())
         );
     }
@@ -793,15 +874,21 @@ mod tests {
         // primary subtag (whisper only understands the primary language).
         let dir = std::path::PathBuf::from("/tmp/livecap-models");
         assert_eq!(
-            PipelineConfig::new(&dir).with_source_language("en").language,
+            PipelineConfig::new(&dir)
+                .with_source_language("en")
+                .language,
             Some("en".to_string())
         );
         assert_eq!(
-            PipelineConfig::new(&dir).with_source_language("PT-BR").language,
+            PipelineConfig::new(&dir)
+                .with_source_language("PT-BR")
+                .language,
             Some("pt".to_string())
         );
         assert_eq!(
-            PipelineConfig::new(&dir).with_source_language(" zh-hans ").language,
+            PipelineConfig::new(&dir)
+                .with_source_language(" zh-hans ")
+                .language,
             Some("zh".to_string())
         );
     }

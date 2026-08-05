@@ -11,6 +11,7 @@ import { ask } from "@tauri-apps/plugin-dialog";
 import {
   applyCaptionSize,
   DEFAULT_CLAUDE_MODEL,
+  DEFAULT_TRANSLATION_MODE,
   nextSettingsForSessionLanguage,
   nextSettingsForSessionSourceLanguage,
   type AppSettings,
@@ -209,6 +210,7 @@ let appSettings: AppSettings = {
   sourceLanguage: "auto", // #94: per-utterance auto-detect until the user picks
   sttModel: "large-v3-turbo-q5_0", // #202 fresh-install default; get_settings overrides for existing installs
   claudeModel: DEFAULT_CLAUDE_MODEL, // #203; get_settings overrides with the persisted pick
+  translationMode: DEFAULT_TRANSLATION_MODE, // #195; Relaxed until the user opts in
   poolUsd: DEFAULT_POOL_USD,
   resetDay: DEFAULT_RESET_DAY,
   autoSwitch: true,

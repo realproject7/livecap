@@ -90,6 +90,10 @@ export type HostInbound =
       sourceLanguageCode: string;
       /** Engine tier to lead with (router default; §8.7 segmented control). */
       enginePref: EnginePref;
+      /** Translation cadence (#195). Only the SHIPPED steps are admitted: the
+       *  held `live` mode is unreachable through this contract by construction,
+       *  not merely unlisted in the picker. */
+      translationMode: "relaxed" | "balanced";
       /** Claude model the CLI tier runs (#203): a curated tier alias — "haiku"
        *  (default) | "sonnet" | "opus". Both sides clamp unknown values, and an
        *  older shell that omits the field lands on the default. */
@@ -119,7 +123,20 @@ export type HostInbound =
       /** Spoken duration in ms; the host keeps it per-id to build the
        *  FinalizedRecord[] for the post-meeting metrics (#81/#78). */
       durationMs: number;
+      /** Leading words already translated as units (#195). The host archives
+       *  the full `text` unchanged and translates only the tail beyond this.
+       *  Absent/0 in the Relaxed cadence and from older shells. */
+      pretranslatedWords?: number;
     }
+  /** A settled span of an in-flight utterance, released early for translation
+   *  only (#195). Distinct from "caption" so the archive/transcript path is
+   *  untouched: this never becomes an archive line, and the webview ignores it. */
+  | { type: "translationUnit"; id: number; channel: Channel; text: string }
+  /** The channel's in-flight utterance was cancelled without finalizing (#62):
+   *  a mic utterance suppressed as speaker bleed (#56). Any translation units
+   *  already released for it must be discarded, or they attach to the next
+   *  utterance (#195). Carries no text. */
+  | { type: "captionCleared"; channel: Channel }
   | { type: "quickTranslate"; id: number; text: string }
   | { type: "reply"; id: number; intent: ReplyIntentWire }
   /** Targeted analysis of ONE caption block (#80): the host resolves the target

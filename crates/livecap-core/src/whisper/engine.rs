@@ -187,11 +187,8 @@ impl WhisperEngine {
             ..Default::default()
         };
 
-        let ctx = WhisperContext::new_with_params(
-            &model_path.to_string_lossy(),
-            context_param,
-        )
-        .map_err(|e| anyhow!("Failed to load model {}: {}", model_name, e))?;
+        let ctx = WhisperContext::new_with_params(&model_path.to_string_lossy(), context_param)
+            .map_err(|e| anyhow!("Failed to load model {}: {}", model_name, e))?;
 
         // Create the reusable state once (#140). `whisper_full` overwrites its
         // results each call, so a single long-lived state serves every
@@ -316,7 +313,9 @@ impl WhisperEngine {
 
         // Detected language for this utterance.
         let lang = match state.full_lang_id_from_state() {
-            Ok(id) => whisper_rs::get_lang_str(id).unwrap_or("unknown").to_string(),
+            Ok(id) => whisper_rs::get_lang_str(id)
+                .unwrap_or("unknown")
+                .to_string(),
             Err(_) => "unknown".to_string(),
         };
 
@@ -382,7 +381,12 @@ impl WhisperEngine {
         // auto session and must get the stricter auto-mode floor, even though it
         // now passes a concrete language code to skip re-detection.
         let auto_detect = session_auto;
-        if is_low_confidence_drop(&self.model_name, &cleaned_result, avg_confidence, auto_detect) {
+        if is_low_confidence_drop(
+            &self.model_name,
+            &cleaned_result,
+            avg_confidence,
+            auto_detect,
+        ) {
             log::debug!(
                 "Dropping low-confidence utterance ({} chars, conf {:.2} < {:.2}, auto={})",
                 cleaned_result.chars().count(),
@@ -418,7 +422,8 @@ impl WhisperEngine {
 fn resolved_floors(model_name: &str) -> ConfidenceFloors {
     let table = family_floors(model_family(model_name));
     let forced = env_floor_override(CONFIDENCE_FLOOR_ENV).unwrap_or(table.forced);
-    let auto_detect = env_floor_override(AUTO_DETECT_CONFIDENCE_FLOOR_ENV).unwrap_or(table.auto_detect);
+    let auto_detect =
+        env_floor_override(AUTO_DETECT_CONFIDENCE_FLOOR_ENV).unwrap_or(table.auto_detect);
     ConfidenceFloors {
         forced,
         auto_detect: auto_detect.max(forced),
@@ -462,7 +467,10 @@ fn clean_repetitive_text(text: &str) -> String {
 
     if is_meaningless_output(text) {
         // No caption content in logs (SECURITY.md / EPIC #1) — length only.
-        log::debug!("Detected meaningless output ({} chars), returning empty", text.chars().count());
+        log::debug!(
+            "Detected meaningless output ({} chars), returning empty",
+            text.chars().count()
+        );
         return String::new();
     }
 
@@ -476,7 +484,10 @@ fn clean_repetitive_text(text: &str) -> String {
 
     let final_text = cleaned_words.join(" ");
     if calculate_repetition_ratio(&final_text) > 0.7 {
-        log::debug!("High repetition ratio, filtering out ({} chars)", final_text.chars().count());
+        log::debug!(
+            "High repetition ratio, filtering out ({} chars)",
+            final_text.chars().count()
+        );
         return String::new();
     }
 
@@ -541,7 +552,9 @@ fn is_meaningless_output(text: &str) -> bool {
         if p > 0
             && core_words.len() >= p
             && core_words.len().is_multiple_of(p)
-            && core_words.chunks(p).all(|chunk| chunk == pattern_words.as_slice())
+            && core_words
+                .chunks(p)
+                .all(|chunk| chunk == pattern_words.as_slice())
         {
             return true;
         }
