@@ -57,6 +57,40 @@ export interface FinalizePlan {
   ready: boolean;
 }
 
+/** How a failed batch's ids split between the two paths that must handle them. */
+export interface FailureRouting {
+  /** Spans to re-translate under their own id (post-finalize unit failures). */
+  retries: { id: number; text: string }[];
+  /** Ids that are captions, not units — the caller's existing failure path. */
+  captionFailures: number[];
+}
+
+/**
+ * Split a failed batch into unit failures and caption failures (#195).
+ *
+ * A failed UNIT is not a failed caption: routing one through the caption path
+ * records an empty translation for that span, and assembly then drops the words
+ * the speaker actually said. Extracted from `HostSession` — which has no
+ * headless harness — so this partition, and the retries it produces, are
+ * assertable rather than taken on trust.
+ */
+export function routeFailures(
+  ids: number[],
+  assembler: StreamingAssembler,
+  isUnit: (id: number) => boolean,
+): FailureRouting {
+  const routing: FailureRouting = { retries: [], captionFailures: [] };
+  for (const id of ids) {
+    if (!isUnit(id)) {
+      routing.captionFailures.push(id);
+      continue;
+    }
+    const retry = assembler.noteUnitFailed(id);
+    if (retry) routing.retries.push({ id, text: retry.source });
+  }
+  return routing;
+}
+
 /**
  * Per-channel assembly of streamed units plus a finalized tail.
  *
@@ -74,8 +108,17 @@ export class StreamingAssembler {
   >();
 
   /**
-   * Units dispatched for this channel's current utterance that are still
-   * awaiting a result (#195 backpressure).
+   * Units on this channel still awaiting a result (#195 backpressure).
+   *
+   * Counts BOTH the current utterance's pending units and units carried into
+   * `awaiting` by a finalize that outran them. Counting only the former let the
+   * cap escape across utterance boundaries: finalize moves unresolved units out
+   * of `pending`, so the next utterance started from zero and could admit a full
+   * cap's worth while the previous utterance's units were still outstanding.
+   * The guard the ticket asks for is per channel, not per utterance.
+   *
+   * An abandoned unit is excluded — its result will never arrive, so counting it
+   * would hold a slot shut for the rest of the session.
    *
    * The count lives here rather than in the caller because this class already
    * owns unit lifecycle — a parallel tally in the session would be a second
@@ -83,8 +126,13 @@ export class StreamingAssembler {
    * channel silently stopped streaming.
    */
   inFlightCount(channel: string): number {
-    const list = this.pending.get(channel) ?? [];
-    return list.filter((u) => u.target === null && !u.failed).length;
+    const outstanding = (u: PendingUnit): boolean => u.target === null && !u.failed && !u.abandoned;
+    let count = (this.pending.get(channel) ?? []).filter(outstanding).length;
+    for (const entry of this.awaiting.values()) {
+      if (entry.channel !== channel) continue;
+      count += entry.units.filter(outstanding).length;
+    }
+    return count;
   }
 
   /**

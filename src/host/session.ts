@@ -49,7 +49,7 @@ import { toFinalizedRecords } from "./metrics-records.ts";
 import { LazyLocalEngine } from "./local-tier.ts";
 import { SILENCE_THRESHOLD_MS, SilenceWatchdog } from "./silence.ts";
 import { resolveStartConfig } from "./start-config.ts";
-import { StreamingAssembler } from "./streaming-assembly.ts";
+import { routeFailures, StreamingAssembler } from "./streaming-assembly.ts";
 import type { ResolvedStartConfig } from "./start-config.ts";
 import { withTimeout } from "./timeout.ts";
 import { TranslationRunner } from "./translation-runner.ts";
@@ -592,28 +592,29 @@ export class HostSession {
           // assembly would then silently drop the words the speaker actually
           // said. Mark it failed instead — the assembler folds its source back
           // into the tail so the finalize turn re-translates it.
-          const unitFailures = ids.filter((id) => this.unitIds.has(id));
-          for (const id of unitFailures) {
-            this.unitIds.delete(id);
-            const retry = this.assembler.noteUnitFailed(id);
-            // A unit that fails AFTER its utterance finalized cannot ride the
+          // Set.delete reports whether the id WAS a unit, so this classifies and
+          // clears in one step — either way a unit id is consumed exactly once.
+          const routing = routeFailures(ids, this.assembler, (id) => this.unitIds.delete(id));
+          for (const retry of routing.retries) {
+            // A unit that failed AFTER its utterance finalized cannot ride the
             // tail — that turn is already out. Re-dispatch the span itself,
             // under the same id so its result still lands as a unit result.
-            // requeueFailed, not enqueue: we are inside the failing batch's
-            // catch, so the id is still in flight and enqueue would dedup the
-            // retry away without a trace.
-            if (retry && this.runner && !this.stopping) {
-              this.unitIds.add(id);
-              this.runner.requeueFailed({ id, text: retry.source });
-            }
+            // Safe from inside onFailed: the runner routes a retry of a
+            // just-failed id past its own in-flight dedup (#195).
+            if (!this.runner || this.stopping) break;
+            this.unitIds.add(retry.id);
+            this.runner.enqueue(retry);
           }
-          const captionFailures = ids.filter((id) => !unitFailures.includes(id));
-          if (captionFailures.length > 0) {
-            this.emit({ type: "translationFailed", ids: captionFailures, detail });
+          if (routing.captionFailures.length > 0) {
+            this.emit({ type: "translationFailed", ids: routing.captionFailures, detail });
             // Keep the archive complete: sources land even when translation fails;
             // a later retranslate fills the target in place.
             this.recordBatch(
-              captionFailures.map((id) => ({ id, source: this.metaById.get(id)?.text ?? "", text: "" })),
+              routing.captionFailures.map((id) => ({
+                id,
+                source: this.metaById.get(id)?.text ?? "",
+                text: "",
+              })),
             );
           }
           // A failed unit may have been the last thing a finalized line waited on.

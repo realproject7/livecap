@@ -95,7 +95,9 @@ export class TranslationRunner {
   private readonly pendingIds = new Set<number>();
   /** Ids in the currently-running batch — for dedup while a batch is in flight. */
   private readonly inFlightIds = new Set<number>();
-  /** Sentences staged by {@link requeueFailed}, flushed once the batch clears. */
+  /** Ids whose failure is being reported right now — see {@link reportFailed}. */
+  private readonly failingIds = new Set<number>();
+  /** Retries taken during a failure report, flushed once the batch clears. */
   private readonly retryAfterFailure: RunnerSentence[] = [];
 
   constructor(options: RunnerOptions) {
@@ -110,6 +112,17 @@ export class TranslationRunner {
   }
 
   enqueue(sentence: RunnerSentence): void {
+    // Re-enqueueing an id from inside its own failure report is a RETRY, and it
+    // has to survive the dedup below: at that moment the id is still in the
+    // failing batch, so the guard would discard the retry silently and the
+    // caller would believe it had retried (#195). Stage it for the batch's
+    // `finally` instead. Scoped to the ids being reported, during the report
+    // only, so #139's dedup is unchanged for every other caller — and there is
+    // no separate "retry" entry point a caller can forget to reach for.
+    if (this.failingIds.has(sentence.id)) {
+      this.retryAfterFailure.push(sentence);
+      return;
+    }
     // Dedup (#139): an id already waiting or in flight must not be queued again —
     // it would otherwise land twice, even twice in one batch.
     if (this.pendingIds.has(sentence.id) || this.inFlightIds.has(sentence.id)) return;
@@ -117,24 +130,6 @@ export class TranslationRunner {
     // id doubles as the monotonic sequence number (assigned by Rust).
     this.queue.enqueue({ id: String(sentence.id), text: sentence.text, seq: sentence.id });
     this.pump();
-  }
-
-  /**
-   * Re-dispatch a sentence from inside {@link RunnerCallbacks.onFailed} (#195).
-   *
-   * `onFailed` runs in `run()`'s `catch`, and the batch's ids are not removed
-   * from {@link inFlightIds} until the `finally` that follows it. A plain
-   * {@link enqueue} from a failure handler therefore hits the dedup guard and is
-   * silently discarded — the caller believes it retried and nothing was ever
-   * dispatched. So the sentence is STAGED here and flushed by that `finally`,
-   * once the id is genuinely no longer in flight.
-   *
-   * Deliberately not solved by clearing `inFlightIds` earlier or by deferring to
-   * a microtask: the first loosens #139's dedup for every other caller, and the
-   * second makes correctness depend on task-ordering that no test would pin.
-   */
-  requeueFailed(sentence: RunnerSentence): void {
-    this.retryAfterFailure.push(sentence);
   }
 
   /**
@@ -239,7 +234,7 @@ export class TranslationRunner {
       this.callbacks.onBatchDone(results);
     } catch (error) {
       // Engine errors are content-free by contract (#23); forward the message.
-      this.callbacks.onFailed(ids, error instanceof Error ? error.message : String(error));
+      this.reportFailed(ids, error instanceof Error ? error.message : String(error));
     } finally {
       this.running = false;
       for (const id of ids) this.inFlightIds.delete(id);
@@ -283,10 +278,26 @@ export class TranslationRunner {
       } catch (error) {
         // Content-free by contract (#23); the host preserves the source and a
         // later retranslate can fill the target — never a shifted mapping.
-        this.callbacks.onFailed([id], error instanceof Error ? error.message : String(error));
+        this.reportFailed([id], error instanceof Error ? error.message : String(error));
       }
     }
     if (results.length > 0) this.callbacks.onBatchDone(results);
+  }
+
+  /**
+   * Report a failed turn, with the ids marked as failing for the duration.
+   *
+   * Both failure sites go through here so a retry taken from `onFailed` behaves
+   * the same whether the batch failed as a whole or one-to-one — a per-site fix
+   * would have left runOneToOne's retries silently deduped.
+   */
+  private reportFailed(ids: number[], detail: string): void {
+    for (const id of ids) this.failingIds.add(id);
+    try {
+      this.callbacks.onFailed(ids, detail);
+    } finally {
+      for (const id of ids) this.failingIds.delete(id);
+    }
   }
 
   private settleIfIdle(): void {

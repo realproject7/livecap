@@ -604,7 +604,7 @@ describe("TranslationRunner — retrying from a failure handler (#195)", () => {
     };
   }
 
-  it("enqueue() from onFailed is swallowed by the in-flight dedup", async () => {
+  it("dispatches a retry enqueued from onFailed, past the in-flight dedup", async () => {
     const calls: Call[] = [];
     const { recorded } = recorder();
     // The handler needs the runner that is calling it, so it reads through a
@@ -623,35 +623,63 @@ describe("TranslationRunner — retrying from a failure handler (#195)", () => {
     runner.enqueue({ id: 7, text: "one" });
     await runner.drain();
     await tick();
-    // This is the defect, pinned: the engine was called once and never again.
-    expect(calls).toHaveLength(1);
-    expect(recorded.batches).toEqual([]);
+    // The defect this pins: the retry used to hit enqueue's dedup while its id
+    // was still in the failing batch, so the engine was called once and never
+    // again while the caller believed it had retried.
+    expect(calls).toHaveLength(2);
+    expect(calls[1].batch[0].text).toBe("retry me");
+    expect(recorded.batches).toEqual([[{ id: 7, source: "retry me", text: "tr-7" }]]);
   });
 
-  it("requeueFailed() dispatches once the batch has cleared", async () => {
+  // The SECOND failure site. runOneToOne reports per-sentence failures while the
+  // rest of the batch is still in flight, so a fix applied only to the
+  // whole-batch catch would have left these retries silently deduped.
+  it("dispatches a retry from a one-to-one turn's failure too", async () => {
     const calls: Call[] = [];
     const { recorded } = recorder();
-    // The handler needs the runner that is calling it, so it reads through a
-    // holder rather than a binding that would not exist yet.
+    const { promise: gate, resolve: release } = deferred();
+    let threw = false;
+    const engine = {
+      async *translate(batch: Sentence[], ctx: RollingContext): AsyncIterable<Translation> {
+        calls.push({ batch, ctx });
+        if (calls.length === 1) await gate; // hold the lone first turn so 7+8 batch
+        const ids = batch.map((s) => s.id);
+        // The [7,8] batch answers with ONE line for two sentences, which trips
+        // the #137 line-count guard and drops into runOneToOne.
+        if (ids.length > 1) {
+          yield { sentenceIds: ids, text: "only one line", done: true };
+          return;
+        }
+        if (Number(batch[0].id) === 8 && !threw) {
+          threw = true;
+          throw new Error("translation turn failed (api_error_status=429)");
+        }
+        yield { sentenceIds: ids, text: respondTr(batch), done: true };
+      },
+    };
     const self: { runner?: TranslationRunner } = {};
     const callbacks: RunnerCallbacks = {
       onSnapshot: () => undefined,
       onBatchDone: (results) => recorded.batches.push(results),
       onFailed: (ids) => {
-        for (const id of ids) self.runner?.requeueFailed({ id, text: "retry me" });
+        for (const id of ids) self.runner?.enqueue({ id, text: `retry-${id}` });
       },
     };
-    const runner = new TranslationRunner({ engine: failFirstEngine(calls), callbacks });
+    const runner = new TranslationRunner({ engine, callbacks });
     self.runner = runner;
 
-    runner.enqueue({ id: 7, text: "one" });
+    runner.enqueue({ id: 1, text: "one" });
+    await tick();
+    runner.enqueue({ id: 7, text: "seven" });
+    runner.enqueue({ id: 8, text: "eight" });
+    release();
     await runner.drain();
     await tick();
 
-    expect(calls).toHaveLength(2);
-    expect(calls[1].batch.map((s) => Number(s.id))).toEqual([7]);
-    // The retry carries the RETRY text, not the original.
-    expect(calls[1].batch[0].text).toBe("retry me");
-    expect(recorded.batches).toEqual([[{ id: 7, source: "retry me", text: "tr-7" }]]);
+    // id 8 failed inside runOneToOne and was re-dispatched on its own.
+    const eight = calls.filter((c) => c.batch.length === 1 && Number(c.batch[0].id) === 8);
+    expect(eight).toHaveLength(2);
+    expect(eight[1].batch[0].text).toBe("retry-8");
+    expect(recorded.batches.flat()).toContainEqual({ id: 8, source: "retry-8", text: "tr-8" });
   });
 });

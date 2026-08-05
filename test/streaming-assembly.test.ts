@@ -1,6 +1,10 @@
 import { describe, expect, it } from "vitest";
 
-import { MAX_UNITS_IN_FLIGHT_PER_CHANNEL, StreamingAssembler } from "../src/host/streaming-assembly";
+import {
+  MAX_UNITS_IN_FLIGHT_PER_CHANNEL,
+  routeFailures,
+  StreamingAssembler,
+} from "../src/host/streaming-assembly";
 
 // #195: a streamed utterance is translated in pieces, but the archive stores ONE
 // line per utterance (#137's 1:1 mapping). These cover the ordering that puts
@@ -184,16 +188,49 @@ describe("StreamingAssembler — in-flight accounting", () => {
     expect(a.inFlightCount("system")).toBe(1);
   });
 
-  it("clears the count when the utterance finalizes or is cancelled", () => {
+  // CHANGED DELIBERATELY for RE1's finding on `19b66f4`. This used to assert that
+  // finalize clears the count, which is what let the cap escape: finalize moves
+  // unresolved units out of `pending`, so the next utterance started from zero.
+  it("keeps counting a unit that finalize carried into assembly", () => {
     const a = new StreamingAssembler();
     a.noteUnit(MIC, 1, "first clause.");
     a.onFinalized(MIC, 100, "first clause. and more", 2);
-    expect(a.inFlightCount(MIC)).toBe(0);
+    expect(a.inFlightCount(MIC)).toBe(1); // still outstanding, just not pending
 
     a.noteUnit(MIC, 2, "next clause.");
+    expect(a.inFlightCount(MIC)).toBe(2);
+    a.noteUnitResult(1, "첫."); // resolving the carried-over unit frees its slot
     expect(a.inFlightCount(MIC)).toBe(1);
-    a.dropChannel(MIC);
+    a.dropChannel(MIC); // cancels only the CURRENT utterance's units
     expect(a.inFlightCount(MIC)).toBe(0);
+  });
+
+  it("holds the cap across an utterance boundary", () => {
+    const a = new StreamingAssembler();
+    for (let i = 1; i <= MAX_UNITS_IN_FLIGHT_PER_CHANNEL; i += 1) {
+      expect(a.admitUnit(MIC, i, `clause ${i}.`)).toBe(true);
+    }
+    // The utterance finalizes with both units still unresolved.
+    a.onFinalized(MIC, 100, "clause 1. clause 2. and more words", 4);
+    // The guard is per CHANNEL, not per utterance: the next utterance must not
+    // get a fresh cap's worth while these are still outstanding.
+    expect(a.admitUnit(MIC, 50, "next utterance clause.")).toBe(false);
+
+    a.noteUnitResult(1, "1.");
+    expect(a.admitUnit(MIC, 51, "now there is room.")).toBe(true);
+  });
+
+  it("does not let an abandoned unit hold a slot shut forever", () => {
+    const a = new StreamingAssembler();
+    a.admitUnit(MIC, 1, "one.");
+    a.admitUnit(MIC, 2, "two.");
+    a.onFinalized(MIC, 100, "one. two. and more words here", 4);
+    expect(a.admitUnit(MIC, 50, "no room yet.")).toBe(false);
+
+    // Unit 1 fails, its retry fails too, so it will never resolve.
+    a.noteUnitFailed(1);
+    a.noteUnitFailed(1);
+    expect(a.admitUnit(MIC, 51, "the slot came back.")).toBe(true);
   });
 });
 
@@ -284,5 +321,46 @@ describe("StreamingAssembler — channel and utterance boundaries", () => {
     const plan = a.onFinalized(MIC, 100, "we are committed to the dual mandate", 0);
     expect(plan.tailText).toBe("we are committed to the dual mandate");
     expect(plan.ready).toBe(false);
+  });
+});
+
+// RE2's point on `19b66f4`: the retry mechanism was proven and the WIRING that
+// reaches it was not — and the wiring is where every defect on this PR has been.
+// This is the decision that wiring makes, extracted so it is assertable at all.
+describe("routeFailures — units vs captions", () => {
+  const isUnit = (units: number[]) => (id: number) => units.includes(id);
+
+  it("keeps a failed unit out of the caption failure path", () => {
+    const a = new StreamingAssembler();
+    a.noteUnit(MIC, 1, "first clause.");
+    const routing = routeFailures([1], a, isUnit([1]));
+    // A unit routed as a caption records an empty translation for that span.
+    expect(routing.captionFailures).toEqual([]);
+    // Still pending, so it folds into the tail rather than needing its own turn.
+    expect(routing.retries).toEqual([]);
+    expect(a.onFinalized(MIC, 100, "first clause. and more", 2).tailText).toBe(
+      "first clause. and more",
+    );
+  });
+
+  it("produces a retry for a unit that failed after finalize", () => {
+    const a = new StreamingAssembler();
+    a.noteUnit(MIC, 1, "first clause.");
+    a.onFinalized(MIC, 100, "first clause. and more words", 2);
+    expect(routeFailures([1], a, isUnit([1])).retries).toEqual([{ id: 1, text: "first clause." }]);
+  });
+
+  it("passes caption ids straight through", () => {
+    const a = new StreamingAssembler();
+    expect(routeFailures([100, 101], a, isUnit([])).captionFailures).toEqual([100, 101]);
+  });
+
+  it("splits a batch that failed with both kinds in it", () => {
+    const a = new StreamingAssembler();
+    a.noteUnit(MIC, 1, "first clause.");
+    a.onFinalized(MIC, 100, "first clause. and more words", 2);
+    const routing = routeFailures([1, 100], a, isUnit([1]));
+    expect(routing.retries).toEqual([{ id: 1, text: "first clause." }]);
+    expect(routing.captionFailures).toEqual([100]);
   });
 });
