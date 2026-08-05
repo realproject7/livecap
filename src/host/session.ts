@@ -49,6 +49,7 @@ import { toFinalizedRecords } from "./metrics-records.ts";
 import { LazyLocalEngine } from "./local-tier.ts";
 import { SILENCE_THRESHOLD_MS, SilenceWatchdog } from "./silence.ts";
 import { resolveStartConfig } from "./start-config.ts";
+import { StreamingAssembler } from "./streaming-assembly.ts";
 import type { ResolvedStartConfig } from "./start-config.ts";
 import { withTimeout } from "./timeout.ts";
 import { TranslationRunner } from "./translation-runner.ts";
@@ -214,6 +215,15 @@ export class HostSession {
   /** Distinct engines started this session — the teardown set (#142): the two
    *  routers on the CLI tier, or the single shared local engine otherwise. */
   private readonly startedEngines = new Set<TranslationEngine>();
+  /** Streamed-unit assembly (#195). Inert in the Relaxed cadence: with no units
+   *  every line takes the plain finalize path and the archived target is exactly
+   *  what it is today. */
+  private readonly assembler = new StreamingAssembler();
+  /** Ids dispatched as translation UNITS, so a result can be told apart from a
+   *  caption's. A unit must never become an archive line. */
+  private readonly unitIds = new Set<number>();
+  /** Finalized captions whose assembly is still waiting on a unit or a tail. */
+  private readonly awaitingAssembly = new Set<number>();
   private accountant: CreditAccountant | null = null;
   /** The Codex engine whose app-server serves rate-limit reads (#204). Null on
    *  every other tier; quota is per ACCOUNT, so one lane suffices. */
@@ -279,6 +289,9 @@ export class HostSession {
         return;
       case "silenceSnooze":
         this.watchdog?.snooze(Date.now());
+        return;
+      case "translationUnit":
+        this.onTranslationUnit(message);
         return;
       case "stop":
         await this.stop();
@@ -676,7 +689,46 @@ export class HostSession {
     const speaker = message.channel === "me" ? "Me" : "Them";
     this.transcriptLines.push(`${speaker}: ${message.text}`);
     this.watchdog?.activity(Date.now());
+    // #195: only the UNTRANSLATED tail is dispatched. The transcript line above
+    // and the archive entry below both use the full text, so #137's 1:1 mapping
+    // and the archive format are unchanged; what shrinks is only what we pay to
+    // translate. In the Relaxed cadence there are no units, so the tail is the
+    // whole line and this is byte-identical to the previous behaviour.
+    const plan = this.assembler.onFinalized(
+      message.channel,
+      message.id,
+      message.text,
+      message.pretranslatedWords ?? 0,
+    );
+    if (plan.tailText !== "") {
+      this.runner.enqueue({ id: message.id, text: plan.tailText });
+      this.awaitingAssembly.add(message.id);
+      return;
+    }
+    // Fully streamed: no tail turn is owed. Archive as soon as the units land.
+    this.awaitingAssembly.add(message.id);
+    this.flushAssembled();
+  }
+
+  /** A settled span released early for translation (#195). Dispatched through
+   *  the SAME queue as captions — there is no second dispatch path — but it is
+   *  recorded as a unit so its result can never become an archive line. */
+  private onTranslationUnit(message: Extract<HostInbound, { type: "translationUnit" }>): void {
+    if (!this.runner || this.stopping) return;
+    this.unitIds.add(message.id);
+    this.assembler.noteUnit(message.channel, message.id, message.text);
+    this.watchdog?.activity(Date.now());
     this.runner.enqueue({ id: message.id, text: message.text });
+  }
+
+  /** Archive every finalized line whose pieces have all arrived (#195). */
+  private flushAssembled(): void {
+    for (const captionId of [...this.awaitingAssembly]) {
+      const assembled = this.assembler.tryAssemble(captionId);
+      if (assembled === null) continue;
+      this.awaitingAssembly.delete(captionId);
+      this.archiveAssembled(captionId, assembled);
+    }
   }
 
   /** Persist a completed batch (ascending id order keeps the transcript chronological). */
@@ -685,6 +737,20 @@ export class HostSession {
     if (!writer) return;
     let rewroteExisting = false;
     for (const result of results.slice().sort((a, b) => a.id - b.id)) {
+      // #195: a UNIT result is not a caption. It has no metaById entry and must
+      // never become an archive line — it is one piece of a line the finalize
+      // path will assemble.
+      if (this.unitIds.has(result.id)) {
+        this.unitIds.delete(result.id);
+        this.assembler.noteUnitResult(result.id, result.text);
+        continue;
+      }
+      // #195: a caption result is the TAIL of its line; the archived target is
+      // the assembled whole. Relaxed has no units, so this is the tail alone.
+      if (this.awaitingAssembly.has(result.id)) {
+        this.assembler.noteTailResult(result.id, result.text);
+        continue;
+      }
       const existing = this.entriesById.get(result.id);
       if (existing) {
         // Retranslation: update in place; a failed/empty result is ignored so it
@@ -710,6 +776,32 @@ export class HostSession {
       }
     }
     if (rewroteExisting) this.persistBrief();
+    // A unit or tail that just landed may complete a waiting line.
+    this.flushAssembled();
+  }
+
+  /** Write an assembled line to the archive (#195). Mirrors the entry shape
+   *  `recordBatch` builds, so a streamed line and a Relaxed line are
+   *  indistinguishable in the archive. */
+  private archiveAssembled(captionId: number, target: string): void {
+    const writer = this.writer;
+    if (!writer || this.entriesById.has(captionId)) return;
+    const meta = this.metaById.get(captionId);
+    const entry: CaptionEntry = {
+      speaker: meta?.channel === "me" ? "me" : "them",
+      timestamp: clockLabel(meta?.epochMs ?? Date.now()),
+      source: meta?.text ?? "",
+      target,
+      pinned: this.pendingPins.has(captionId),
+      lowConfidence: meta?.lowConfidence ?? false,
+    };
+    try {
+      writer.appendCaption(entry);
+      this.entriesById.set(captionId, entry);
+      this.emit({ type: "translation", items: [{ id: captionId, text: target }], done: true });
+    } catch (error) {
+      this.emit({ type: "status", detail: `archive write failed (${errorDetail(error)})` });
+    }
   }
 
   private onPin(id: number, pinned: boolean): void {
@@ -958,6 +1050,15 @@ export class HostSession {
         this.runner.drain(),
         new Promise<void>((resolve) => setTimeout(resolve, DRAIN_TIMEOUT_MS)),
       ]);
+    }
+    // #195: the drain deadline has passed, so anything still outstanding is not
+    // coming. Write each waiting line from whatever DID arrive rather than
+    // losing it — a partially-translated archive line is recoverable, a missing
+    // one is not. No-op in the Relaxed cadence, where nothing is ever waiting.
+    for (const captionId of [...this.awaitingAssembly]) {
+      this.awaitingAssembly.delete(captionId);
+      const salvaged = this.assembler.forceAssemble(captionId);
+      if (salvaged !== null) this.archiveAssembled(captionId, salvaged);
     }
 
     // Final summary → archive title (PROPOSAL §8.9: title = first summary line).

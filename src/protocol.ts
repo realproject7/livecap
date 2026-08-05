@@ -123,7 +123,15 @@ export type HostInbound =
       /** Spoken duration in ms; the host keeps it per-id to build the
        *  FinalizedRecord[] for the post-meeting metrics (#81/#78). */
       durationMs: number;
+      /** Leading words already translated as units (#195). The host archives
+       *  the full `text` unchanged and translates only the tail beyond this.
+       *  Absent/0 in the Relaxed cadence and from older shells. */
+      pretranslatedWords?: number;
     }
+  /** A settled span of an in-flight utterance, released early for translation
+   *  only (#195). Distinct from "caption" so the archive/transcript path is
+   *  untouched: this never becomes an archive line, and the webview ignores it. */
+  | { type: "translationUnit"; id: number; channel: Channel; text: string }
   | { type: "quickTranslate"; id: number; text: string }
   | { type: "reply"; id: number; intent: ReplyIntentWire }
   /** Targeted analysis of ONE caption block (#80): the host resolves the target
