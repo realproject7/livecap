@@ -68,8 +68,9 @@ export interface SessionChannels {
 
 export type ReplyIntentWire = "agree" | "push-back" | "ask" | "suggest";
 
-/** Engine preference (#12 Settings): which tier the router defaults to. */
-export type EnginePref = "cli" | "local";
+/** Engine preference (#12 Settings): which tier the router defaults to.
+ *  "cli" = Claude CLI, "codex" = Codex app-server (#204), "local" = Qwen. */
+export type EnginePref = "cli" | "codex" | "local";
 
 /** Messages written by Rust to the host's stdin (one JSON per line). The
  *  start message carries the persisted AppSettings (settings.json, #12) the
@@ -170,6 +171,18 @@ export interface GaugeWire {
   extrasSpentUsd?: number;
   /** The per-session extras budget cap the spend above is metered against (#55). */
   extrasCapUsd?: number;
+  /** Whether `estimatedHoursRemaining` is a real measurement (#205/#204).
+   *  Optional — absent on pre-#204 gauges, which are always USD-derived and
+   *  therefore always known. */
+  headroomKnown?: boolean;
+  /** Engine-tagged display string: `"$3.40 of $20.00"` on the Claude tier,
+   *  `"62% used, resets in 3h"` on a quota tier (#205 scope 6).
+   *
+   *  Display surfaces MUST prefer this over the USD fields. On a non-USD tier
+   *  `poolUsd`/`spentUsd`/`remainingUsd`/`dollarsPerHour` are structurally
+   *  meaningless — not merely zero — because that engine reports no dollars at
+   *  all; rendering them shows a full untouched budget for the whole session. */
+  nativeDetail?: string;
 }
 
 /** Messages emitted by the host on stdout; Rust forwards each to the webview
@@ -233,5 +246,9 @@ export interface ProbeCli {
 export interface ProbeResult {
   type: "probe";
   cli: ProbeCli | null;
+  /** Presence of the `codex` binary (#204). Null ⇒ the Codex option is hidden
+   *  entirely, not shown disabled. Presence and version only — LiveCap never
+   *  reads Codex credentials or login state. */
+  codex?: ProbeCli | null;
   gauge: GaugeWire;
 }

@@ -103,8 +103,22 @@ describe("quotaHeadroom (#205 quota derivation)", () => {
     );
     // weekly: 90% used over 2h ⇒ 45%/hr, 10% left ⇒ 0.222h.
     expect(headroom.known && headroom.hoursRemaining).toBeCloseTo(10 / 45, 10);
-    // The binding window is the one named in the detail line.
-    expect(headroom.nativeDetail.startsWith("90%")).toBe(true);
+    // #204: with MORE THAN ONE window the binding one is named, because "90%
+    // used" alone does not say which wall is being hit. This is the reader for
+    // `HeadroomWindow.label` — without it the field would be written and never
+    // consumed, which looks like it works.
+    expect(headroom.nativeDetail).toBe("weekly: 90% used");
+  });
+
+  // ...and with a single window (what a real plan reports) the label is omitted
+  // rather than padding every line with a name that disambiguates nothing.
+  it("omits the window name when there is only one window", () => {
+    const headroom = quotaHeadroom(
+      { known: true, windows: [{ label: "weekly", usedPercent: 90 }] },
+      2,
+      NOW,
+    );
+    expect(headroom.nativeDetail).toBe("90% used");
   });
 
   it("is unaffected by window order", () => {
@@ -290,6 +304,34 @@ describe("CreditAccountant — quota source drives the decision (#205 scope 3/4)
     // weekly: 95% over 3h ⇒ 31.67%/hr, 5% left ⇒ 0.158h.
     expect(accountant.gauge().estimatedHoursRemaining).toBeCloseTo(5 / (95 / 3), 10);
     expect(accountant.isBelowThreshold()).toBe(true);
+  });
+
+  // #204 (RE2's catch): on a non-USD tier `spent / pool` is permanently 0, so a
+  // gauge bar driven by it renders "budget untouched" for the whole session
+  // while the real constraint sits unread in nativeDetail. The fraction must
+  // come from the headroom source instead.
+  it("takes the bar's fraction from the quota source, not the empty USD ledger", async () => {
+    const accountant = accountantWith(
+      fakeSource({ known: true, windows: [{ label: "weekly", usedPercent: 62 }] }),
+    );
+    await accountant.refreshHeadroom();
+    const gauge = accountant.gauge();
+    expect(gauge.fractionUsed).toBeCloseTo(0.62, 10);
+    // The USD figures are still zero — they are structurally meaningless here,
+    // which is exactly why nothing should render them.
+    expect(gauge.spentUsd).toBe(0);
+    expect(gauge.nativeDetail).toBe("62% used");
+  });
+
+  it("reports a zero fraction with headroomKnown false when the source is unreadable", async () => {
+    const accountant = accountantWith(fakeSource({ known: false, reason: "unreadable" }));
+    await accountant.refreshHeadroom();
+    const gauge = accountant.gauge();
+    expect(gauge.headroomKnown).toBe(false);
+    expect(gauge.fractionUsed).toBe(0);
+    // A consumer must render "unknown" here rather than an empty bar implying
+    // a full allowance.
+    expect(gauge.nativeDetail).toBe("usage unknown");
   });
 
   it("emits an engine-switch exactly once when the quota crossing happens", async () => {

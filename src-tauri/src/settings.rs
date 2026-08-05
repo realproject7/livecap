@@ -186,7 +186,10 @@ impl AppSettings {
     /// Clamp every field into its valid domain so a hand-edited or stale
     /// file can never wedge the app.
     pub fn sanitized(mut self) -> Self {
-        if self.engine_pref != "local" {
+        // #204 adds "codex" alongside "cli" and "local". Anything else clamps to
+        // the Claude CLI tier — a hand-edited value must not wedge the app, and
+        // the fallback router can always route away from "cli".
+        if !matches!(self.engine_pref.as_str(), "local" | "codex") {
             self.engine_pref = "cli".into();
         }
         let lang = self.target_language.trim().to_lowercase();

@@ -61,7 +61,16 @@ export interface HeadroomSource {
  * structurally and the decision path refuses to switch on it.
  */
 export type Headroom =
-  | { known: true; hoursRemaining: number; nativeDetail: string }
+  | {
+      known: true;
+      hoursRemaining: number;
+      /** 0–1 of the BINDING window's allowance consumed (#204). The gauge bar
+       *  needs a fraction, and on a non-USD tier the ledger's `fractionUsed` is
+       *  computed from dollars that do not exist — a permanently empty bar that
+       *  reads as "budget untouched". This is the real one. */
+      fractionUsed: number;
+      nativeDetail: string;
+    }
   | { known: false; reason: HeadroomUnknownReason; nativeDetail: string };
 
 /**
@@ -139,10 +148,18 @@ export function quotaHeadroom(
   // `usable` is non-empty, so the loop always assigns.
   const { window, hours } = binding as { window: HeadroomWindow; hours: number };
   const used = Math.round(Math.min(100, window.usedPercent));
+  // Name the binding window ONLY when there is more than one (#204): with two
+  // windows "90% used" is ambiguous about which wall is being hit, and the whole
+  // point of the minimum is that the answer is not obvious. With a single window
+  // — the shape a real `prolite` plan reports — the label adds nothing but
+  // noise, so it is omitted. This is the field's reader: `label` is consumed
+  // here, not merely populated.
+  const prefix = usable.length > 1 ? `${window.label}: ` : "";
   return {
     known: true,
     hoursRemaining: hours,
-    nativeDetail: `${used}% used${formatResetsIn(window.resetsAt, nowMs)}`,
+    fractionUsed: Math.min(1, Math.max(0, used / 100)),
+    nativeDetail: `${prefix}${used}% used${formatResetsIn(window.resetsAt, nowMs)}`,
   };
 }
 

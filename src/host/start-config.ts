@@ -72,7 +72,7 @@ export function resolveStartConfig(message: StartMessage): ResolvedStartConfig {
     meetingLanguage: source ? source.name : AUTO_MEETING_LANGUAGE,
     sourceLangCode: source ? source.archiveLabel : AUTO_SOURCE_LABEL,
     targetLangCode: language.archiveLabel,
-    enginePref: message.enginePref === "local" ? "local" : "cli",
+    enginePref: resolveEnginePref(message.enginePref),
     // #203: an unknown or hand-edited model would spawn a CLI that 404s every
     // turn, so it clamps to Haiku here rather than reaching argv. An older
     // shell omits the field entirely and lands on the same default.
@@ -88,6 +88,16 @@ export function resolveStartConfig(message: StartMessage): ResolvedStartConfig {
     extrasBudgetUsd: DEFAULT_EXTRAS_BUDGET_USD,
     channelsNote: resolveChannelsNote(message.captureSystem, message.captureMic),
   };
+}
+
+/** Clamp the persisted engine preference (#204 adds "codex"). An unknown value
+ *  — a hand-edited file, or a newer shell talking to an older host — falls back
+ *  to the Claude CLI tier, which the fallback router can always route away from.
+ *  Never throw: a bad preference must not fail session start. */
+function resolveEnginePref(pref: string): EnginePref {
+  if (pref === "local") return "local";
+  if (pref === "codex") return "codex";
+  return "cli";
 }
 
 /** Only an explicit false disables a channel (older shells omit the field);
