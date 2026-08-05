@@ -116,6 +116,24 @@ createInterface({ input: process.stdin }).on("line", (line) => {
       return;
     }
 
+    case "account/rateLimits/read":
+      if (process.env.LIVECAP_FAKE_CODEX_NO_LIMITS === "1") {
+        write({ jsonrpc: "2.0", id, error: { code: -32000, message: "unavailable" } });
+        return;
+      }
+      // Shape measured from the real binary, including the identifying fields
+      // the adapter must drop at the boundary.
+      reply(id, {
+        rateLimits: {
+          limitId: "codex",
+          planType: "prolite",
+          primary: { usedPercent: 18, windowDurationMins: 10080, resetsAt: 1786449404 },
+          secondary: null,
+          credits: { hasCredits: false, unlimited: false, balance: "0" },
+        },
+      });
+      return;
+
     default:
       if (id !== undefined) reply(id, {});
   }

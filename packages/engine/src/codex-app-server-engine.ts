@@ -30,6 +30,7 @@
 
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 
+import type { CodexRateLimits } from "./codex-headroom";
 import { parseBrief } from "./internal/brief";
 import { MAX_STDERR_TAIL, stderrDigest } from "./internal/redact";
 import {
@@ -186,7 +187,6 @@ export class CodexAppServerEngine {
   private turnSettle: ((error?: Error) => void) | null = null;
   /** Delta sink for the in-flight turn. */
   private turnDelta: ((text: string) => void) | null = null;
-  private lastInputTokens = 0;
   private modelContextWindow = 0;
   private binaryVersion: string | null = null;
   private cumulativeInputTokens = 0;
@@ -216,6 +216,32 @@ export class CodexAppServerEngine {
    *  only — never the `codexHome` path or the rest of the userAgent string. */
   codexVersion(): string | null {
     return this.binaryVersion;
+  }
+
+  /**
+   * Read the account's rate-limit windows — the input to the #205 headroom seam
+   * (#204). Resolves `null` when the server is not running or the call fails,
+   * which the seam turns into an explicit unknown rather than infinite headroom.
+   *
+   * Returns ONLY the two window objects. `planType`, `limitId`, credit balances
+   * and every other field on the response are dropped here, at the boundary, so
+   * no account-identifying value can travel further into the app.
+   */
+  async readRateLimits(): Promise<CodexRateLimits | null> {
+    if (!this.child) return null;
+    try {
+      const result = (await this.request("account/rateLimits/read", {})) as {
+        rateLimits?: { primary?: unknown; secondary?: unknown };
+      } | null;
+      const limits = result?.rateLimits;
+      if (!limits) return null;
+      return {
+        primary: (limits.primary ?? null) as CodexRateLimits["primary"],
+        secondary: (limits.secondary ?? null) as CodexRateLimits["secondary"],
+      };
+    } catch {
+      return null;
+    }
   }
 
   async start(): Promise<void> {
@@ -338,7 +364,6 @@ export class CodexAppServerEngine {
   /** Start a fresh thread, banking nothing — used for context rollover. */
   private async rollover(): Promise<void> {
     this.rolloverPending = false;
-    this.lastInputTokens = 0;
     await this.startThread();
   }
 
@@ -457,7 +482,6 @@ export class CodexAppServerEngine {
     }
     const inputTokens = numberOr(last.inputTokens, 0);
     const outputTokens = numberOr(last.outputTokens, 0);
-    this.lastInputTokens = inputTokens;
     this.cumulativeInputTokens += inputTokens;
     this.cumulativeOutputTokens += outputTokens;
 

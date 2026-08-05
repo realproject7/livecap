@@ -9,6 +9,8 @@ import { join } from "node:path";
 
 import {
   ClaudeCliEngine,
+  CodexAppServerEngine,
+  CodexHeadroomSource,
   computeMeetingMetrics,
   CreditAccountant,
   detectProxy,
@@ -41,7 +43,7 @@ import type { BoardData, CaptionEntry, MetricsData } from "@livecap/archive";
 import { clockLabel } from "../clock.ts";
 import type { Channel, CoachingItemWire, GaugeWire, HostInbound, HostOutbound } from "../protocol.ts";
 import { coachingAmendKeys } from "./coaching-keys.ts";
-import { detectClaudeCli } from "./detect-cli.ts";
+import { detectClaudeCli, detectCodexCli } from "./detect-cli.ts";
 import type { DetectedCli } from "./detect-cli.ts";
 import { toFinalizedRecords } from "./metrics-records.ts";
 import { LazyLocalEngine } from "./local-tier.ts";
@@ -52,6 +54,8 @@ import { withTimeout } from "./timeout.ts";
 import { TranslationRunner } from "./translation-runner.ts";
 
 const CLI_ENGINE_LABEL = "Claude CLI";
+/** #204: shown in the same place as the Claude and local labels. */
+const CODEX_ENGINE_LABEL = "Codex";
 const LOCAL_ENGINE_LABEL = "Local (Qwen3 4B)";
 /** CLI-tier recent-context pairs (#136): the persistent `claude -p` session
  *  already remembers prior turns, so the redundant explicit pairs are trimmed to
@@ -206,6 +210,9 @@ export class HostSession {
    *  routers on the CLI tier, or the single shared local engine otherwise. */
   private readonly startedEngines = new Set<TranslationEngine>();
   private accountant: CreditAccountant | null = null;
+  /** The Codex engine whose app-server serves rate-limit reads (#204). Null on
+   *  every other tier; quota is per ACCOUNT, so one lane suffices. */
+  private codexEngine: CodexAppServerEngine | null = null;
   private extras: ExtrasPipeline | null = null;
   private extrasBudget: ExtrasBudget | null = null;
   private runner: TranslationRunner | null = null;
@@ -284,11 +291,23 @@ export class HostSession {
     const resolved = resolveStartConfig(config);
     this.autoSwitch = resolved.autoSwitch;
 
+    // #204: on the Codex tier the ledger's dollars do not exist, so headroom
+    // comes from the quota seam instead. The source is built here but reads
+    // through a late-bound reference: the accountant must exist before the
+    // engine (the router's startOnFallback consults it), and the engine must
+    // exist before any rate-limit read can happen.
+    const codex =
+      resolved.enginePref === "codex" ? await detectCodexCli(process.env.PATH) : null;
+    const headroomSource = codex
+      ? new CodexHeadroomSource(() => this.codexEngine?.readRateLimits() ?? Promise.resolve(null))
+      : undefined;
+
     const accountant = new CreditAccountant({
       fs: nodeLedgerFs(),
       ledgerPath: join(config.appDataDir, "credit-ledger.json"),
       poolUsd: resolved.poolUsd,
       resetDay: resolved.resetDay,
+      ...(headroomSource ? { headroomSource } : {}),
       now: Date.now,
     });
     this.accountant = accountant;
@@ -363,9 +382,41 @@ export class HostSession {
       // `customEndpointNotice`; here we only emit it.
       const endpointNotice = customEndpointNotice(process.env);
       if (endpointNotice) this.emit({ type: "status", detail: endpointNotice });
+    } else if (codex) {
+      // #204: the Codex tier, mirroring the #142 two-lane split for the same
+      // reason — a summary turn must not head-of-line-block live captions. Both
+      // lanes fall back to the SAME local engine, as on the Claude path.
+      const cwd = join(config.appDataDir, "codex-session");
+      mkdirSync(cwd, { recursive: true });
+      const codexConfig = {
+        bin: codex.bin,
+        cwd,
+        env: process.env,
+        targetLanguage: resolved.targetLanguage,
+        contextPairs: CLI_CONTEXT_PAIRS,
+      };
+      const translationPrimary = new CodexAppServerEngine(codexConfig);
+      const extrasPrimary = new CodexAppServerEngine(codexConfig);
+      // The rate-limit reader rides the translation lane's server; either would
+      // do, since the quota is per ACCOUNT, not per thread.
+      this.codexEngine = translationPrimary;
+      const startOnFallback = () => resolved.autoSwitch && accountant.isBelowThreshold();
+      this.translationRouter = new FallbackRouter({ primary: translationPrimary, fallback: local, startOnFallback });
+      this.extrasRouter = new FallbackRouter({ primary: extrasPrimary, fallback: local, startOnFallback });
+      translationEngine = this.translationRouter;
+      extrasEngine = this.extrasRouter;
+      metered.push(translationPrimary, extrasPrimary, local);
+      engineLabel = CODEX_ENGINE_LABEL;
+      // Prime the quota reading once the server is up, so the safety net is
+      // armed from the first turn rather than after the first refresh tick.
+      // Failure is already handled as unknown-and-non-switching by the seam.
+      void accountant.refreshHeadroom();
     } else {
       if (resolved.enginePref === "cli") {
         this.emit({ type: "status", detail: "no Claude CLI found — using the local model" });
+      }
+      if (resolved.enginePref === "codex") {
+        this.emit({ type: "status", detail: "no Codex CLI found — using the local model" });
       }
       // Local-only path: both lanes converge on the ONE shared local engine
       // (summary still contends with translation here, as before) (#142).

@@ -217,6 +217,40 @@ describe("CodexAppServerEngine — real spawn/stdio (fake app-server)", () => {
     }
   });
 
+  // The input to the #205 headroom seam. The adapter must hand over the two
+  // window objects and NOTHING else — planType/limitId/credits are dropped at
+  // this boundary so no account-identifying value travels further.
+  it("reads rate-limit windows and drops every identifying field", async () => {
+    const engine = makeEngine();
+    await engine.start();
+    try {
+      const limits = await engine.readRateLimits();
+      expect(limits).toEqual({
+        primary: { usedPercent: 18, windowDurationMins: 10080, resetsAt: 1786449404 },
+        secondary: null,
+      });
+      const serialized = JSON.stringify(limits);
+      expect(serialized).not.toContain("prolite");
+      expect(serialized).not.toContain("limitId");
+      expect(serialized).not.toContain("credits");
+    } finally {
+      await engine.stop();
+    }
+  });
+
+  it("returns null rather than throwing when rate limits are unavailable", async () => {
+    const engine = makeEngine({ LIVECAP_FAKE_CODEX_NO_LIMITS: "1" });
+    await engine.start();
+    try {
+      // Null becomes an explicit unknown in the seam — never infinite headroom.
+      await expect(engine.readRateLimits()).resolves.toBeNull();
+    } finally {
+      await engine.stop();
+    }
+    // A stopped engine reads null rather than rejecting.
+    await expect(engine.readRateLimits()).resolves.toBeNull();
+  });
+
   it("summarizes into a brief with usage attached", async () => {
     const engine = makeEngine({ LIVECAP_FAKE_CODEX_REPLY: "A running summary line." });
     await engine.start();
