@@ -18,7 +18,22 @@ interface PendingUnit {
   /** Source text, kept so a failed unit can be re-translated in the tail. */
   source: string;
   target: string | null;
+  /** Failed BEFORE its utterance finalized: the finalize tail re-translates it. */
   failed: boolean;
+  /** Failed AFTER finalize, and a retry turn was dispatched for it. */
+  retried: boolean;
+  /** Retried and failed again: stop waiting on it, or it wedges the line. */
+  abandoned: boolean;
+}
+
+/**
+ * A span whose early translation failed after its utterance had already
+ * finalized, so the tail that would have carried it is already dispatched.
+ * The caller must re-translate `source` under the same unit id.
+ */
+export interface UnitRetry {
+  captionId: number;
+  source: string;
 }
 
 /** What the caller should do with a finalized utterance. */
@@ -66,7 +81,7 @@ export class StreamingAssembler {
   /** Record a unit dispatched for early translation. */
   noteUnit(channel: string, id: number, source: string): void {
     const list = this.pending.get(channel) ?? [];
-    list.push({ id, source, target: null, failed: false });
+    list.push({ id, source, target: null, failed: false, retried: false, abandoned: false });
     this.pending.set(channel, list);
   }
 
@@ -80,16 +95,47 @@ export class StreamingAssembler {
   /**
    * Record that a unit's translation failed.
    *
-   * The unit is NOT dropped: its source text is folded back into the tail, so a
-   * failed early translation costs a retry rather than a hole in the archived
-   * line. Losing a span silently would be worse than paying for it twice, and
-   * this is the one place the never-translate-twice rule yields — deliberately,
-   * because the alternative is an archive that omits what the speaker said.
+   * The unit is NOT dropped: its source text is re-translated, so a failed early
+   * translation costs a retry rather than a hole in the assembled line. Losing a
+   * span silently would be worse than paying for it twice, and this is the one
+   * place the never-translate-twice rule yields — deliberately, because the
+   * alternative is a line that omits what the speaker said.
+   *
+   * WHEN the failure lands decides how that retry happens, and the two cases are
+   * not interchangeable:
+   * - **Before finalize** — the unit is still pending, so its source folds into
+   *   the tail and the finalize turn re-translates it. Returns null.
+   * - **After finalize** — the tail has already been dispatched without this
+   *   span, so folding is no longer possible. Returns a {@link UnitRetry} the
+   *   caller must dispatch under the SAME unit id; its result arrives through
+   *   {@link noteUnitResult} and fills the slot in place.
+   *
+   * A second failure abandons the unit rather than retrying forever. That drops
+   * the span from the *target*, but the caller archives the full source text
+   * regardless, so the utterance is still recorded and the existing retranslate
+   * path can repair the target.
    */
-  noteUnitFailed(id: number): void {
-    this.forEachUnit((unit) => {
-      if (unit.id === id) unit.failed = true;
-    });
+  noteUnitFailed(id: number): UnitRetry | null {
+    for (const list of this.pending.values()) {
+      for (const unit of list) {
+        if (unit.id === id) {
+          unit.failed = true;
+          return null;
+        }
+      }
+    }
+    for (const [captionId, entry] of this.awaiting) {
+      for (const unit of entry.units) {
+        if (unit.id !== id) continue;
+        if (unit.retried) {
+          unit.abandoned = true;
+          return null;
+        }
+        unit.retried = true;
+        return { captionId, source: unit.source };
+      }
+    }
+    return null;
   }
 
   /**
@@ -168,7 +214,10 @@ export class StreamingAssembler {
   private isReady(captionId: number): boolean {
     const entry = this.awaiting.get(captionId);
     if (!entry) return false;
-    const unitsIn = entry.units.every((u) => u.target !== null);
+    // An abandoned unit counts as settled. It contributes nothing, but waiting
+    // on a span that will never arrive would hold the whole line until the drain
+    // deadline — a wedged line is worse than a short one.
+    const unitsIn = entry.units.every((u) => u.target !== null || u.abandoned);
     const tailIn = entry.tailText === "" || entry.tailTarget !== null;
     return unitsIn && tailIn;
   }

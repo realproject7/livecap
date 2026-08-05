@@ -602,7 +602,14 @@ export class HostSession {
           const unitFailures = ids.filter((id) => this.unitIds.has(id));
           for (const id of unitFailures) {
             this.unitIds.delete(id);
-            this.assembler.noteUnitFailed(id);
+            const retry = this.assembler.noteUnitFailed(id);
+            // A unit that fails AFTER its utterance finalized cannot ride the
+            // tail — that turn is already out. Re-dispatch the span itself,
+            // under the same id so its result still lands as a unit result.
+            if (retry && this.runner && !this.stopping) {
+              this.unitIds.add(id);
+              this.runner.enqueue({ id, text: retry.source });
+            }
           }
           const captionFailures = ids.filter((id) => !unitFailures.includes(id));
           if (captionFailures.length > 0) {

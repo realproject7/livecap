@@ -78,6 +78,56 @@ describe("StreamingAssembler — pieces that are late or missing", () => {
     expect(a.tryAssemble(100)).toBe("전체 번역");
   });
 
+  // RE2's finding on #212: WHEN the failure lands changes what has to happen.
+  // Folding into the tail only works while the unit is still pending; once the
+  // utterance has finalized, that turn is already dispatched without the span.
+  it("asks for a retry when a unit fails AFTER its utterance finalized", () => {
+    const a = new StreamingAssembler();
+    a.noteUnit(MIC, 1, "we are committed to the dual mandate.");
+    const plan = a.onFinalized(MIC, 100, "we are committed to the dual mandate. and we will adjust", 7);
+    expect(plan.tailText).toBe("and we will adjust");
+    a.noteTailResult(100, "그리고 우리는 조정할 것입니다");
+
+    // The unit's turn fails only now, with the tail already out.
+    const retry = a.noteUnitFailed(1);
+    expect(retry).toEqual({ captionId: 100, source: "we are committed to the dual mandate." });
+    // Still not assemblable: the span is owed, not abandoned.
+    expect(a.tryAssemble(100)).toBeNull();
+
+    a.noteUnitResult(1, "우리는 이중 책무에 전념합니다.");
+    expect(a.tryAssemble(100)).toBe("우리는 이중 책무에 전념합니다. 그리고 우리는 조정할 것입니다");
+  });
+
+  it("returns no retry while the unit is still pending, so it folds into the tail", () => {
+    const a = new StreamingAssembler();
+    a.noteUnit(MIC, 1, "first clause.");
+    expect(a.noteUnitFailed(1)).toBeNull();
+  });
+
+  // The wedge RE2 named: a failed post-finalize unit that is never resolved used
+  // to leave isReady() false forever, so the line waited for the drain deadline
+  // and THEN dropped the span anyway.
+  it("gives up after one retry instead of wedging the line", () => {
+    const a = new StreamingAssembler();
+    a.noteUnit(MIC, 1, "first clause.");
+    a.noteUnit(MIC, 2, "second clause.");
+    a.noteUnitResult(2, "두 번째.");
+    a.onFinalized(MIC, 100, "first clause. second clause.", 4);
+
+    expect(a.noteUnitFailed(1)).not.toBeNull(); // retry dispatched
+    expect(a.tryAssemble(100)).toBeNull();
+    expect(a.noteUnitFailed(1)).toBeNull(); // the retry failed too: abandoned
+    // Assembles on its own rather than waiting for the drain deadline.
+    expect(a.tryAssemble(100)).toBe("두 번째.");
+  });
+
+  it("does not retry a unit belonging to an utterance that was cancelled", () => {
+    const a = new StreamingAssembler();
+    a.noteUnit(MIC, 1, "bleed clause.");
+    a.dropChannel(MIC);
+    expect(a.noteUnitFailed(1)).toBeNull();
+  });
+
   it("force-assembles from what arrived rather than losing the line", () => {
     const a = new StreamingAssembler();
     a.noteUnit(MIC, 1, "first clause.");
