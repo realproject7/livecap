@@ -228,8 +228,7 @@ impl StablePrefixTracker {
     /// line per utterance — assembly is the host's job, not this tracker's.
     pub fn on_finalize(&mut self, text: &str) -> Option<TranslationUnit> {
         let total = text.split_whitespace().count();
-        let released = self.released_words.min(total);
-        self.reset();
+        let released = self.take_released_on_finalize(text);
         if total == 0 || released >= total {
             return None;
         }
@@ -237,6 +236,20 @@ impl StablePrefixTracker {
             text: words_between(text, released, total),
             reason: UnitReason::Finalize,
         })
+    }
+
+    /// How many leading words of the finalized utterance were already released,
+    /// then reset for the next utterance.
+    ///
+    /// This is what the pipeline reports on the finalized event: the consumer
+    /// keeps archiving the FULL text and translates only the tail beyond this
+    /// count. Clamped to the utterance's own word count, because a recognizer
+    /// that revises text downward at finalize could otherwise report a prefix
+    /// longer than the text and cause real words to be skipped.
+    pub fn take_released_on_finalize(&mut self, text: &str) -> usize {
+        let released = self.released_words.min(text.split_whitespace().count());
+        self.reset();
+        released
     }
 
     /// Words released so far for the current utterance (measurement/testing).

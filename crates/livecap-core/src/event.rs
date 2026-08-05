@@ -30,6 +30,15 @@ pub enum CaptionKind {
     /// orphaned bleed text neither lingers nor is reused by the next utterance
     /// (#62). Carries no payload — it cancels whatever partial is in flight.
     PartialDropped,
+    /// A settled span of an in-flight utterance, released early so translation
+    /// can start before the speaker pauses (#195).
+    ///
+    /// **Translation-only.** This is never displayed as a caption and never
+    /// archived — the caption and archive paths are byte-unchanged. It exists
+    /// solely so a speaker who never pauses is not left untranslated for up to
+    /// 30 s. Only emitted in the Balanced and Live modes; Relaxed never produces
+    /// one, which is what makes opting out cost nothing.
+    TranslationUnit { text: String },
     /// A finished utterance.
     Finalized {
         text: String,
@@ -42,6 +51,11 @@ pub enum CaptionKind {
         start_ms: u64,
         /// Utterance end, milliseconds since the channel started.
         end_ms: u64,
+        /// Leading words of `text` already released as `TranslationUnit`s and
+        /// therefore already translated (#195). The consumer archives the FULL
+        /// `text` exactly as before and translates only the tail beyond this,
+        /// so no span is ever paid for twice. Always 0 in Relaxed mode.
+        pretranslated_words: usize,
     },
     /// Transcription is sustaining a real-time factor above the threshold — the
     /// chosen model is too heavy for this Mac and captions are falling behind
