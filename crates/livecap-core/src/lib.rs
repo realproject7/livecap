@@ -22,6 +22,7 @@ pub mod event;
 pub mod model;
 pub mod pipeline;
 pub mod resample;
+pub mod stable_prefix;
 mod suppression;
 pub mod vad;
 pub mod whisper;
