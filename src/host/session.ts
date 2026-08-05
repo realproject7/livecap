@@ -111,13 +111,6 @@ const WATCHDOG_TICK_MS = 15_000;
  *  ample to catch a draining allowance without polling a rate-limit endpoint
  *  at caption cadence. */
 const HEADROOM_REFRESH_MS = 60_000;
-/** Max translation units in flight per channel (#195 backpressure). Beyond this
- *  a unit is dropped rather than queued: its text is not lost — the finalize
- *  path translates everything past the released watermark — so the span rides
- *  the finalize turn instead. Without a cap a fast speaker could run the turn
- *  count away, which is the cost guard the ticket requires. Two lets a unit be
- *  in flight while the next settles, without building a backlog. */
-const MAX_UNITS_IN_FLIGHT_PER_CHANNEL = 2;
 const DRAIN_TIMEOUT_MS = 20_000;
 /** Liveness heartbeat for the in-progress recording (#69): the writer touches
  *  its working file this often so a concurrent session start sees it as ALIVE. */
@@ -606,9 +599,12 @@ export class HostSession {
             // A unit that fails AFTER its utterance finalized cannot ride the
             // tail — that turn is already out. Re-dispatch the span itself,
             // under the same id so its result still lands as a unit result.
+            // requeueFailed, not enqueue: we are inside the failing batch's
+            // catch, so the id is still in flight and enqueue would dedup the
+            // retry away without a trace.
             if (retry && this.runner && !this.stopping) {
               this.unitIds.add(id);
-              this.runner.enqueue({ id, text: retry.source });
+              this.runner.requeueFailed({ id, text: retry.source });
             }
           }
           const captionFailures = ids.filter((id) => !unitFailures.includes(id));
@@ -752,15 +748,11 @@ export class HostSession {
    *  recorded as a unit so its result can never become an archive line. */
   private onTranslationUnit(message: Extract<HostInbound, { type: "translationUnit" }>): void {
     if (!this.runner || this.stopping) return;
-    // #195 backpressure: cap the units in flight per channel. At the cap the
-    // unit is DROPPED rather than queued — its text is not lost, because the
-    // finalize path translates everything past the released watermark, so the
-    // span simply rides the finalize turn instead. Queueing past the cap would
-    // let a fast speaker run the turn count away, which is the cost guard the
-    // ticket requires.
-    if (this.assembler.inFlightCount(message.channel) >= MAX_UNITS_IN_FLIGHT_PER_CHANNEL) return;
+    // #195 backpressure: the assembler decides, because refusing a unit has a
+    // consequence (its span must fall back to the finalize tail) that has to
+    // stay welded to the count it is based on.
+    if (!this.assembler.admitUnit(message.channel, message.id, message.text)) return;
     this.unitIds.add(message.id);
-    this.assembler.noteUnit(message.channel, message.id, message.text);
     this.watchdog?.activity(Date.now());
     this.runner.enqueue({ id: message.id, text: message.text });
   }

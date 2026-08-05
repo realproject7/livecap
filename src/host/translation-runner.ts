@@ -95,6 +95,8 @@ export class TranslationRunner {
   private readonly pendingIds = new Set<number>();
   /** Ids in the currently-running batch — for dedup while a batch is in flight. */
   private readonly inFlightIds = new Set<number>();
+  /** Sentences staged by {@link requeueFailed}, flushed once the batch clears. */
+  private readonly retryAfterFailure: RunnerSentence[] = [];
 
   constructor(options: RunnerOptions) {
     this.engine = options.engine;
@@ -115,6 +117,24 @@ export class TranslationRunner {
     // id doubles as the monotonic sequence number (assigned by Rust).
     this.queue.enqueue({ id: String(sentence.id), text: sentence.text, seq: sentence.id });
     this.pump();
+  }
+
+  /**
+   * Re-dispatch a sentence from inside {@link RunnerCallbacks.onFailed} (#195).
+   *
+   * `onFailed` runs in `run()`'s `catch`, and the batch's ids are not removed
+   * from {@link inFlightIds} until the `finally` that follows it. A plain
+   * {@link enqueue} from a failure handler therefore hits the dedup guard and is
+   * silently discarded — the caller believes it retried and nothing was ever
+   * dispatched. So the sentence is STAGED here and flushed by that `finally`,
+   * once the id is genuinely no longer in flight.
+   *
+   * Deliberately not solved by clearing `inFlightIds` earlier or by deferring to
+   * a microtask: the first loosens #139's dedup for every other caller, and the
+   * second makes correctness depend on task-ordering that no test would pin.
+   */
+  requeueFailed(sentence: RunnerSentence): void {
+    this.retryAfterFailure.push(sentence);
   }
 
   /**
@@ -223,6 +243,11 @@ export class TranslationRunner {
     } finally {
       this.running = false;
       for (const id of ids) this.inFlightIds.delete(id);
+      // Only now is a staged retry dispatchable: its id has just left the batch.
+      if (this.retryAfterFailure.length > 0) {
+        const staged = this.retryAfterFailure.splice(0, this.retryAfterFailure.length);
+        for (const sentence of staged) this.enqueue(sentence);
+      }
       this.pump();
     }
   }

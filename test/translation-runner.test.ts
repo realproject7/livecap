@@ -580,3 +580,78 @@ describe("TranslationRunner", () => {
     ]);
   });
 });
+
+// #195 / RE1's blocker on `5d79490`. A failed streamed unit is re-dispatched
+// from inside onFailed, and onFailed runs in run()'s `catch` — while the id is
+// STILL in inFlightIds, which the `finally` clears afterwards. enqueue() dedups
+// against exactly that set, so a retry issued the obvious way disappears without
+// a trace and the caller believes it retried.
+describe("TranslationRunner — retrying from a failure handler (#195)", () => {
+  /** Fails the first turn, then translates normally. */
+  function failFirstEngine(calls: Call[]) {
+    let failed = false;
+    return {
+      async *translate(batch: Sentence[], ctx: RollingContext): AsyncIterable<Translation> {
+        calls.push({ batch, ctx });
+        if (!failed) {
+          failed = true;
+          throw new Error("translation turn failed (api_error_status=429)");
+        }
+        const ids = batch.map((s) => s.id);
+        const text = respondTr(batch);
+        yield { sentenceIds: ids, text, done: true };
+      },
+    };
+  }
+
+  it("enqueue() from onFailed is swallowed by the in-flight dedup", async () => {
+    const calls: Call[] = [];
+    const { recorded } = recorder();
+    // The handler needs the runner that is calling it, so it reads through a
+    // holder rather than a binding that would not exist yet.
+    const self: { runner?: TranslationRunner } = {};
+    const callbacks: RunnerCallbacks = {
+      onSnapshot: () => undefined,
+      onBatchDone: (results) => recorded.batches.push(results),
+      onFailed: (ids) => {
+        for (const id of ids) self.runner?.enqueue({ id, text: "retry me" });
+      },
+    };
+    const runner = new TranslationRunner({ engine: failFirstEngine(calls), callbacks });
+    self.runner = runner;
+
+    runner.enqueue({ id: 7, text: "one" });
+    await runner.drain();
+    await tick();
+    // This is the defect, pinned: the engine was called once and never again.
+    expect(calls).toHaveLength(1);
+    expect(recorded.batches).toEqual([]);
+  });
+
+  it("requeueFailed() dispatches once the batch has cleared", async () => {
+    const calls: Call[] = [];
+    const { recorded } = recorder();
+    // The handler needs the runner that is calling it, so it reads through a
+    // holder rather than a binding that would not exist yet.
+    const self: { runner?: TranslationRunner } = {};
+    const callbacks: RunnerCallbacks = {
+      onSnapshot: () => undefined,
+      onBatchDone: (results) => recorded.batches.push(results),
+      onFailed: (ids) => {
+        for (const id of ids) self.runner?.requeueFailed({ id, text: "retry me" });
+      },
+    };
+    const runner = new TranslationRunner({ engine: failFirstEngine(calls), callbacks });
+    self.runner = runner;
+
+    runner.enqueue({ id: 7, text: "one" });
+    await runner.drain();
+    await tick();
+
+    expect(calls).toHaveLength(2);
+    expect(calls[1].batch.map((s) => Number(s.id))).toEqual([7]);
+    // The retry carries the RETRY text, not the original.
+    expect(calls[1].batch[0].text).toBe("retry me");
+    expect(recorded.batches).toEqual([[{ id: 7, source: "retry me", text: "tr-7" }]]);
+  });
+});

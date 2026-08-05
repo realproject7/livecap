@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { StreamingAssembler } from "../src/host/streaming-assembly";
+import { MAX_UNITS_IN_FLIGHT_PER_CHANNEL, StreamingAssembler } from "../src/host/streaming-assembly";
 
 // #195: a streamed utterance is translated in pieces, but the archive stores ONE
 // line per utterance (#137's 1:1 mapping). These cover the ordering that puts
@@ -194,6 +194,51 @@ describe("StreamingAssembler — in-flight accounting", () => {
     expect(a.inFlightCount(MIC)).toBe(1);
     a.dropChannel(MIC);
     expect(a.inFlightCount(MIC)).toBe(0);
+  });
+});
+
+// RE1's blocker on `5d79490`: refusing a unit at the cap is not free. The Rust
+// tracker advanced its released-words watermark when it EMITTED the span, and
+// never learns the host declined it — so pretranslatedWords counts the span as
+// translated and the tail begins after it. Refuse without folding and the words
+// are archived as source and never translated at all.
+describe("StreamingAssembler — the cap (#195 backpressure)", () => {
+  it("admits up to the cap and refuses past it", () => {
+    const a = new StreamingAssembler();
+    for (let i = 1; i <= MAX_UNITS_IN_FLIGHT_PER_CHANNEL; i += 1) {
+      expect(a.admitUnit(MIC, i, `clause ${i}.`)).toBe(true);
+    }
+    expect(a.admitUnit(MIC, 99, "one clause too many.")).toBe(false);
+    // The refused unit does not itself occupy a slot, or the cap would ratchet
+    // shut and the channel would never stream again.
+    expect(a.inFlightCount(MIC)).toBe(MAX_UNITS_IN_FLIGHT_PER_CHANNEL);
+  });
+
+  it("re-translates a refused span in the finalize tail instead of losing it", () => {
+    const a = new StreamingAssembler();
+    expect(a.admitUnit(MIC, 1, "alpha beta.")).toBe(true);
+    expect(a.admitUnit(MIC, 2, "gamma delta.")).toBe(true);
+    // Refused: dispatched nowhere, but the watermark upstream already counted it.
+    expect(a.admitUnit(MIC, 3, "epsilon zeta.")).toBe(false);
+    a.noteUnitResult(1, "A.");
+    a.noteUnitResult(2, "B.");
+
+    // The recognizer reports all six released words as pretranslated.
+    const plan = a.onFinalized(MIC, 100, "alpha beta. gamma delta. epsilon zeta. eta theta", 6);
+    // The refused span rides the tail, ahead of the genuinely-new words.
+    expect(plan.tailText).toBe("epsilon zeta. eta theta");
+
+    a.noteTailResult(100, "EZ. ET.");
+    expect(a.tryAssemble(100)).toBe("A. B. EZ. ET.");
+  });
+
+  it("frees a slot as each unit resolves", () => {
+    const a = new StreamingAssembler();
+    a.admitUnit(MIC, 1, "one.");
+    a.admitUnit(MIC, 2, "two.");
+    expect(a.admitUnit(MIC, 3, "three.")).toBe(false);
+    a.noteUnitResult(1, "1.");
+    expect(a.admitUnit(MIC, 4, "four.")).toBe(true);
   });
 });
 

@@ -12,6 +12,15 @@
 // has to be able to WAIT, and it has to degrade safely when a piece never
 // arrives.
 
+/**
+ * Units a channel may have awaiting a translation result at once (#195).
+ *
+ * Past this, a fast speaker would run the turn count away — the cost guard the
+ * ticket makes non-negotiable. Two lets one unit be in flight while the next
+ * settles, without building a backlog.
+ */
+export const MAX_UNITS_IN_FLIGHT_PER_CHANNEL = 2;
+
 /** A unit dispatched for early translation, awaiting its result. */
 interface PendingUnit {
   id: number;
@@ -76,6 +85,30 @@ export class StreamingAssembler {
   inFlightCount(channel: string): number {
     const list = this.pending.get(channel) ?? [];
     return list.filter((u) => u.target === null && !u.failed).length;
+  }
+
+  /**
+   * Decide whether a released span may be dispatched, and record it either way.
+   *
+   * Returns false when the channel is at {@link MAX_UNITS_IN_FLIGHT_PER_CHANNEL}.
+   * The span is still recorded — as a failed unit, so its source folds into the
+   * finalize tail. It cannot merely be dropped: the Rust tracker advanced its
+   * released-words watermark when it emitted this span and has no way to learn
+   * the host declined it, so `pretranslatedWords` at finalize would count the
+   * span as already translated and the tail would begin after it. The words
+   * would be archived as source and never translated at all.
+   *
+   * The decision lives here, with the count it depends on and the failed-unit
+   * mechanism it reuses, so the cap and its consequence cannot drift apart.
+   */
+  admitUnit(channel: string, id: number, source: string): boolean {
+    if (this.inFlightCount(channel) >= MAX_UNITS_IN_FLIGHT_PER_CHANNEL) {
+      this.noteUnit(channel, id, source);
+      this.noteUnitFailed(id);
+      return false;
+    }
+    this.noteUnit(channel, id, source);
+    return true;
   }
 
   /** Record a unit dispatched for early translation. */
