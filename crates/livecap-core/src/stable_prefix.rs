@@ -82,6 +82,54 @@ pub const MIN_UNIT_WORDS: usize = 8;
 /// releases a unit that has no clause boundary.
 pub const LIVE_DWELL_MS: u64 = 1_500;
 
+/// How long settled text may wait with **no clause boundary in sight** before
+/// [`TranslationMode::Balanced`] escalates to dwell releases for that stretch
+/// (#211).
+///
+/// # This must clear the inter-boundary interval, not the dwell
+///
+/// The obvious reading — "it only has to exceed [`LIVE_DWELL_MS`]" — is wrong,
+/// and wrong in the expensive direction. The wait clock starts as soon as ANY
+/// word settles past the watermark, which happens partway through every clause,
+/// so on ordinary punctuated speech this timer is running the whole time a
+/// clause is being spoken. A threshold below the gap between boundaries fires
+/// mid-clause, spends a dwell turn, and is then de-escalated by the boundary
+/// that was about to arrive anyway — roughly two turns per clause instead of
+/// one, which is Live's cost with none of Live's benefit.
+///
+/// #195's fixtures put a boundary every ~2–5 s in ordinary speech
+/// (`clause_release_gaps` measures it directly). The floor is therefore the
+/// upper tail of that interval, and [`LIVE_DWELL_MS`] is a necessary but badly
+/// insufficient bound. The ceiling is Balanced's unpunctuated p95 of ~24 s: any
+/// higher and escalation cannot beat the behaviour it exists to replace.
+pub const ESCALATE_AFTER_MS: u64 = 8_000;
+
+/// Boundaries that must reappear before an escalated stretch drops back to
+/// punctuation-based cutting (#211's "sustained presence").
+///
+/// Two, because **one boundary is not evidence**. An abbreviation or a stray
+/// recognizer period inside genuinely unpunctuated speech would otherwise
+/// de-escalate on a single character, and the speaker would then wait another
+/// full [`ESCALATE_AFTER_MS`] before escalation returned — an 8 s latency hole
+/// opened by one full stop. Two boundaries means the recognizer is punctuating
+/// again rather than having hiccupped once.
+///
+/// Not larger, because staying escalated through punctuated speech is not free:
+/// the dwell fires in the gaps between boundaries, which is exactly Live's cost.
+/// Two is the smallest count that survives a single artefact, and the cost of
+/// reaching it is bounded to the tail of a stretch that was already escalated.
+pub const DE_ESCALATE_BOUNDARIES: usize = 2;
+
+// Bounds on ESCALATE_AFTER_MS, enforced by the COMPILER rather than by a test,
+// because the failure mode is someone retuning the constant later. Below the
+// dwell, Balanced silently becomes Live (measured: an identical 2.0x on the
+// mixed fixture). Above ~20s it can no longer beat the ~24s wait it exists to
+// replace. Neither bound is sufficient on its own — the binding constraint is
+// the inter-boundary interval, which only a measurement can supply
+// (`escalation_threshold_clears_the_inter_boundary_interval`).
+const _: () = assert!(ESCALATE_AFTER_MS > LIVE_DWELL_MS);
+const _: () = assert!(ESCALATE_AFTER_MS < 20_000);
+
 /// Sentence-final punctuation, including the CJK forms, since the source
 /// language is whatever the speaker used.
 const CLAUSE_ENDINGS: [char; 7] = ['.', '!', '?', '。', '！', '？', '…'];
@@ -147,6 +195,19 @@ pub struct StablePrefixTracker {
     /// exists for. Measuring how long text has been WAITING to be released is
     /// what makes the dwell fire mid-speech.
     unreleased_since_ms: Option<u64>,
+    /// Boundaries seen since escalating, toward [`DE_ESCALATE_BOUNDARIES`].
+    boundaries_while_escalated: usize,
+    /// Whether this stretch has escalated to dwell releases (#211).
+    ///
+    /// Balanced only. Set when settled text has waited [`ESCALATE_AFTER_MS`]
+    /// with no clause boundary; cleared once [`DE_ESCALATE_BOUNDARIES`] have
+    /// reappeared. Both directions require SUSTAINED evidence — a duration of
+    /// absence one way, a count of presence the other — which is what keeps the
+    /// state from chasing a single partial in either direction. The two windows
+    /// are different kinds because the two conditions are: "has punctuation
+    /// stopped?" is a question about elapsed time, "has it come back?" is a
+    /// question about events.
+    escalated: bool,
 }
 
 impl Default for StablePrefixTracker {
@@ -162,6 +223,8 @@ impl StablePrefixTracker {
             previous: String::new(),
             released_words: 0,
             unreleased_since_ms: None,
+            boundaries_while_escalated: 0,
+            escalated: false,
         }
     }
 
@@ -171,6 +234,15 @@ impl StablePrefixTracker {
         self.previous.clear();
         self.released_words = 0;
         self.unreleased_since_ms = None;
+        self.escalated = false;
+        self.boundaries_while_escalated = 0;
+    }
+
+    /// Whether this stretch is currently escalated (#211). Test/measurement
+    /// accessor: escalation is an internal behaviour of Balanced, never a
+    /// setting, so nothing user-facing reads it.
+    pub fn is_escalated(&self) -> bool {
+        self.escalated
     }
 
     /// Feed a partial. Returns a unit when one is due under the current mode.
@@ -198,18 +270,44 @@ impl StablePrefixTracker {
 
         // Prefer a clause boundary inside the settled region.
         let boundary = last_clause_boundary(text, settled).filter(|end| *end > self.released_words);
+        if boundary.is_some() && self.escalated {
+            // Punctuation is back — but ONE boundary does not end the stretch.
+            // A single stray period (an abbreviation, a recognizer artefact) in
+            // otherwise unpunctuated speech would drop the speaker straight back
+            // into an ESCALATE_AFTER_MS wait, so a single character would open an
+            // 8 s latency hole. Sustained presence is required, per #211.
+            //
+            // Counted rather than timed, and boundaries are counted whether or
+            // not they are large enough to release: the question is whether the
+            // recognizer is emitting punctuation again, which is an event, not a
+            // duration. Dwell releases in between do not reset the count — an
+            // interleaved dwell is the escalated mechanism working, not evidence
+            // that punctuation stopped.
+            self.boundaries_while_escalated += 1;
+            if self.boundaries_while_escalated >= DE_ESCALATE_BOUNDARIES {
+                self.escalated = false;
+                self.boundaries_while_escalated = 0;
+            }
+        }
         let (end, reason) = match boundary {
             Some(end) => (end, UnitReason::Clause),
-            None if self.mode == TranslationMode::Live => {
-                // Live also releases text that has been waiting long enough,
-                // even though the speaker never punctuated it.
+            None => {
+                // No boundary in the settled text. Live always falls back to the
+                // dwell; Balanced does so only once this stretch has gone long
+                // enough without punctuation to escalate (#211).
                 let waiting_ms = now_ms.saturating_sub(self.unreleased_since_ms.unwrap_or(now_ms));
+                if self.mode == TranslationMode::Balanced && !self.escalated {
+                    if waiting_ms < ESCALATE_AFTER_MS {
+                        return None;
+                    }
+                    self.escalated = true;
+                    self.boundaries_while_escalated = 0;
+                }
                 if waiting_ms < LIVE_DWELL_MS {
                     return None;
                 }
                 (settled, UnitReason::Dwell)
             }
-            None => return None,
         };
 
         if end - self.released_words < MIN_UNIT_WORDS {
@@ -276,6 +374,18 @@ mod tests {
     /// Eight words is the minimum unit, so fixtures need real clauses.
     const C1: &str = "we are committed to the dual mandate of maximum employment.";
     const C2: &str = "inflation has moderated over the past year considerably.";
+
+    /// Settle `text` and return the moment its wait clock started.
+    ///
+    /// LocalAgreement needs two AGREEING partials, so nothing settles on the
+    /// first one and the clock starts at the SECOND. Every timing test here
+    /// depends on that offset, and getting it wrong makes escalation look like
+    /// it fires late rather than the test measuring from the wrong instant.
+    fn settle_unpunctuated(tracker: &mut StablePrefixTracker, text: &str) -> u64 {
+        tracker.on_partial(text, 0);
+        assert_eq!(tracker.on_partial(text, 1_200), None, "nothing is due yet");
+        1_200
+    }
 
     #[test]
     fn mode_parses_and_round_trips_with_a_safe_default() {
@@ -351,14 +461,189 @@ mod tests {
         assert_eq!(tracker.on_partial(&growing, 30_000), None);
     }
 
+    /// CHANGED BY #211. This asserted Balanced waits FOREVER without punctuation
+    /// (it probed at t=60s). That was the defect: an unpunctuated speaker got
+    /// nothing from Balanced at all. It now waits only until the stretch has
+    /// proven itself unpunctuated.
     #[test]
-    fn balanced_never_releases_text_without_punctuation() {
+    fn balanced_holds_unpunctuated_text_until_the_stretch_proves_itself() {
         let mut tracker = StablePrefixTracker::new(TranslationMode::Balanced);
         let text = "we are committed to the dual mandate of maximum employment and stable prices";
-        tracker.on_partial(text, 0);
-        // Settled and well over the minimum size, but no clause ending: Balanced
-        // waits. This is the whole difference between Balanced and Live.
-        assert_eq!(tracker.on_partial(text, 60_000), None);
+        let since = settle_unpunctuated(&mut tracker, text);
+        // Settled and well over the minimum size, but no clause ending. Balanced
+        // still waits — for a whole clause's worth of time, not the mere dwell.
+        assert_eq!(tracker.on_partial(text, since + LIVE_DWELL_MS + 1), None);
+        assert_eq!(
+            tracker.on_partial(text, since + ESCALATE_AFTER_MS - 1),
+            None
+        );
+        assert!(!tracker.is_escalated());
+
+        let unit = tracker
+            .on_partial(text, since + ESCALATE_AFTER_MS)
+            .expect("balanced must escalate once the stretch is proven unpunctuated");
+        assert_eq!(unit.reason, UnitReason::Dwell);
+        assert!(tracker.is_escalated());
+    }
+
+    #[test]
+    fn punctuated_speech_never_escalates_however_long_it_runs() {
+        let mut tracker = StablePrefixTracker::new(TranslationMode::Balanced);
+        // A speaker who punctuates every ~5s — the widest inter-boundary gap the
+        // fixtures produce — for a minute. The wait clock is running the whole
+        // time, so this is the case a threshold set against LIVE_DWELL_MS alone
+        // would charge a turn per clause for.
+        let mut text = String::new();
+        let mut at = 0;
+        for _ in 0..12 {
+            text.push_str(C1);
+            text.push(' ');
+            tracker.on_partial(&text, at);
+            at += 5_000;
+            let unit = tracker.on_partial(&text, at).expect("a clause is due");
+            assert_eq!(unit.reason, UnitReason::Clause);
+            assert!(
+                !tracker.is_escalated(),
+                "punctuated speech must not escalate"
+            );
+        }
+    }
+
+    /// One boundary must NOT end the stretch — @re1's finding on `5c7455f`.
+    /// #211 requires sustained presence, and the reason is concrete: a single
+    /// stray period would otherwise cost the speaker another full
+    /// ESCALATE_AFTER_MS of silence.
+    #[test]
+    fn a_single_boundary_does_not_de_escalate() {
+        let mut tracker = StablePrefixTracker::new(TranslationMode::Balanced);
+        let bare = "we are committed to the dual mandate of maximum employment and stable prices";
+        let since = settle_unpunctuated(&mut tracker, bare);
+        tracker
+            .on_partial(bare, since + ESCALATE_AFTER_MS)
+            .expect("escalates on an unpunctuated stretch");
+        assert!(tracker.is_escalated());
+
+        // A lone boundary — an abbreviation, or a recognizer hiccup.
+        let one = format!("{bare} and the committee will act accordingly as conditions warrant.");
+        tracker.on_partial(&one, since + ESCALATE_AFTER_MS + 1_200);
+        let unit = tracker
+            .on_partial(&one, since + ESCALATE_AFTER_MS + 2_400)
+            .expect("the new clause is due");
+        assert_eq!(unit.reason, UnitReason::Clause);
+        assert!(
+            tracker.is_escalated(),
+            "one boundary is not evidence that punctuation is back"
+        );
+    }
+
+    #[test]
+    fn sustained_boundaries_de_escalate_the_stretch() {
+        let mut tracker = StablePrefixTracker::new(TranslationMode::Balanced);
+        let bare = "we are committed to the dual mandate of maximum employment and stable prices";
+        let since = settle_unpunctuated(&mut tracker, bare);
+        tracker
+            .on_partial(bare, since + ESCALATE_AFTER_MS)
+            .expect("escalates");
+
+        // Feed DE_ESCALATE_BOUNDARIES clauses back to back.
+        let mut text = bare.to_string();
+        let mut at = since + ESCALATE_AFTER_MS;
+        for i in 0..DE_ESCALATE_BOUNDARIES {
+            text.push_str(" and the committee will act accordingly as conditions warrant.");
+            at += 1_200;
+            tracker.on_partial(&text, at);
+            at += 1_200;
+            let unit = tracker.on_partial(&text, at).expect("a clause is due");
+            assert_eq!(unit.reason, UnitReason::Clause);
+            if i + 1 < DE_ESCALATE_BOUNDARIES {
+                assert!(tracker.is_escalated(), "not yet sustained after {}", i + 1);
+            }
+        }
+        assert!(
+            !tracker.is_escalated(),
+            "punctuation is demonstrably back after {DE_ESCALATE_BOUNDARIES} boundaries"
+        );
+    }
+
+    /// The no-oscillation property, asserted as a PROPERTY rather than by
+    /// counting flips on one fixture.
+    ///
+    /// Both directions now require sustained evidence — a duration of absence to
+    /// escalate, a count of presence to de-escalate — so neither can be
+    /// satisfied by a single partial. The consequence is a hard floor on the
+    /// flip period: after de-escalating, nothing can re-escalate until another
+    /// full ESCALATE_AFTER_MS of boundary-free waiting has passed.
+    #[test]
+    fn escalation_cannot_flip_twice_inside_one_window() {
+        let mut tracker = StablePrefixTracker::new(TranslationMode::Balanced);
+        let bare = "we are committed to the dual mandate of maximum employment and stable prices";
+        let since = settle_unpunctuated(&mut tracker, bare);
+        tracker
+            .on_partial(bare, since + ESCALATE_AFTER_MS)
+            .expect("escalates");
+        assert!(tracker.is_escalated());
+
+        // Sustained punctuation returns and de-escalates.
+        let mut text = bare.to_string();
+        let mut at = since + ESCALATE_AFTER_MS;
+        for _ in 0..DE_ESCALATE_BOUNDARIES {
+            text.push_str(" and the committee will act accordingly as conditions warrant.");
+            at += 1_200;
+            tracker.on_partial(&text, at);
+            at += 1_200;
+            tracker.on_partial(&text, at).expect("clause release");
+        }
+        let de_escalated_at = at;
+        assert!(!tracker.is_escalated());
+
+        // Speech goes unpunctuated again. Probe every 500ms across the whole
+        // window: it must not re-escalate anywhere inside it.
+        text.push_str(" and the committee will continue to monitor incoming data closely");
+        let mut probe = de_escalated_at + 500;
+        while probe < de_escalated_at + ESCALATE_AFTER_MS {
+            tracker.on_partial(&text, probe);
+            assert!(
+                !tracker.is_escalated(),
+                "re-escalated at {probe}, only {}ms after de-escalating",
+                probe - de_escalated_at
+            );
+            probe += 500;
+        }
+    }
+
+    #[test]
+    fn relaxed_and_live_are_untouched_by_escalation() {
+        // Relaxed never streams, so it can never escalate.
+        let mut relaxed = StablePrefixTracker::new(TranslationMode::Relaxed);
+        let bare = "we are committed to the dual mandate of maximum employment and stable prices";
+        relaxed.on_partial(bare, 0);
+        assert_eq!(relaxed.on_partial(bare, 10 * ESCALATE_AFTER_MS), None);
+        assert!(!relaxed.is_escalated());
+
+        // Live still dwells immediately — escalation is Balanced's way of
+        // REACHING Live's behaviour, not a change to Live itself.
+        let mut live = StablePrefixTracker::new(TranslationMode::Live);
+        let since = settle_unpunctuated(&mut live, bare);
+        let unit = live
+            .on_partial(bare, since + LIVE_DWELL_MS)
+            .expect("live dwells without waiting for escalation");
+        assert_eq!(unit.reason, UnitReason::Dwell);
+        assert!(!live.is_escalated(), "live does not need to escalate");
+    }
+
+    #[test]
+    fn a_new_utterance_starts_unescalated() {
+        let mut tracker = StablePrefixTracker::new(TranslationMode::Balanced);
+        let bare = "we are committed to the dual mandate of maximum employment and stable prices";
+        let since = settle_unpunctuated(&mut tracker, bare);
+        tracker
+            .on_partial(bare, since + ESCALATE_AFTER_MS)
+            .expect("escalates");
+        assert!(tracker.is_escalated());
+        // Finalizing resets the tracker; the next utterance must earn its own
+        // escalation rather than inherit one.
+        tracker.on_finalize(bare);
+        assert!(!tracker.is_escalated());
     }
 
     #[test]

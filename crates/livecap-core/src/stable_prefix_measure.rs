@@ -329,6 +329,7 @@ pub fn natural_speech_script(clauses: &[&str], partial_interval_ms: u64) -> Vec<
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::stable_prefix::{UnitReason, ESCALATE_AFTER_MS};
 
     /// One clause set, used by BOTH fixtures so the two speech patterns are
     /// compared on identical text.
@@ -430,8 +431,12 @@ mod tests {
         }
     }
 
+    /// CHANGED BY #211. This asserted that Balanced behaves exactly like Relaxed
+    /// on unpunctuated speech — one turn, the same long wait. That WAS true, and
+    /// it is the defect #211 exists to remove: Balanced now escalates when a
+    /// stretch goes long enough without punctuation, so it keeps up too.
     #[test]
-    fn live_is_the_only_mode_that_helps_unpunctuated_speech() {
+    fn balanced_escalates_to_keep_up_with_unpunctuated_speech() {
         let bare = unpunctuated(CLAUSES);
         let bare_refs: Vec<&str> = bare.iter().map(|s| s.as_str()).collect();
         let script = continuous_speech_script(&bare_refs, 1_200);
@@ -440,24 +445,90 @@ mod tests {
         let balanced = measure(TranslationMode::Balanced, &script);
         let live = measure(TranslationMode::Live, &script);
 
-        // Balanced finds no clause boundary, so it behaves exactly like Relaxed:
-        // one turn at finalize, and the same long wait.
-        assert_eq!(balanced.turns, relaxed.turns);
-        assert_eq!(balanced.latency_p(95), relaxed.latency_p(95));
-
-        // Live keeps up, which is the entire justification for the third step.
+        // Balanced no longer collapses to Relaxed here — this is the whole point.
         assert!(
-            live.turns > balanced.turns,
-            "live released {} units vs balanced {}",
-            live.turns,
-            balanced.turns
+            balanced.turns > relaxed.turns,
+            "balanced released {} units vs relaxed {}",
+            balanced.turns,
+            relaxed.turns
         );
         assert!(
-            live.latency_p(95) < relaxed.latency_p(95),
-            "live p95 {} should beat relaxed p95 {}",
-            live.latency_p(95),
+            balanced.latency_p(95) < relaxed.latency_p(95),
+            "balanced p95 {} should beat relaxed p95 {}",
+            balanced.latency_p(95),
             relaxed.latency_p(95)
         );
+
+        // But it stays CHEAPER than Live, because it waits for the stretch to
+        // prove itself unpunctuated before it starts dwelling. Escalation buys
+        // Live's benefit here without buying Live's cost everywhere else.
+        assert!(
+            balanced.turns < live.turns,
+            "escalated balanced {} should cost less than live {}",
+            balanced.turns,
+            live.turns
+        );
+    }
+
+    /// The interval @re2 identified as the real floor for `ESCALATE_AFTER_MS`.
+    ///
+    /// The wait clock starts partway through every clause, so a threshold below
+    /// the gap between boundaries fires mid-clause on ordinary speech, spends a
+    /// turn, and is de-escalated by the boundary that was arriving anyway.
+    /// "Longer than the dwell" is not the constraint; "longer than this" is.
+    fn clause_release_gaps(script: &[ScriptStep]) -> Vec<u64> {
+        let mut tracker = StablePrefixTracker::new(TranslationMode::Balanced);
+        let mut last: Option<u64> = None;
+        let mut gaps = Vec::new();
+        for step in script {
+            if step.finalizes {
+                // Mirror the pipeline: finalizing resets the tracker, so the
+                // next utterance starts a fresh stretch. Measuring a "gap"
+                // across an utterance boundary would fold in the speaker's
+                // pause and inflate the interval — it is not a gap escalation
+                // could ever see.
+                tracker.on_finalize(&step.text);
+                last = None;
+                continue;
+            }
+            if let Some(unit) = tracker.on_partial(&step.text, step.at_ms) {
+                if unit.reason == UnitReason::Clause {
+                    if let Some(previous) = last {
+                        gaps.push(step.at_ms - previous);
+                    }
+                    last = Some(step.at_ms);
+                }
+            }
+        }
+        gaps
+    }
+
+    #[test]
+    fn escalation_threshold_clears_the_inter_boundary_interval() {
+        let mut worst = 0;
+        for (label, script) in [
+            ("natural", natural_speech_script(CLAUSES, 1_200)),
+            ("continuous", continuous_speech_script(CLAUSES, 1_200)),
+            (
+                "mixed",
+                mixed_meeting_script(MEETING, 1_200, &[(2, 2), (7, 2)]),
+            ),
+        ] {
+            let gaps = clause_release_gaps(&script);
+            let max = gaps.iter().copied().max().unwrap_or(0);
+            println!("{label}: clause-release gaps {gaps:?} max {max}ms");
+            worst = worst.max(max);
+        }
+        // The constant is derived from this number, not fitted to a multiplier.
+        assert!(
+            ESCALATE_AFTER_MS > worst,
+            "ESCALATE_AFTER_MS {ESCALATE_AFTER_MS} must exceed the widest \
+             inter-boundary gap in punctuated speech ({worst}ms), or escalation \
+             fires mid-clause and costs a turn per clause"
+        );
+        // The other two bounds are compile-time assertions on the constant
+        // itself (see `stable_prefix.rs`), so they hold whether or not anyone
+        // runs this test.
     }
 
     #[test]
@@ -564,5 +635,57 @@ mod tests {
             );
         }
         println!("(fixture: {} ms of continuous speech)\n", relaxed.speech_ms);
+    }
+    /// #211's acceptance criterion: escalation must not oscillate on speech that
+    /// ALTERNATES punctuated and unpunctuated stretches. The unit tests pin the
+    /// property on a hand-built timeline; this drives it over a realistic script
+    /// and counts what actually happened.
+    #[test]
+    fn escalation_does_not_oscillate_on_alternating_speech() {
+        let bare = unpunctuated(CLAUSES);
+        // Two punctuated clauses, three bare, two punctuated, three bare.
+        let clauses: Vec<&str> = vec![
+            CLAUSES[0], CLAUSES[1], &bare[2], &bare[3], &bare[4], CLAUSES[0], CLAUSES[1], &bare[2],
+            &bare[3], &bare[4],
+        ];
+        let script = continuous_speech_script(&clauses, 1_200);
+
+        let mut tracker = StablePrefixTracker::new(TranslationMode::Balanced);
+        let mut was = false;
+        let mut escalations: Vec<u64> = Vec::new();
+        let mut flips = 0;
+        for step in &script {
+            if step.finalizes {
+                tracker.on_finalize(&step.text);
+            } else {
+                tracker.on_partial(&step.text, step.at_ms);
+            }
+            let now = tracker.is_escalated();
+            if now != was {
+                flips += 1;
+                if now {
+                    escalations.push(step.at_ms);
+                }
+                was = now;
+            }
+        }
+        println!("alternating: {flips} transitions, escalated at {escalations:?}");
+
+        // Consecutive ESCALATIONS must be at least one window apart. This is the
+        // no-oscillation guarantee expressed on real input: escalating twice in
+        // quick succession is the failure mode, and it cannot happen because
+        // escalation needs ESCALATE_AFTER_MS of boundary-free waiting each time.
+        for pair in escalations.windows(2) {
+            assert!(
+                pair[1] - pair[0] >= ESCALATE_AFTER_MS,
+                "escalated twice only {}ms apart ({escalations:?})",
+                pair[1] - pair[0]
+            );
+        }
+        // And the state changed a handful of times, not once per partial.
+        assert!(
+            flips <= 4,
+            "escalation state flipped {flips} times on alternating speech"
+        );
     }
 }
