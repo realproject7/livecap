@@ -19,6 +19,9 @@ export interface AppSettings {
   /** Whisper STT model (#110): "small" | "medium" | "large-v3-turbo".
    *  Downloaded on first use at session start; applies to the next session. */
   sttModel: string;
+  /** How eagerly translation follows the speaker (#195): "relaxed" (default) |
+   *  "balanced". Applies at the next session start. */
+  translationMode: string;
   /** Claude model the CLI tier runs (#203): "haiku" | "sonnet" | "opus".
    *  Applies at the next session start; downloads nothing (the model runs on
    *  Anthropic's side), but a heavier tier spends the plan's budget faster. */
@@ -63,6 +66,52 @@ export const STT_MODELS: { value: string; label: string; size: string; note?: st
  *  new default from the backend, not from here. */
 export function sanitizedSttModel(value: string | null | undefined): string {
   return STT_MODELS.some((m) => m.value === value) ? (value as string) : "small";
+}
+
+/** Translation cadence steps the picker exposes (#195).
+ *
+ *  Deliberately NOT every mode the pipeline implements: `live` is a real,
+ *  working mode that the PO held permanently, because on punctuated speech it
+ *  costs 1.67× Balanced's turns and buys nothing (p95 4.5 s vs 4.4 s), and a
+ *  manual setting is the wrong shape for a benefit the user cannot predict in
+ *  advance. #211 owns doing it automatically instead.
+ *
+ *  "Held" means unreachable, not merely unlisted — so the type below admits
+ *  only the shipped steps, and every boundary that turns a string into a mode
+ *  clamps to this list. */
+export type TranslationModeValue = "relaxed" | "balanced";
+
+/** Cadence steps with the MEASURED cost of each, stated per speech condition
+ *  because the multiplier genuinely depends on how the speaker talks. The
+ *  numbers come from `stable_prefix_measure.rs`, not from an estimate. */
+export const TRANSLATION_MODES: {
+  value: TranslationModeValue;
+  label: string;
+  note: string;
+}[] = [
+  {
+    value: "relaxed",
+    label: "Relaxed",
+    note: "translates when the speaker pauses · today's behaviour",
+  },
+  {
+    value: "balanced",
+    label: "Balanced",
+    note: "follows clause by clause · no extra requests in ordinary paused speech, ~1.2× in a mixed meeting, up to 5× during sustained unbroken speech — where it replaces a ~24 s wait",
+  },
+];
+
+/** The cadence a fresh install runs (#195). Relaxed is today's behaviour, so
+ *  nobody's token spend changes until they opt in. */
+export const DEFAULT_TRANSLATION_MODE: TranslationModeValue = "relaxed";
+
+/** The persisted cadence, clamping anything unknown — including the held
+ *  `live` — to Relaxed, the step that costs nothing extra. */
+export function sanitizedTranslationMode(value: string | null | undefined): TranslationModeValue {
+  const mode = (value ?? "").trim();
+  return TRANSLATION_MODES.some((m) => m.value === mode)
+    ? (mode as TranslationModeValue)
+    : DEFAULT_TRANSLATION_MODE;
 }
 
 /** The Claude model a fresh install runs (#203) — unchanged from the value the

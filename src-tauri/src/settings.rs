@@ -76,6 +76,23 @@ fn default_capsule_content() -> String {
 /// `livecap_core::model::MODEL_NAMES`. Anything else sanitizes to the default.
 const STT_MODELS: &[&str] = &["small", "medium", "large-v3-turbo", "large-v3-turbo-q5_0"];
 
+/// Translation cadence steps the Settings sheet exposes (#195).
+///
+/// NOT the full set `livecap_core::stable_prefix::TranslationMode` supports:
+/// `live` exists in the core as the dwell mechanism #211 needs, but the PO held
+/// it because a manual setting is the wrong shape for a benefit the user cannot
+/// predict — on punctuated speech it costs 1.67x Balanced's turns and buys
+/// nothing. A hand-edited "live" therefore clamps to the default, same as any
+/// other unknown value, so an unshipped mode can never be activated by editing
+/// the file.
+const TRANSLATION_MODES: &[&str] = &["relaxed", "balanced"];
+
+/// The cadence a fresh install runs. Relaxed is today's behaviour: nobody's
+/// token spend changes until they opt in.
+fn default_translation_mode() -> String {
+    "relaxed".into()
+}
+
 /// Curated Claude model picks for the CLI tier (#203). These are the CLI's tier
 /// ALIASES, not dated snapshot ids, so LiveCap never pins a build that ages out.
 ///
@@ -116,6 +133,9 @@ pub struct AppSettings {
     /// quantized turbo build (#202); an existing file keeps what it had.
     #[serde(default = "migrated_stt_model")]
     pub stt_model: String,
+    /// How eagerly translation follows the speaker (#195): "relaxed" (default,
+    /// today's behaviour) | "balanced". Applies at the next session start.
+    pub translation_mode: String,
     /// Claude model the CLI tier runs (#203): "haiku" | "sonnet" | "opus"
     /// (curated tier aliases). Applies at the next session start; a heavier
     /// model consumes the plan's budget faster but downloads nothing.
@@ -157,6 +177,7 @@ impl Default for AppSettings {
             source_language: default_source_language(),
             stt_model: default_stt_model(),
             claude_model: default_claude_model(),
+            translation_mode: default_translation_mode(),
             pool_usd: default_pool(),
             reset_day: default_reset_day(),
             auto_switch: default_true(),
@@ -186,6 +207,15 @@ impl AppSettings {
     /// Clamp every field into its valid domain so a hand-edited or stale
     /// file can never wedge the app.
     pub fn sanitized(mut self) -> Self {
+        // #195: only the shipped cadence steps are valid. An unknown value —
+        // including "live", which the core supports but the picker does not
+        // expose — clamps to Relaxed, the step that costs nothing extra.
+        let cadence = self.translation_mode.trim();
+        self.translation_mode = if TRANSLATION_MODES.contains(&cadence) {
+            cadence.to_string()
+        } else {
+            default_translation_mode()
+        };
         // #204 adds "codex" alongside "cli" and "local". Anything else clamps to
         // the Claude CLI tier — a hand-edited value must not wedge the app, and
         // the fallback router can always route away from "cli".
@@ -351,6 +381,7 @@ mod tests {
             source_language: "en".into(),
             stt_model: "medium".into(),
             claude_model: "sonnet".into(),
+            translation_mode: "balanced".into(),
             pool_usd: 100.0,
             reset_day: 15,
             auto_switch: false,
@@ -488,6 +519,40 @@ mod tests {
         assert!(json.contains(r#""claudeModel":"haiku""#));
     }
 
+    /// #195. The cadence steps the picker exposes are a SUBSET of what the core
+    /// implements: `live` is a real, working mode that the PO held because a
+    /// manual setting is the wrong shape for its value. Editing it into the file
+    /// must not activate it.
+    #[test]
+    fn translation_mode_defaults_to_relaxed_and_rejects_unshipped_modes() {
+        let existing: AppSettings =
+            serde_json::from_str(r#"{ "onboardingComplete": true }"#).unwrap();
+        assert_eq!(existing.translation_mode, "relaxed");
+        assert_eq!(existing.sanitized().translation_mode, "relaxed");
+
+        for shipped in TRANSLATION_MODES {
+            let parsed: AppSettings =
+                serde_json::from_str(&format!(r#"{{ "translationMode": "{shipped}" }}"#)).unwrap();
+            assert_eq!(&parsed.sanitized().translation_mode, shipped);
+        }
+
+        // "live" is the one that matters: it exists in livecap-core and works,
+        // so nothing but this clamp stops a hand-edit from enabling a mode the
+        // product deliberately does not ship.
+        for held in ["live", "simultaneous", "LIVE", "", "   "] {
+            let parsed: AppSettings =
+                serde_json::from_str(&format!(r#"{{ "translationMode": "{held}" }}"#)).unwrap();
+            assert_eq!(
+                parsed.sanitized().translation_mode,
+                "relaxed",
+                "unshipped/unknown mode {held:?} must clamp to Relaxed"
+            );
+        }
+
+        let json = serde_json::to_string(&AppSettings::default()).unwrap();
+        assert!(json.contains(r#""translationMode":"relaxed""#));
+    }
+
     /// The default must be a member of the curated list, or `sanitized()` would
     /// clamp the default away on every load (same guard as the STT list).
     #[test]
@@ -504,6 +569,7 @@ mod tests {
         assert_eq!(d.source_language, "auto"); // #94: per-utterance auto-detect
         assert_eq!(d.stt_model, "large-v3-turbo-q5_0"); // #202: fresh install
         assert_eq!(d.claude_model, "haiku"); // #203: default unchanged
+        assert_eq!(d.translation_mode, "relaxed"); // #195: today's behaviour
         assert_eq!(d.pool_usd, 20.0); // Pro preset
         assert_eq!(d.reset_day, 1);
         assert!(d.auto_switch);
@@ -525,6 +591,8 @@ mod tests {
             // #203: a dated snapshot id is exactly the plausible hand-edit —
             // it looks like a real model, and the curated list takes aliases.
             claude_model: "claude-3-5-haiku-20241022".into(),
+            translation_mode: "live".into(), // #195: real mode, not shipped
+
             pool_usd: f64::NAN,
             reset_day: 31,
             caption_size: "xxl".into(),
@@ -537,6 +605,7 @@ mod tests {
         assert_eq!(clean.source_language, "en");
         assert_eq!(clean.stt_model, "small"); // #202: unknown → LEGACY, not the new default
         assert_eq!(clean.claude_model, "haiku"); // #203: unknown → the default
+        assert_eq!(clean.translation_mode, "relaxed"); // #195: held mode → default
         assert_eq!(clean.pool_usd, 20.0);
         assert_eq!(clean.reset_day, 28);
         assert_eq!(clean.caption_size, "m");

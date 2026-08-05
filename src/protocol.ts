@@ -90,6 +90,10 @@ export type HostInbound =
       sourceLanguageCode: string;
       /** Engine tier to lead with (router default; §8.7 segmented control). */
       enginePref: EnginePref;
+      /** Translation cadence (#195). Only the SHIPPED steps are admitted: the
+       *  held `live` mode is unreachable through this contract by construction,
+       *  not merely unlisted in the picker. */
+      translationMode: "relaxed" | "balanced";
       /** Claude model the CLI tier runs (#203): a curated tier alias — "haiku"
        *  (default) | "sonnet" | "opus". Both sides clamp unknown values, and an
        *  older shell that omits the field lands on the default. */

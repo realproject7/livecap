@@ -36,6 +36,9 @@ export interface ResolvedStartConfig {
   sourceLangCode: string;
   targetLangCode: string;
   enginePref: EnginePref;
+  /** Translation cadence (#195), clamped to a SHIPPED step. The held `live`
+   *  mode cannot arrive here even from a crafted start message. */
+  translationMode: "relaxed" | "balanced";
   /** Claude model the CLI tier runs (#203), already clamped to a curated pick.
    *  Reaches `--model` in the built argv via the engine config. */
   claudeModel: string;
@@ -77,6 +80,10 @@ export function resolveStartConfig(message: StartMessage): ResolvedStartConfig {
     // turn, so it clamps to Haiku here rather than reaching argv. An older
     // shell omits the field entirely and lands on the same default.
     claudeModel: sanitizedClaudeModel(message.claudeModel),
+    // #195: "held" means unreachable, not merely unlisted — so the cadence is
+    // clamped here as well as in the settings sanitizer. Anything that is not a
+    // shipped step, including `live`, becomes Relaxed.
+    translationMode: message.translationMode === "balanced" ? "balanced" : "relaxed",
     poolUsd: Number.isFinite(message.poolUsd) && message.poolUsd > 0 ? message.poolUsd : DEFAULT_POOL_USD,
     resetDay: clampResetDay(message.resetDay),
     autoSwitch: message.autoSwitch !== false,

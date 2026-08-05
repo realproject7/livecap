@@ -18,6 +18,7 @@ function startMessage(overrides: Partial<StartMessage> = {}): StartMessage {
     sourceLanguageCode: "auto",
     enginePref: "cli",
     claudeModel: "haiku",
+    translationMode: "relaxed",
     poolUsd: 20,
     resetDay: 1,
     autoSwitch: true,
@@ -128,6 +129,21 @@ describe("resolveStartConfig — gauge + router mapping", () => {
     const legacy = startMessage();
     delete (legacy as Partial<StartMessage>).claudeModel;
     expect(resolveStartConfig(legacy).claudeModel).toBe("haiku");
+  });
+
+  // #195: the PO held `live` permanently, so it must be unreachable through the
+  // contract rather than merely absent from the picker.
+  it("clamps the translation cadence to a shipped step (#195)", () => {
+    expect(resolveStartConfig(startMessage()).translationMode).toBe("relaxed");
+    expect(
+      resolveStartConfig(startMessage({ translationMode: "balanced" })).translationMode,
+    ).toBe("balanced");
+    // A crafted or stale start message naming the held mode gets Relaxed.
+    const held = { ...startMessage(), translationMode: "live" } as unknown as StartMessage;
+    expect(resolveStartConfig(held).translationMode).toBe("relaxed");
+    const missing = startMessage();
+    delete (missing as Partial<StartMessage>).translationMode;
+    expect(resolveStartConfig(missing).translationMode).toBe("relaxed");
   });
 
   it("maps the archive group (auto-save, retention)", () => {
