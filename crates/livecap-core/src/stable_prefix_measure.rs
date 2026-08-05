@@ -207,6 +207,27 @@ pub fn continuous_speech_script(clauses: &[&str], partial_interval_ms: u64) -> V
     steps
 }
 
+/// Strip sentence-final punctuation from a clause set.
+///
+/// This is what actually separates Balanced from Live. Balanced only releases
+/// at punctuation, so on unpunctuated speech — a speaker the recognizer never
+/// gives a full stop, which is common in fast or accented speech — Balanced
+/// degrades to Relaxed and the viewer is back to waiting. Live's dwell trigger
+/// is the whole reason that step exists, and without this fixture "Live" would
+/// be a claim the measurement never demonstrates.
+pub fn unpunctuated(clauses: &[&str]) -> Vec<String> {
+    clauses
+        .iter()
+        .map(|clause| {
+            clause
+                .split_whitespace()
+                .map(|word| word.trim_end_matches(['.', '!', '?', '。', '！', '？', '…']))
+                .collect::<Vec<_>>()
+                .join(" ")
+        })
+        .collect()
+}
+
 /// Build a natural-speech script: the speaker pauses between clauses, so each
 /// clause finalizes as its own utterance.
 ///
@@ -296,6 +317,39 @@ mod tests {
         }
     }
 
+    /// The reason Live exists as a separate step. On speech the recognizer
+    /// never punctuates, Balanced has no boundary to cut at and degrades to
+    /// Relaxed — the viewer waits again. Live's dwell keeps following.
+    #[test]
+    fn live_is_the_only_mode_that_helps_unpunctuated_speech() {
+        let bare = unpunctuated(CLAUSES);
+        let bare_refs: Vec<&str> = bare.iter().map(|s| s.as_str()).collect();
+        let script = continuous_speech_script(&bare_refs, 1_200);
+
+        let relaxed = measure(TranslationMode::Relaxed, &script);
+        let balanced = measure(TranslationMode::Balanced, &script);
+        let live = measure(TranslationMode::Live, &script);
+
+        // Balanced finds no clause boundary, so it behaves exactly like Relaxed:
+        // one turn at finalize, and the same long wait.
+        assert_eq!(balanced.turns, relaxed.turns);
+        assert_eq!(balanced.latency_p(95), relaxed.latency_p(95));
+
+        // Live keeps up, which is the entire justification for the third step.
+        assert!(
+            live.turns > balanced.turns,
+            "live released {} units vs balanced {}",
+            live.turns,
+            balanced.turns
+        );
+        assert!(
+            live.latency_p(95) < relaxed.latency_p(95),
+            "live p95 {} should beat relaxed p95 {}",
+            live.latency_p(95),
+            relaxed.latency_p(95)
+        );
+    }
+
     #[test]
     fn streaming_modes_respond_faster_than_relaxed() {
         let script = fixture();
@@ -354,11 +408,17 @@ mod tests {
     /// `cargo test -p livecap-core --lib cadence_table -- --nocapture`.
     #[test]
     fn cadence_table() {
+        let bare = unpunctuated(CLAUSES);
+        let bare_refs: Vec<&str> = bare.iter().map(|s| s.as_str()).collect();
         for (label, script) in [
             ("continuous speech (no pause)", fixture()),
             (
                 "natural speech (pauses)",
                 natural_speech_script(CLAUSES, 1_200),
+            ),
+            (
+                "continuous + UNPUNCTUATED (only Live helps here)",
+                continuous_speech_script(&bare_refs, 1_200),
             ),
         ] {
             println!("\n=== {label} ===");

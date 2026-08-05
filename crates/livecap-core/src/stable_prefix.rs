@@ -139,9 +139,14 @@ pub struct StablePrefixTracker {
     previous: String,
     /// Words already released as units — the never-translate-twice watermark.
     released_words: usize,
-    /// Settled word count at the last change, with when it changed (Live dwell).
-    settled_words: usize,
-    settled_since_ms: u64,
+    /// When settled-but-unreleased text FIRST appeared, for the Live dwell.
+    ///
+    /// Deliberately not "when settled text last changed": during continuous
+    /// speech the settled prefix grows on every partial, so a last-changed timer
+    /// resets forever and Live never fires — which is precisely the case Live
+    /// exists for. Measuring how long text has been WAITING to be released is
+    /// what makes the dwell fire mid-speech.
+    unreleased_since_ms: Option<u64>,
 }
 
 impl Default for StablePrefixTracker {
@@ -156,8 +161,7 @@ impl StablePrefixTracker {
             mode,
             previous: String::new(),
             released_words: 0,
-            settled_words: 0,
-            settled_since_ms: 0,
+            unreleased_since_ms: None,
         }
     }
 
@@ -166,8 +170,7 @@ impl StablePrefixTracker {
     pub fn reset(&mut self) {
         self.previous.clear();
         self.released_words = 0;
-        self.settled_words = 0;
-        self.settled_since_ms = 0;
+        self.unreleased_since_ms = None;
     }
 
     /// Feed a partial. Returns a unit when one is due under the current mode.
@@ -184,24 +187,24 @@ impl StablePrefixTracker {
         let settled = agreed_prefix_words(&self.previous, text);
         self.previous = text.to_string();
 
-        // Dwell timing keys on the SETTLED count changing, not on partials
-        // arriving: a recognizer that keeps revising has not stopped growing.
-        if settled != self.settled_words {
-            self.settled_words = settled;
-            self.settled_since_ms = now_ms;
-        }
-
         if settled <= self.released_words {
-            return None; // nothing new has settled since the last release
+            // Nothing new has settled; no text is waiting.
+            self.unreleased_since_ms = None;
+            return None;
         }
+        // Text is waiting to be released — start the clock at the moment it
+        // first became available, and let it RUN even as more text settles.
+        self.unreleased_since_ms.get_or_insert(now_ms);
 
         // Prefer a clause boundary inside the settled region.
         let boundary = last_clause_boundary(text, settled).filter(|end| *end > self.released_words);
         let (end, reason) = match boundary {
             Some(end) => (end, UnitReason::Clause),
             None if self.mode == TranslationMode::Live => {
-                // Live also releases text that has simply stopped moving.
-                if now_ms.saturating_sub(self.settled_since_ms) < LIVE_DWELL_MS {
+                // Live also releases text that has been waiting long enough,
+                // even though the speaker never punctuated it.
+                let waiting_ms = now_ms.saturating_sub(self.unreleased_since_ms.unwrap_or(now_ms));
+                if waiting_ms < LIVE_DWELL_MS {
                     return None;
                 }
                 (settled, UnitReason::Dwell)
@@ -215,9 +218,8 @@ impl StablePrefixTracker {
 
         let unit = words_between(text, self.released_words, end);
         self.released_words = end;
-        // A released unit is settled by definition; restart the dwell window so
-        // the next release needs its own quiet period.
-        self.settled_since_ms = now_ms;
+        // Anything still settled-but-unreleased starts a fresh wait from now.
+        self.unreleased_since_ms = if settled > end { Some(now_ms) } else { None };
         Some(TranslationUnit { text: unit, reason })
     }
 
