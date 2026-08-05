@@ -207,6 +207,69 @@ pub fn continuous_speech_script(clauses: &[&str], partial_interval_ms: u64) -> V
     steps
 }
 
+/// Build a realistic mixed meeting: mostly natural speech with pauses, plus a
+/// few stretches where the speaker runs on without pausing.
+///
+/// 100% continuous speech is a synthetic worst case nobody actually talks in,
+/// and 100% natural speech understates the problem — a real meeting is mostly
+/// the latter with occasional bursts of the former. `monologue_runs` gives the
+/// clause indices where a run STARTS and how many clauses it swallows, so the
+/// composition of the fixture is explicit rather than buried in the shape of
+/// the data.
+pub fn mixed_meeting_script(
+    clauses: &[&str],
+    partial_interval_ms: u64,
+    monologue_runs: &[(usize, usize)],
+) -> Vec<ScriptStep> {
+    let mut steps = Vec::new();
+    let mut at_ms = 0u64;
+    let mut index = 0usize;
+    while index < clauses.len() {
+        // Does a run start here, and how many clauses does it cover?
+        let run_len = monologue_runs
+            .iter()
+            .find(|(start, _)| *start == index)
+            .map(|(_, len)| (*len).max(1))
+            .unwrap_or(1)
+            .min(clauses.len() - index);
+
+        let mut spoken = String::new();
+        for clause in &clauses[index..index + run_len] {
+            for word in clause.split_whitespace() {
+                if !spoken.is_empty() {
+                    spoken.push(' ');
+                }
+                spoken.push_str(word);
+                at_ms += partial_interval_ms / 4;
+                steps.push(ScriptStep {
+                    at_ms,
+                    text: spoken.clone(),
+                    finalizes: false,
+                });
+            }
+            if run_len > 1 {
+                // Mid-run clause boundary: a partial lands, but no pause, so the
+                // utterance keeps growing.
+                steps.push(ScriptStep {
+                    at_ms: at_ms + partial_interval_ms,
+                    text: spoken.clone(),
+                    finalizes: false,
+                });
+                at_ms += partial_interval_ms;
+            }
+        }
+        // The run ends with a pause, so this utterance finalizes.
+        at_ms += 800;
+        steps.push(ScriptStep {
+            at_ms,
+            text: spoken,
+            finalizes: true,
+        });
+        index += run_len;
+    }
+    steps
+}
+
 /// Strip sentence-final punctuation from a clause set.
 ///
 /// This is what actually separates Balanced from Live. Balanced only releases
@@ -269,6 +332,22 @@ mod tests {
 
     /// One clause set, used by BOTH fixtures so the two speech patterns are
     /// compared on identical text.
+    /// A 12-clause meeting, used for the mixed fixture.
+    const MEETING: &[&str] = &[
+        "we are committed to the dual mandate of maximum employment and stable prices.",
+        "inflation has moderated over the past year but remains above our longer run goal.",
+        "the committee will remain data dependent as it assesses incoming information.",
+        "we will adjust the stance of policy as appropriate to achieve our objectives.",
+        "labor market conditions have come into better balance over recent months.",
+        "consumer spending has continued to grow at a solid pace this quarter.",
+        "housing activity remains subdued relative to its pre pandemic level.",
+        "business investment in equipment has picked up modestly since the spring.",
+        "financial conditions have tightened somewhat over the intermeeting period.",
+        "the path forward is not on a preset course and depends on the data.",
+        "we are prepared to maintain the current stance for as long as needed.",
+        "let me turn now to the outlook for growth over the coming year.",
+    ];
+
     const CLAUSES: &[&str] = &[
         "we are committed to the dual mandate of maximum employment and stable prices.",
         "inflation has moderated over the past year but remains above our longer run goal.",
@@ -320,6 +399,37 @@ mod tests {
     /// The reason Live exists as a separate step. On speech the recognizer
     /// never punctuates, Balanced has no boundary to cut at and degrades to
     /// Relaxed — the viewer waits again. Live's dwell keeps following.
+    /// The PO's decision fixture: a realistic meeting rather than a synthetic
+    /// worst case. Mostly paused speech with a couple of run-on stretches, which
+    /// is how people actually talk.
+    #[test]
+    fn mixed_meeting_multipliers() {
+        let script = mixed_meeting_script(MEETING, 1_200, &[(2, 2), (7, 2)]);
+        let relaxed = measure(TranslationMode::Relaxed, &script);
+        let balanced = measure(TranslationMode::Balanced, &script);
+        let live = measure(TranslationMode::Live, &script);
+        println!(
+            "\nMIXED meeting (12 clauses: 8 paused, two 2-clause monologues)\n  Relaxed {} turns  p95 {} ms\n  Balanced {} turns ({:.2}x)  p95 {} ms\n  Live {} turns ({:.2}x)  p95 {} ms\n",
+            relaxed.turns,
+            relaxed.latency_p(95),
+            balanced.turns,
+            balanced.turn_multiplier(&relaxed),
+            balanced.latency_p(95),
+            live.turns,
+            live.turn_multiplier(&relaxed),
+            live.latency_p(95),
+        );
+        // Every mode still translates each word exactly once.
+        let words: usize = MEETING.iter().map(|c| c.split_whitespace().count()).sum();
+        for m in [&relaxed, &balanced, &live] {
+            assert_eq!(
+                m.words, words,
+                "{:?} released {} of {words} words",
+                m.mode, m.words
+            );
+        }
+    }
+
     #[test]
     fn live_is_the_only_mode_that_helps_unpunctuated_speech() {
         let bare = unpunctuated(CLAUSES);
@@ -419,6 +529,10 @@ mod tests {
             (
                 "continuous + UNPUNCTUATED (only Live helps here)",
                 continuous_speech_script(&bare_refs, 1_200),
+            ),
+            (
+                "MIXED meeting: 12 clauses, 8 paused + two 2-clause monologues",
+                mixed_meeting_script(MEETING, 1_200, &[(2, 2), (7, 2)]),
             ),
         ] {
             println!("\n=== {label} ===");
