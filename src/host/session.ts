@@ -111,6 +111,13 @@ const WATCHDOG_TICK_MS = 15_000;
  *  ample to catch a draining allowance without polling a rate-limit endpoint
  *  at caption cadence. */
 const HEADROOM_REFRESH_MS = 60_000;
+/** Max translation units in flight per channel (#195 backpressure). Beyond this
+ *  a unit is dropped rather than queued: its text is not lost — the finalize
+ *  path translates everything past the released watermark — so the span rides
+ *  the finalize turn instead. Without a cap a fast speaker could run the turn
+ *  count away, which is the cost guard the ticket requires. Two lets a unit be
+ *  in flight while the next settles, without building a backlog. */
+const MAX_UNITS_IN_FLIGHT_PER_CHANNEL = 2;
 const DRAIN_TIMEOUT_MS = 20_000;
 /** Liveness heartbeat for the in-progress recording (#69): the writer touches
  *  its working file this often so a concurrent session start sees it as ALIVE. */
@@ -292,6 +299,12 @@ export class HostSession {
         return;
       case "translationUnit":
         this.onTranslationUnit(message);
+        return;
+      case "captionCleared":
+        // #195/#62: the utterance was cancelled as speaker bleed after it had
+        // already streamed units. Drop them, or they would attach to whatever
+        // this channel says next and corrupt that line.
+        this.assembler.dropChannel(message.channel);
         return;
       case "stop":
         await this.stop();
@@ -581,10 +594,27 @@ export class HostSession {
         onSnapshot: (items, done) => this.emit({ type: "translation", items, done }),
         onBatchDone: (results) => this.recordBatch(results),
         onFailed: (ids, detail) => {
-          this.emit({ type: "translationFailed", ids, detail });
-          // Keep the archive complete: sources land even when translation fails;
-          // a later retranslate fills the target in place.
-          this.recordBatch(ids.map((id) => ({ id, source: this.metaById.get(id)?.text ?? "", text: "" })));
+          // #195: a failed UNIT is not a failed caption. Routing it through
+          // recordBatch would record an empty translation for that span, and
+          // assembly would then silently drop the words the speaker actually
+          // said. Mark it failed instead — the assembler folds its source back
+          // into the tail so the finalize turn re-translates it.
+          const unitFailures = ids.filter((id) => this.unitIds.has(id));
+          for (const id of unitFailures) {
+            this.unitIds.delete(id);
+            this.assembler.noteUnitFailed(id);
+          }
+          const captionFailures = ids.filter((id) => !unitFailures.includes(id));
+          if (captionFailures.length > 0) {
+            this.emit({ type: "translationFailed", ids: captionFailures, detail });
+            // Keep the archive complete: sources land even when translation fails;
+            // a later retranslate fills the target in place.
+            this.recordBatch(
+              captionFailures.map((id) => ({ id, source: this.metaById.get(id)?.text ?? "", text: "" })),
+            );
+          }
+          // A failed unit may have been the last thing a finalized line waited on.
+          this.flushAssembled();
         },
       },
     });
@@ -715,6 +745,13 @@ export class HostSession {
    *  recorded as a unit so its result can never become an archive line. */
   private onTranslationUnit(message: Extract<HostInbound, { type: "translationUnit" }>): void {
     if (!this.runner || this.stopping) return;
+    // #195 backpressure: cap the units in flight per channel. At the cap the
+    // unit is DROPPED rather than queued — its text is not lost, because the
+    // finalize path translates everything past the released watermark, so the
+    // span simply rides the finalize turn instead. Queueing past the cap would
+    // let a fast speaker run the turn count away, which is the cost guard the
+    // ticket requires.
+    if (this.assembler.inFlightCount(message.channel) >= MAX_UNITS_IN_FLIGHT_PER_CHANNEL) return;
     this.unitIds.add(message.id);
     this.assembler.noteUnit(message.channel, message.id, message.text);
     this.watchdog?.activity(Date.now());

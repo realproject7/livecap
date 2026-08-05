@@ -132,6 +132,11 @@ export type HostInbound =
    *  only (#195). Distinct from "caption" so the archive/transcript path is
    *  untouched: this never becomes an archive line, and the webview ignores it. */
   | { type: "translationUnit"; id: number; channel: Channel; text: string }
+  /** The channel's in-flight utterance was cancelled without finalizing (#62):
+   *  a mic utterance suppressed as speaker bleed (#56). Any translation units
+   *  already released for it must be discarded, or they attach to the next
+   *  utterance (#195). Carries no text. */
+  | { type: "captionCleared"; channel: Channel }
   | { type: "quickTranslate"; id: number; text: string }
   | { type: "reply"; id: number; intent: ReplyIntentWire }
   /** Targeted analysis of ONE caption block (#80): the host resolves the target

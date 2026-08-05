@@ -49,6 +49,20 @@ export class StreamingAssembler {
     { channel: string; units: PendingUnit[]; tailText: string; tailTarget: string | null }
   >();
 
+  /**
+   * Units dispatched for this channel's current utterance that are still
+   * awaiting a result (#195 backpressure).
+   *
+   * The count lives here rather than in the caller because this class already
+   * owns unit lifecycle — a parallel tally in the session would be a second
+   * source of truth that can drift, and the drift would be invisible until a
+   * channel silently stopped streaming.
+   */
+  inFlightCount(channel: string): number {
+    const list = this.pending.get(channel) ?? [];
+    return list.filter((u) => u.target === null && !u.failed).length;
+  }
+
   /** Record a unit dispatched for early translation. */
   noteUnit(channel: string, id: number, source: string): void {
     const list = this.pending.get(channel) ?? [];

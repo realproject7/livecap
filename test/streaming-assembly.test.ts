@@ -106,6 +106,47 @@ describe("StreamingAssembler — pieces that are late or missing", () => {
   });
 });
 
+// #195 backpressure. RE1's blocker was that nothing capped units per channel;
+// the count lives here rather than in the session so it is testable and cannot
+// drift from the unit lifecycle it describes.
+describe("StreamingAssembler — in-flight accounting", () => {
+  it("counts only units still awaiting a result", () => {
+    const a = new StreamingAssembler();
+    expect(a.inFlightCount(MIC)).toBe(0);
+    a.noteUnit(MIC, 1, "first clause.");
+    a.noteUnit(MIC, 2, "second clause.");
+    expect(a.inFlightCount(MIC)).toBe(2);
+
+    a.noteUnitResult(1, "첫 번째.");
+    expect(a.inFlightCount(MIC)).toBe(1);
+    // A FAILED unit is no longer in flight either — otherwise a channel whose
+    // units keep failing would wedge at the cap and stop streaming silently.
+    a.noteUnitFailed(2);
+    expect(a.inFlightCount(MIC)).toBe(0);
+  });
+
+  it("counts per channel, so one channel cannot starve the other", () => {
+    const a = new StreamingAssembler();
+    a.noteUnit("mic", 1, "mic clause.");
+    a.noteUnit("mic", 2, "mic clause two.");
+    a.noteUnit("system", 3, "system clause.");
+    expect(a.inFlightCount("mic")).toBe(2);
+    expect(a.inFlightCount("system")).toBe(1);
+  });
+
+  it("clears the count when the utterance finalizes or is cancelled", () => {
+    const a = new StreamingAssembler();
+    a.noteUnit(MIC, 1, "first clause.");
+    a.onFinalized(MIC, 100, "first clause. and more", 2);
+    expect(a.inFlightCount(MIC)).toBe(0);
+
+    a.noteUnit(MIC, 2, "next clause.");
+    expect(a.inFlightCount(MIC)).toBe(1);
+    a.dropChannel(MIC);
+    expect(a.inFlightCount(MIC)).toBe(0);
+  });
+});
+
 describe("StreamingAssembler — channel and utterance boundaries", () => {
   it("keeps channels separate", () => {
     const a = new StreamingAssembler();

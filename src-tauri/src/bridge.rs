@@ -108,7 +108,14 @@ impl BridgeCaption {
     /// only finalized sentences enter the translation queue).
     pub fn host_message(&self) -> Option<serde_json::Value> {
         match self {
-            BridgeCaption::Partial { .. } | BridgeCaption::Cleared { .. } => None,
+            BridgeCaption::Partial { .. } => None,
+            // #195/#62: the host must learn about a cancelled utterance so it
+            // can discard any translation units already released for it. Before
+            // #195 nothing downstream cared, so this was dropped here.
+            BridgeCaption::Cleared { channel } => Some(serde_json::json!({
+                "type": "captionCleared",
+                "channel": channel,
+            })),
             // #195: translation-only. Distinct message type from "caption" so
             // the archive/transcript path is untouched by it.
             BridgeCaption::TranslationUnit { id, channel, text } => Some(serde_json::json!({
