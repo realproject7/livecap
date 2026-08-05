@@ -9,6 +9,8 @@ import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import {
   applyCaptionSize,
   CLAUDE_MODELS,
+  sanitizedTranslationMode,
+  TRANSLATION_MODES,
   claudeModelLabel,
   gaugeAmountLabel,
   nextResetLabel,
@@ -65,6 +67,12 @@ export function createSettingsSheet(options: SettingsSheetOptions): SettingsShee
         m.note ? ` · ${m.note}` : ""
       }</button>`,
   ).join("");
+  // #195: translation cadence. The note carries the MEASURED cost per speech
+  // condition — the multiplier genuinely depends on how the speaker talks, so a
+  // single number would be wrong in one direction or the other.
+  const cadenceChoices = TRANSLATION_MODES.map(
+    (m) => `<button class="sh-seg-btn" data-cadence="${m.value}">${m.label} · ${m.note}</button>`,
+  ).join("");
   // #203: Claude model picker — same segmented control as the engine and STT
   // pickers. Nothing downloads; the note carries the plan-budget trade-off.
   const claudeChoices = CLAUDE_MODELS.map(
@@ -101,6 +109,13 @@ export function createSettingsSheet(options: SettingsSheetOptions): SettingsShee
         falls back to the free local model automatically. A heavier model spends
         that budget faster — nothing extra is downloaded, and the fall-back
         switch below still applies. Applies at the next session start.
+      </div>
+      <div class="sh-section">Translation speed</div>
+      <div class="sh-seg" role="radiogroup" aria-label="Translation speed">${cadenceChoices}</div>
+      <div class="sh-engine-note t-meta">
+        A faster step sends more translation requests, so it reaches the
+        fall-back threshold sooner — the "fall back to Local" switch below still
+        catches it. Applies at the next session start.
       </div>
       <div class="sh-gauge">
         <span class="sh-gauge-label t-meta">Usage this month</span>
@@ -189,6 +204,7 @@ export function createSettingsSheet(options: SettingsSheetOptions): SettingsShee
   const engineCliBtn = el<HTMLButtonElement>(host, "#sh-engine-cli");
   const engineCodexBtn = el<HTMLButtonElement>(host, "#sh-engine-codex");
   const codexNote = el<HTMLDivElement>(host, "#sh-codex-note");
+  const cadenceButtons = Array.from(host.querySelectorAll<HTMLButtonElement>(".sh-seg-btn[data-cadence]"));
   const sizeButtons = Array.from(host.querySelectorAll<HTMLButtonElement>(".sh-size"));
   const capsuleButtons = Array.from(host.querySelectorAll<HTMLButtonElement>(".sh-capsule"));
   const gaugeFill = el<HTMLDivElement>(host, "#sh-gauge-fill");
@@ -242,6 +258,11 @@ export function createSettingsSheet(options: SettingsSheetOptions): SettingsShee
     engineCliBtn.textContent = `Claude CLI · ${claudeModelLabel(claudeModel)}`;
     for (const btn of claudeButtons) {
       btn.setAttribute("aria-pressed", String(btn.dataset.claude === claudeModel));
+    }
+    // #195: cadence; an unknown persisted value shows Relaxed, matching the clamp.
+    const cadence = sanitizedTranslationMode(s.translationMode);
+    for (const btn of cadenceButtons) {
+      btn.setAttribute("aria-pressed", String(btn.dataset.cadence === cadence));
     }
     for (const btn of sizeButtons) {
       btn.setAttribute("aria-pressed", String(btn.dataset.size === s.captionSize));
@@ -325,6 +346,10 @@ export function createSettingsSheet(options: SettingsSheetOptions): SettingsShee
   // #110: whisper model; downloads (with progress) at the next session start.
   for (const btn of sttButtons) {
     btn.addEventListener("click", () => save({ sttModel: btn.dataset.stt as string }));
+  }
+  // #195: translation cadence; applies at the next session start.
+  for (const btn of cadenceButtons) {
+    btn.addEventListener("click", () => save({ translationMode: btn.dataset.cadence as string }));
   }
   // #203: Claude model; reaches `--model` at the next session start.
   for (const btn of claudeButtons) {
