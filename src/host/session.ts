@@ -105,6 +105,11 @@ const SUMMARY_TICK_MS = 5_000;
  *  drift. */
 const EXTRAS_CONTEXT_LINES = 10;
 const WATCHDOG_TICK_MS = 15_000;
+/** How often the Codex tier re-reads its quota (#204). A weekly window moves
+ *  slowly, and each read is a round-trip to the app-server, so a minute is
+ *  ample to catch a draining allowance without polling a rate-limit endpoint
+ *  at caption cadence. */
+const HEADROOM_REFRESH_MS = 60_000;
 const DRAIN_TIMEOUT_MS = 20_000;
 /** Liveness heartbeat for the in-progress recording (#69): the writer touches
  *  its working file this often so a concurrent session start sees it as ALIVE. */
@@ -588,6 +593,17 @@ export class HostSession {
     // session's own recording stays warm via the heartbeat above, so it is never
     // adopted by these passes.
     this.intervals.push(setInterval(() => this.runAdoptionPass(), RECORDING_STALE_AFTER_MS));
+    // #204: keep the quota reading fresh on the Codex tier. Primed once at
+    // engine construction, but a meeting runs for hours — without this the
+    // safety net would decide on the reading taken at session start and never
+    // notice the allowance draining. Only ticks when a headroom source exists
+    // (no-op on the Claude and local tiers), and a failed read is already
+    // handled as unknown-and-non-switching by the seam rather than thrown.
+    if (this.codexEngine) {
+      this.intervals.push(
+        setInterval(() => void accountant.refreshHeadroom(), HEADROOM_REFRESH_MS),
+      );
+    }
 
     this.emit({ type: "gauge", gauge: this.withExtrasBudget(accountant.gauge()) });
     this.emit({ type: "ready", engine: engineLabel });
