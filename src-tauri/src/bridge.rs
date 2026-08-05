@@ -221,6 +221,7 @@ mod tests {
                 // Inverted span (end < start) must not underflow.
                 start_ms: 900,
                 end_ms: 100,
+                pretranslated_words: 0,
             },
         };
         let mapped = BridgeCaption::from_event(event, || 1, 0).unwrap();

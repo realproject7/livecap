@@ -136,12 +136,16 @@ async fn wav_fixture_yields_finalized_text() {
             CaptionKind::PartialDropped => println!("partial dropped"),
             // #141 RTF notice — not a caption; ignore in this fixture.
             CaptionKind::FallingBehind => println!("falling behind"),
+            // #195 translation-only unit; never a caption, so this fixture just
+            // notes it. Relaxed (the default) never emits one.
+            CaptionKind::TranslationUnit { text } => println!("unit: {text}"),
             CaptionKind::Finalized {
                 text,
                 lang,
                 confidence,
                 start_ms,
                 end_ms,
+                pretranslated_words: _,
             } => {
                 println!("finalized [{lang} conf={confidence:.2} {start_ms}..{end_ms}ms]: {text}");
                 finalized.push((text, lang, confidence, start_ms, end_ms));
