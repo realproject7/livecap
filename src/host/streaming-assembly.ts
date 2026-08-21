@@ -66,6 +66,25 @@ export interface FailureRouting {
 }
 
 /**
+ * Whether a post-finalize unit retry can be dispatched at all (#214).
+ *
+ * A retry needs a live runner and a session that is not stopping. `HostSession`
+ * used to make this judgement inline and act on only half of it — it skipped the
+ * dispatch and left the unit owed — and that half-decision IS the defect this
+ * fixes. It is a named function here so the rule is exercised by tests rather
+ * than living only in a host the suite cannot construct (`start()` spawns real
+ * CLI and llama-server children); the same reason `routeFailures` itself was
+ * extracted, and the pattern #139 and #174 already follow.
+ *
+ * The runner is taken as an opaque reference: this decides nothing about what a
+ * runner *is*, only whether one is there. Typing it apart from the boolean also
+ * means a call site cannot transpose the two arguments without a type error.
+ */
+export function canDispatchRetry(runner: object | null | undefined, stopping: boolean): boolean {
+  return runner !== null && runner !== undefined && !stopping;
+}
+
+/**
  * Split a failed batch into unit failures and caption failures (#195).
  *
  * A failed UNIT is not a failed caption: routing one through the caption path
@@ -74,8 +93,7 @@ export interface FailureRouting {
  * headless harness — so this partition, and the retries it produces, are
  * assertable rather than taken on trust.
  *
- * `canRetry` is false when the caller has no way to dispatch a retry turn — the
- * session is stopping, or the runner is gone. The decision lives here rather
+ * `canRetry` comes from {@link canDispatchRetry}. The decision lives here rather
  * than at the call site because the two halves of it are inseparable (#214):
  * declining to dispatch a retry means settling the unit, and a call site that
  * did only the first half would leave the unit owed forever. Being a parameter,
@@ -238,11 +256,11 @@ export class StreamingAssembler {
    * `abandoned` already means "this will never resolve", and a retry the caller
    * declines to dispatch is exactly that: no turn is outstanding for the span,
    * so nothing can ever fill it. Without this the unit stays `retried` with a
-   * null target, {@link isReady} never turns true, and the line waits for the
-   * drain deadline and leaves through the force-assemble fallback. The span
-   * itself is gone either way — no turn ran, so there is no target to recover.
-   * What this restores is the line completing by the normal path, from the
-   * pieces that did arrive.
+   * null target, {@link isReady} never turns true, and the line is emitted by
+   * the stop-time force-assemble fallback instead. The span itself is gone
+   * either way — no turn ran, so there is no target to recover. What this
+   * restores is the line completing by the normal path, from the pieces that
+   * did arrive.
    *
    * Only a unit carried by a finalized utterance can be in this state: a unit
    * that is still pending folds into its tail and is never offered a retry.

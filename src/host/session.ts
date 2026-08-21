@@ -49,7 +49,7 @@ import { toFinalizedRecords } from "./metrics-records.ts";
 import { LazyLocalEngine } from "./local-tier.ts";
 import { SILENCE_THRESHOLD_MS, SilenceWatchdog } from "./silence.ts";
 import { resolveStartConfig } from "./start-config.ts";
-import { routeFailures, StreamingAssembler } from "./streaming-assembly.ts";
+import { canDispatchRetry, routeFailures, StreamingAssembler } from "./streaming-assembly.ts";
 import type { ResolvedStartConfig } from "./start-config.ts";
 import { withTimeout } from "./timeout.ts";
 import { TranslationRunner } from "./translation-runner.ts";
@@ -594,21 +594,20 @@ export class HostSession {
           // into the tail so the finalize turn re-translates it.
           // Set.delete reports whether the id WAS a unit, so this classifies and
           // clears in one step — either way a unit id is consumed exactly once.
-          // #214: a retry needs a live runner and a session that is not
-          // stopping. When it cannot be dispatched, the skip is handed to
+          // #214: when a retry cannot be dispatched, the skip is handed to
           // `routeFailures` rather than taken here, so the unit is SETTLED
           // instead of left owed — a unit stuck `retried` with no target never
-          // becomes ready, and its line then waits for the drain deadline and
-          // leaves through the force-assemble fallback. Settling it recovers no
-          // words; it lets the line assemble normally from what did arrive.
-          const runner = this.stopping ? null : this.runner;
+          // becomes ready, and its line is then emitted by the stop-time
+          // force-assemble fallback. Settling it recovers no words; it lets the
+          // line assemble normally from the pieces that did arrive.
+          const runner = this.runner;
           const routing = routeFailures(
             ids,
             this.assembler,
             (id) => this.unitIds.delete(id),
-            runner !== null,
+            canDispatchRetry(runner, this.stopping),
           );
-          // `retries` is empty unless a runner was available, so this test is
+          // `retries` is empty unless a retry was dispatchable, so this test is
           // narrowing, not a second decision.
           if (runner) {
             for (const retry of routing.retries) {
