@@ -73,11 +73,19 @@ export interface FailureRouting {
  * the speaker actually said. Extracted from `HostSession` — which has no
  * headless harness — so this partition, and the retries it produces, are
  * assertable rather than taken on trust.
+ *
+ * `canRetry` is false when the caller has no way to dispatch a retry turn — the
+ * session is stopping, or the runner is gone. The decision lives here rather
+ * than at the call site because the two halves of it are inseparable (#214):
+ * declining to dispatch a retry means settling the unit, and a call site that
+ * did only the first half would leave the unit owed forever. Being a parameter,
+ * the skip is assertable in this module instead of only inside `HostSession`.
  */
 export function routeFailures(
   ids: number[],
   assembler: StreamingAssembler,
   isUnit: (id: number) => boolean,
+  canRetry: boolean,
 ): FailureRouting {
   const routing: FailureRouting = { retries: [], captionFailures: [] };
   for (const id of ids) {
@@ -86,7 +94,12 @@ export function routeFailures(
       continue;
     }
     const retry = assembler.noteUnitFailed(id);
-    if (retry) routing.retries.push({ id, text: retry.source });
+    if (!retry) continue;
+    if (!canRetry) {
+      assembler.abandonUnit(id);
+      continue;
+    }
+    routing.retries.push({ id, text: retry.source });
   }
   return routing;
 }
@@ -217,6 +230,32 @@ export class StreamingAssembler {
       }
     }
     return null;
+  }
+
+  /**
+   * Settle a unit whose retry will never be dispatched (#214).
+   *
+   * `abandoned` already means "this will never resolve", and a retry the caller
+   * declines to dispatch is exactly that: no turn is outstanding for the span,
+   * so nothing can ever fill it. Without this the unit stays `retried` with a
+   * null target, {@link isReady} never turns true, and the line waits for the
+   * drain deadline and leaves through the force-assemble fallback. The span
+   * itself is gone either way — no turn ran, so there is no target to recover.
+   * What this restores is the line completing by the normal path, from the
+   * pieces that did arrive.
+   *
+   * Only a unit carried by a finalized utterance can be in this state: a unit
+   * that is still pending folds into its tail and is never offered a retry.
+   */
+  abandonUnit(id: number): void {
+    for (const entry of this.awaiting.values()) {
+      for (const unit of entry.units) {
+        if (unit.id === id) {
+          unit.abandoned = true;
+          return;
+        }
+      }
+    }
   }
 
   /**

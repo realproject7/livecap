@@ -594,16 +594,32 @@ export class HostSession {
           // into the tail so the finalize turn re-translates it.
           // Set.delete reports whether the id WAS a unit, so this classifies and
           // clears in one step — either way a unit id is consumed exactly once.
-          const routing = routeFailures(ids, this.assembler, (id) => this.unitIds.delete(id));
-          for (const retry of routing.retries) {
-            // A unit that failed AFTER its utterance finalized cannot ride the
-            // tail — that turn is already out. Re-dispatch the span itself,
-            // under the same id so its result still lands as a unit result.
-            // Safe from inside onFailed: the runner routes a retry of a
-            // just-failed id past its own in-flight dedup (#195).
-            if (!this.runner || this.stopping) break;
-            this.unitIds.add(retry.id);
-            this.runner.enqueue(retry);
+          // #214: a retry needs a live runner and a session that is not
+          // stopping. When it cannot be dispatched, the skip is handed to
+          // `routeFailures` rather than taken here, so the unit is SETTLED
+          // instead of left owed — a unit stuck `retried` with no target never
+          // becomes ready, and its line then waits for the drain deadline and
+          // leaves through the force-assemble fallback. Settling it recovers no
+          // words; it lets the line assemble normally from what did arrive.
+          const runner = this.stopping ? null : this.runner;
+          const routing = routeFailures(
+            ids,
+            this.assembler,
+            (id) => this.unitIds.delete(id),
+            runner !== null,
+          );
+          // `retries` is empty unless a runner was available, so this test is
+          // narrowing, not a second decision.
+          if (runner) {
+            for (const retry of routing.retries) {
+              // A unit that failed AFTER its utterance finalized cannot ride the
+              // tail — that turn is already out. Re-dispatch the span itself,
+              // under the same id so its result still lands as a unit result.
+              // Safe from inside onFailed: the runner routes a retry of a
+              // just-failed id past its own in-flight dedup (#195).
+              this.unitIds.add(retry.id);
+              runner.enqueue(retry);
+            }
           }
           if (routing.captionFailures.length > 0) {
             this.emit({ type: "translationFailed", ids: routing.captionFailures, detail });
