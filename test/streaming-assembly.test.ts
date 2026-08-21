@@ -487,7 +487,10 @@ describe("routeFailures — when a retry turn cannot run", () => {
     const routing = routeFailures([1, 2], a, isUnit([1, 2]), { dispatch: null, stopping: true });
 
     expect(routing.retries).toEqual([]);
-    // Both settled: nothing arrived, so there is no line to write at all.
+    // Both settled, so normal assembly completes rather than waiting. No target
+    // piece arrived, so what it completes to is an empty target — the caller
+    // archives the line with its full source, exactly as it does for a failed
+    // caption, and retranslate can fill the target in later. Nothing is dropped.
     expect(a.tryAssemble(100)).toBe("");
   });
 });
