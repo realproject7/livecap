@@ -1,11 +1,14 @@
 import { describe, expect, it } from "vitest";
 
 import {
-  canDispatchRetry,
   MAX_UNITS_IN_FLIGHT_PER_CHANNEL,
+  type RetryDispatch,
   routeFailures,
   StreamingAssembler,
 } from "../src/host/streaming-assembly";
+
+/** One dispatched retry turn, as the runner receives it. */
+type Turn = { id: number; text: string };
 
 // #195: a streamed utterance is translated in pieces, but the archive stores ONE
 // line per utterance (#137's 1:1 mapping). These cover the ordering that puts
@@ -342,17 +345,22 @@ describe("StreamingAssembler — channel and utterance boundaries", () => {
     expect(plan.ready).toBe(false);
   });
 });
-
 // RE2's point on `19b66f4`: the retry mechanism was proven and the WIRING that
 // reaches it was not — and the wiring is where every defect on this PR has been.
 // This is the decision that wiring makes, extracted so it is assertable at all.
 describe("routeFailures — units vs captions", () => {
   const isUnit = (units: number[]) => (id: number) => units.includes(id);
 
+  /** Stands in for the runner: records the retry turns actually dispatched. */
+  const dispatcher = (): { turns: Turn[]; retry: RetryDispatch } => {
+    const turns: Turn[] = [];
+    return { turns, retry: { dispatch: (turn: Turn) => void turns.push(turn), stopping: false } };
+  };
+
   it("keeps a failed unit out of the caption failure path", () => {
     const a = new StreamingAssembler();
     a.noteUnit(MIC, 1, "first clause.");
-    const routing = routeFailures([1], a, isUnit([1]), true);
+    const routing = routeFailures([1], a, isUnit([1]), dispatcher().retry);
     // A unit routed as a caption records an empty translation for that span.
     expect(routing.captionFailures).toEqual([]);
     // Still pending, so it folds into the tail rather than needing its own turn.
@@ -362,117 +370,124 @@ describe("routeFailures — units vs captions", () => {
     );
   });
 
-  it("produces exactly one retry for a unit that failed after finalize", () => {
+  it("dispatches exactly one retry for a unit that failed after finalize", () => {
     const a = new StreamingAssembler();
     a.noteUnit(MIC, 1, "first clause.");
     a.onFinalized(MIC, 100, "first clause. and more words", 2);
+
     // While the session is live the first failure still costs one retry turn,
-    // dispatched under the unit's OWN id so its result lands as a unit result.
-    expect(routeFailures([1], a, isUnit([1]), true).retries).toEqual([
+    // sent under the unit's OWN id so its result lands as a unit result.
+    const first = dispatcher();
+    expect(routeFailures([1], a, isUnit([1]), first.retry).retries).toEqual([
       { id: 1, text: "first clause." },
     ]);
-    // And only one: the retry's own failure abandons the unit (#195).
-    expect(routeFailures([1], a, isUnit([1]), true).retries).toEqual([]);
+    expect(first.turns).toEqual([{ id: 1, text: "first clause." }]);
+
+    // And only one: the retry's own failure abandons the unit (#195), with
+    // nothing further dispatched.
+    const second = dispatcher();
+    expect(routeFailures([1], a, isUnit([1]), second.retry).retries).toEqual([]);
+    expect(second.turns).toEqual([]);
   });
 
   it("passes caption ids straight through", () => {
     const a = new StreamingAssembler();
-    expect(routeFailures([100, 101], a, isUnit([]), true).captionFailures).toEqual([100, 101]);
-  });
-
-  // #214, the defect this ticket fixes: on the stop path the caller has no way
-  // to dispatch a retry turn, so the unit used to sit `retried` with no target
-  // and the line left through the stop-time force-assemble fallback. Handing the
-  // skip to routeFailures settles the unit where the decision is made.
-  it("settles the unit instead of owing a retry it cannot dispatch", () => {
-    const a = new StreamingAssembler();
-    a.noteUnit(MIC, 1, "first clause.");
-    a.noteUnit(MIC, 2, "second clause.");
-    a.noteUnitResult(2, "두 번째.");
-    a.onFinalized(MIC, 100, "first clause. second clause. and more words", 4);
-    a.noteTailResult(100, "그리고 더");
-    // Unit 1's result has not arrived, so the line cannot assemble yet.
-    expect(a.tryAssemble(100)).toBeNull();
-
-    const routing = routeFailures([1], a, isUnit([1]), false);
-    // Nothing is asked of a caller that cannot dispatch it.
-    expect(routing.retries).toEqual([]);
-
-    // The line assembles NOW, through the normal path — forceAssemble is never
-    // called in this test.
-    const assembled = a.tryAssemble(100);
-    // Exact equality, because it is this assertion that carries the span's
-    // absence: settling the unit stops the line waiting for a target that will
-    // never arrive, it does not recover one.
-    expect(assembled).toBe("두 번째. 그리고 더");
-    // Nor is the untranslated source substituted for the missing target — that
-    // WOULD be a recovery claim, and this line never makes one.
-    expect(assembled).not.toContain("first clause.");
+    expect(routeFailures([100, 101], a, isUnit([]), dispatcher().retry).captionFailures).toEqual([
+      100, 101,
+    ]);
   });
 
   it("splits a batch that failed with both kinds in it", () => {
     const a = new StreamingAssembler();
     a.noteUnit(MIC, 1, "first clause.");
     a.onFinalized(MIC, 100, "first clause. and more words", 2);
-    const routing = routeFailures([1, 100], a, isUnit([1]), true);
+    const routing = routeFailures([1, 100], a, isUnit([1]), dispatcher().retry);
     expect(routing.retries).toEqual([{ id: 1, text: "first clause." }]);
     expect(routing.captionFailures).toEqual([100]);
   });
 });
 
 // #214: the decision `HostSession` used to make inline, and act on only half of.
-// The host itself cannot be constructed here — start() spawns real CLI and
-// llama-server children — so the rule is proven as a function, the same way #139
-// and #174 do it, and composed below exactly as the failure handler composes it.
-describe("canDispatchRetry — the stop-path decision", () => {
-  const runner = {}; // opaque to the decision: only its presence matters
+// The host cannot be constructed here — start() spawns real CLI and llama-server
+// children, the constraint session-accounting.test.ts and #139/#174 work under —
+// so the state the host holds is passed in, and every case it produces is driven
+// here rather than reasoned about.
+describe("routeFailures — when a retry turn cannot run", () => {
   const isUnit = (units: number[]) => (id: number) => units.includes(id);
 
-  it("dispatches only with a live runner and a session that is not stopping", () => {
-    expect(canDispatchRetry(runner, false)).toBe(true);
-    // Stopping: the turn would never run, so the retry must not be owed.
-    expect(canDispatchRetry(runner, true)).toBe(false);
-    // No runner: nothing to dispatch to, stopping or not.
-    expect(canDispatchRetry(null, false)).toBe(false);
-    expect(canDispatchRetry(null, true)).toBe(false);
-    // The runner field is null before start() and cleared after; undefined is
-    // treated the same rather than dispatching into nothing.
-    expect(canDispatchRetry(undefined, false)).toBe(false);
-  });
-
-  // The whole stop path, composed as `onFailed` composes it: decision → routing
-  // → assembly. Everything but the host's own call to canDispatchRetry, which is
-  // two typed arguments the compiler will not let a call site transpose.
-  it("settles the unit end to end when the session is stopping", () => {
+  /** One post-finalize unit still owed, beside a unit and a tail that arrived. */
+  const owedUnit = (): StreamingAssembler => {
     const a = new StreamingAssembler();
     a.noteUnit(MIC, 1, "first clause.");
     a.noteUnit(MIC, 2, "second clause.");
     a.noteUnitResult(2, "두 번째.");
     a.onFinalized(MIC, 100, "first clause. second clause. and more words", 4);
     a.noteTailResult(100, "그리고 더");
+    return a;
+  };
 
-    const routing = routeFailures([1], a, isUnit([1]), canDispatchRetry(runner, true));
+  it("settles the unit when the session is stopping", () => {
+    const a = owedUnit();
+    const turns: Turn[] = [];
+    const retry: RetryDispatch = {
+      dispatch: (turn: Turn) => void turns.push(turn),
+      stopping: true,
+    };
+
+    const routing = routeFailures([1], a, isUnit([1]), retry);
+
+    // The turn would never run, so it is not sent...
+    expect(turns).toEqual([]);
+    expect(routing.retries).toEqual([]);
+    // ...and the unit is settled rather than left owed, so the line assembles
+    // NOW, through the normal path. forceAssemble is never called here.
+    const assembled = a.tryAssemble(100);
+    expect(assembled).toBe("두 번째. 그리고 더");
+    // The failed span stays absent — nothing translated it — and its source is
+    // not substituted for the missing target either.
+    expect(assembled).not.toContain("first clause.");
+  });
+
+  it("settles the unit when there is nowhere to dispatch to", () => {
+    const a = owedUnit();
+    // The runner is null before start() and once it is torn down.
+    const routing = routeFailures([1], a, isUnit([1]), { dispatch: null, stopping: false });
 
     expect(routing.retries).toEqual([]);
     expect(a.tryAssemble(100)).toBe("두 번째. 그리고 더");
   });
 
-  // The same batch while the session is live: the retry IS dispatched, so the
-  // unit stays owed and the line waits for it rather than assembling short.
-  it("keeps owing the retry when the session is live", () => {
+  it("still dispatches, and still waits, while the session is live", () => {
+    const a = owedUnit();
+    const turns: Turn[] = [];
+    const retry: RetryDispatch = {
+      dispatch: (turn: Turn) => void turns.push(turn),
+      stopping: false,
+    };
+
+    const routing = routeFailures([1], a, isUnit([1]), retry);
+
+    expect(turns).toEqual([{ id: 1, text: "first clause." }]);
+    expect(routing.retries).toEqual([{ id: 1, text: "first clause." }]);
+    // The unit is owed, not settled: the line waits for the turn it dispatched
+    // rather than assembling short.
+    expect(a.tryAssemble(100)).toBeNull();
+    a.noteUnitResult(1, "첫 번째.");
+    expect(a.tryAssemble(100)).toBe("첫 번째. 두 번째. 그리고 더");
+  });
+
+  it("settles every unit of the batch, not just the first", () => {
+    // The old `break` skipped the REST of the batch's retries too, leaving each
+    // of those units owed as well.
     const a = new StreamingAssembler();
     a.noteUnit(MIC, 1, "first clause.");
     a.noteUnit(MIC, 2, "second clause.");
-    a.noteUnitResult(2, "두 번째.");
-    a.onFinalized(MIC, 100, "first clause. second clause. and more words", 4);
-    a.noteTailResult(100, "그리고 더");
+    a.onFinalized(MIC, 100, "first clause. second clause.", 4);
 
-    const routing = routeFailures([1], a, isUnit([1]), canDispatchRetry(runner, false));
+    const routing = routeFailures([1, 2], a, isUnit([1, 2]), { dispatch: null, stopping: true });
 
-    expect(routing.retries).toEqual([{ id: 1, text: "first clause." }]);
-    expect(a.tryAssemble(100)).toBeNull();
-    // And the dispatched retry still lands in place when it succeeds.
-    a.noteUnitResult(1, "첫 번째.");
-    expect(a.tryAssemble(100)).toBe("첫 번째. 두 번째. 그리고 더");
+    expect(routing.retries).toEqual([]);
+    // Both settled: nothing arrived, so there is no line to write at all.
+    expect(a.tryAssemble(100)).toBe("");
   });
 });

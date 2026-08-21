@@ -57,31 +57,30 @@ export interface FinalizePlan {
   ready: boolean;
 }
 
+/**
+ * The caller's ability to run a retry turn, at the moment a batch failed (#214).
+ *
+ * Both fields are state the caller HAS, not a decision it made: `routeFailures`
+ * draws the conclusion, so the skip and the settlement it implies cannot come
+ * apart the way they did in `HostSession`.
+ */
+export interface RetryDispatch {
+  /**
+   * Sends a retry turn for one span, under the same unit id so its result still
+   * lands as a unit result. Null when there is nowhere to send one — before the
+   * runner exists, or after it is gone.
+   */
+  dispatch: ((turn: { id: number; text: string }) => void) | null;
+  /** Whether the session is stopping: a turn dispatched now would never run. */
+  stopping: boolean;
+}
+
 /** How a failed batch's ids split between the two paths that must handle them. */
 export interface FailureRouting {
-  /** Spans to re-translate under their own id (post-finalize unit failures). */
+  /** Retry turns dispatched for post-finalize unit failures, in batch order. */
   retries: { id: number; text: string }[];
   /** Ids that are captions, not units — the caller's existing failure path. */
   captionFailures: number[];
-}
-
-/**
- * Whether a post-finalize unit retry can be dispatched at all (#214).
- *
- * A retry needs a live runner and a session that is not stopping. `HostSession`
- * used to make this judgement inline and act on only half of it — it skipped the
- * dispatch and left the unit owed — and that half-decision IS the defect this
- * fixes. It is a named function here so the rule is exercised by tests rather
- * than living only in a host the suite cannot construct (`start()` spawns real
- * CLI and llama-server children); the same reason `routeFailures` itself was
- * extracted, and the pattern #139 and #174 already follow.
- *
- * The runner is taken as an opaque reference: this decides nothing about what a
- * runner *is*, only whether one is there. Typing it apart from the boolean also
- * means a call site cannot transpose the two arguments without a type error.
- */
-export function canDispatchRetry(runner: object | null | undefined, stopping: boolean): boolean {
-  return runner !== null && runner !== undefined && !stopping;
 }
 
 /**
@@ -93,31 +92,40 @@ export function canDispatchRetry(runner: object | null | undefined, stopping: bo
  * headless harness — so this partition, and the retries it produces, are
  * assertable rather than taken on trust.
  *
- * `canRetry` comes from {@link canDispatchRetry}. The decision lives here rather
- * than at the call site because the two halves of it are inseparable (#214):
- * declining to dispatch a retry means settling the unit, and a call site that
- * did only the first half would leave the unit owed forever. Being a parameter,
- * the skip is assertable in this module instead of only inside `HostSession`.
+ * A post-finalize unit failure needs a retry TURN, and whether one can run is
+ * this function's business too (#214). `HostSession` used to judge that inline
+ * and act on only half the judgement — it skipped the dispatch and left the unit
+ * owed, which is the defect this fixes. Handing it `retry` means the caller
+ * supplies state and a way to dispatch, and takes no decision of its own: when
+ * the session is stopping or there is nowhere to dispatch to, the unit is
+ * settled here instead. That also puts the skip where the suite can reach it —
+ * `HostSession` cannot be constructed in a test, since `start()` spawns real CLI
+ * and llama-server children, and this partition was extracted for that reason.
  */
 export function routeFailures(
   ids: number[],
   assembler: StreamingAssembler,
   isUnit: (id: number) => boolean,
-  canRetry: boolean,
+  retry: RetryDispatch,
 ): FailureRouting {
   const routing: FailureRouting = { retries: [], captionFailures: [] };
+  // A turn dispatched into a stopping session never runs, so it is no different
+  // from having nowhere to send it.
+  const dispatch = retry.stopping ? null : retry.dispatch;
   for (const id of ids) {
     if (!isUnit(id)) {
       routing.captionFailures.push(id);
       continue;
     }
-    const retry = assembler.noteUnitFailed(id);
-    if (!retry) continue;
-    if (!canRetry) {
+    const owed = assembler.noteUnitFailed(id);
+    if (!owed) continue;
+    if (!dispatch) {
       assembler.abandonUnit(id);
       continue;
     }
-    routing.retries.push({ id, text: retry.source });
+    const turn = { id, text: owed.source };
+    dispatch(turn);
+    routing.retries.push(turn);
   }
   return routing;
 }

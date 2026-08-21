@@ -49,7 +49,7 @@ import { toFinalizedRecords } from "./metrics-records.ts";
 import { LazyLocalEngine } from "./local-tier.ts";
 import { SILENCE_THRESHOLD_MS, SilenceWatchdog } from "./silence.ts";
 import { resolveStartConfig } from "./start-config.ts";
-import { canDispatchRetry, routeFailures, StreamingAssembler } from "./streaming-assembly.ts";
+import { routeFailures, StreamingAssembler } from "./streaming-assembly.ts";
 import type { ResolvedStartConfig } from "./start-config.ts";
 import { withTimeout } from "./timeout.ts";
 import { TranslationRunner } from "./translation-runner.ts";
@@ -594,32 +594,27 @@ export class HostSession {
           // into the tail so the finalize turn re-translates it.
           // Set.delete reports whether the id WAS a unit, so this classifies and
           // clears in one step — either way a unit id is consumed exactly once.
-          // #214: when a retry cannot be dispatched, the skip is handed to
-          // `routeFailures` rather than taken here, so the unit is SETTLED
-          // instead of left owed — a unit stuck `retried` with no target never
-          // becomes ready, and its line is then emitted by the stop-time
-          // force-assemble fallback. Settling it recovers no words; it lets the
-          // line assemble normally from the pieces that did arrive.
+          // A unit that failed AFTER its utterance finalized cannot ride the
+          // tail — that turn is already out. Re-dispatch the span itself, under
+          // the same id so its result still lands as a unit result. Safe from
+          // inside onFailed: the runner routes a retry of a just-failed id past
+          // its own in-flight dedup (#195).
+          // #214: whether such a turn can run at all is `routeFailures`'s call,
+          // not this handler's. It is handed the state and a way to dispatch;
+          // when the turn cannot run, it SETTLES the unit instead of leaving it
+          // owed. Judging that here and acting on only half of it — skipping the
+          // dispatch, leaving the unit `retried` with no target — is precisely
+          // what left the line to the stop-time force-assemble fallback.
           const runner = this.runner;
-          const routing = routeFailures(
-            ids,
-            this.assembler,
-            (id) => this.unitIds.delete(id),
-            canDispatchRetry(runner, this.stopping),
-          );
-          // `retries` is empty unless a retry was dispatchable, so this test is
-          // narrowing, not a second decision.
-          if (runner) {
-            for (const retry of routing.retries) {
-              // A unit that failed AFTER its utterance finalized cannot ride the
-              // tail — that turn is already out. Re-dispatch the span itself,
-              // under the same id so its result still lands as a unit result.
-              // Safe from inside onFailed: the runner routes a retry of a
-              // just-failed id past its own in-flight dedup (#195).
-              this.unitIds.add(retry.id);
-              runner.enqueue(retry);
-            }
-          }
+          const routing = routeFailures(ids, this.assembler, (id) => this.unitIds.delete(id), {
+            dispatch:
+              runner &&
+              ((turn) => {
+                this.unitIds.add(turn.id);
+                runner.enqueue(turn);
+              }),
+            stopping: this.stopping,
+          });
           if (routing.captionFailures.length > 0) {
             this.emit({ type: "translationFailed", ids: routing.captionFailures, detail });
             // Keep the archive complete: sources land even when translation fails;
