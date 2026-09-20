@@ -231,4 +231,22 @@ describe("HostSession hard-exit fallback (#218)", () => {
     expect(switches()).toHaveLength(0);
     expect(statuses().some((status) => status.startsWith("local fallback ready"))).toBe(false);
   });
+
+  it("turns a wedged fallback start into an explicit batch failure and ignores late readiness", async () => {
+    await start();
+    await caption();
+    engines.primaries[0].crash();
+    await settle();
+    expect(engines.local!.startCalls).toBe(1);
+    await vi.advanceTimersByTimeAsync(15 * 60_000);
+    expect(statuses()).toContain("local fallback unavailable");
+    expect(events.filter((event) => event.type === "translationFailed")).toHaveLength(1);
+    expect(switches()).toHaveLength(0);
+    engines.local!.readiness.resolve();
+    await settle();
+    expect(engines.local!.health().status).toBe("stopped");
+    expect(engines.local!.translateCalls).toHaveLength(0);
+    expect(finals()).toHaveLength(0);
+    expect(switches()).toHaveLength(0);
+  });
 });

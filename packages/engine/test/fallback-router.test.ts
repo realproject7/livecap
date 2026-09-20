@@ -1,4 +1,4 @@
-import { describe, it, expect, vi } from "vitest";
+import { afterEach, describe, it, expect, vi } from "vitest";
 
 import { FallbackRouter } from "../src/fallback-router";
 import type {
@@ -104,6 +104,8 @@ class ColdEngine extends StubEngine {
   }
 }
 
+afterEach(() => { vi.useRealTimers(); });
+
 describe("FallbackRouter", () => {
   it("replays an unresolved primary hard exit exactly once after cold fallback readiness", async () => {
     const primary = new HardExitEngine("primary");
@@ -184,6 +186,98 @@ describe("FallbackRouter", () => {
     await expect(translated).rejects.toThrow("cli exited");
     expect(primary.translateCalls).toBe(1);
     expect(fallback.translateCalls).toBe(1);
+  });
+
+  it("keeps a replayed fallback final successful when its stream later throws", async () => {
+    const primary = new HardExitEngine("primary");
+    const fallback = new HardExitEngine("fallback");
+    fallback.finalBeforeExit = true;
+    const router = new FallbackRouter({ primary, fallback, onPrimaryFailure: (): Promise<void> => router.switchToFallback() });
+    await router.start();
+    const translated = collect(router.translate(batch, { pairs: [] }));
+    primary.exit.resolve();
+    fallback.exit.resolve();
+    await expect(translated).resolves.toEqual([
+      { sentenceIds: ["s1"], text: "primary:snapshot", done: false },
+      { sentenceIds: ["s1"], text: "primary:snapshot", done: true },
+    ]);
+    expect(primary.translateCalls).toBe(1);
+    expect(fallback.translateCalls).toBe(1);
+  });
+
+  it("times out an unresponsive cold start, fails retained work, and reaps late readiness", async () => {
+    vi.useFakeTimers();
+    const primary = new HardExitEngine("primary");
+    const fallback = new ColdEngine("fallback");
+    const router = new FallbackRouter({
+      primary, fallback, fallbackStartTimeoutMs: 500,
+      onPrimaryFailure: (): Promise<void> => router.switchToFallback(),
+    });
+    await router.start();
+    const inFlight = router.translate(batch, { pairs: [] })[Symbol.asyncIterator]();
+    await inFlight.next();
+    primary.exit.resolve();
+    let settled = false;
+    const recovery = inFlight.next().finally(() => { settled = true; });
+    const failed = expect(recovery).rejects.toThrow("local fallback startup timed out");
+    await vi.advanceTimersByTimeAsync(0);
+    expect(fallback.startCalls).toBe(1);
+    const queued = expect(collect(router.translate(batch, { pairs: [] }))).rejects.toThrow("timed out");
+    await vi.advanceTimersByTimeAsync(499);
+    expect(settled).toBe(false);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(settled).toBe(true);
+    await Promise.all([failed, queued]);
+    expect(router.onFallback).toBe(false);
+    expect(fallback.translateCalls).toBe(0);
+    // No second start can race the timed-out operation's eventual cleanup.
+    await expect(router.switchToFallback()).rejects.toThrow("still stopping");
+    expect(fallback.startCalls).toBe(1);
+    fallback.readiness.resolve();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(fallback.health().status).toBe("stopped");
+    expect(router.onFallback).toBe(false);
+    expect(fallback.translateCalls).toBe(0);
+    // Once cleanup finished, a deliberate retry can start a fresh attempt.
+    await router.switchToFallback();
+    expect(router.onFallback).toBe(true);
+    expect(fallback.startCalls).toBe(2);
+  });
+
+  it.each(["stop", "dispose"] as const)("%s settles a never-ready switch promptly and reaps late startup", async (action) => {
+    vi.useFakeTimers();
+    const primary = new HardExitEngine("primary");
+    const fallback = new ColdEngine("fallback");
+    const router = new FallbackRouter({ primary, fallback, onPrimaryFailure: (): Promise<void> => router.switchToFallback() });
+    await router.start();
+    const inFlight = router.translate(batch, { pairs: [] })[Symbol.asyncIterator]();
+    await inFlight.next();
+    let switchSettled = false;
+    const switching = router.switchToFallback().finally(() => { switchSettled = true; });
+    const cancelled = expect(switching).rejects.toThrow("fallback switch cancelled");
+    primary.exit.resolve();
+    let recoverySettled = false;
+    const recovery = inFlight.next().finally(() => { recoverySettled = true; });
+    const recoveryFailed = expect(recovery).rejects.toThrow("fallback switch cancelled");
+    let translationSettled = false;
+    const translated = collect(router.translate(batch, { pairs: [] })).finally(() => { translationSettled = true; });
+    const failed = expect(translated).rejects.toThrow("fallback switch cancelled");
+    await vi.advanceTimersByTimeAsync(0);
+    expect(recoverySettled).toBe(false);
+    let stopSettled = false;
+    const stopped = Promise.resolve(router[action]()).then(() => { stopSettled = true; });
+    // No deadline or readiness advance: all callers must settle on cancellation.
+    await vi.advanceTimersByTimeAsync(0);
+    expect(stopSettled).toBe(true);
+    expect(switchSettled).toBe(true);
+    expect(recoverySettled).toBe(true);
+    expect(translationSettled).toBe(true);
+    await Promise.all([cancelled, recoveryFailed, failed, stopped]);
+    fallback.readiness.resolve();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(router.onFallback).toBe(false);
+    expect(fallback.health().status).toBe("stopped");
+    expect(fallback.translateCalls).toBe(0);
   });
 
   it("leaves failed startup explicit and permits a later switch retry", async () => {
