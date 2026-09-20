@@ -30,6 +30,12 @@ export interface FallbackRouterOptions {
   /** Pulled on start(): when it returns true the session begins on the fallback
    *  (e.g. credit already below threshold at launch). */
   startOnFallback?: () => boolean;
+  /** Host-owned policy for an unresolved translation whose primary is in error.
+   *  May enable fallback; omitting it never enables automatic switching. */
+  onPrimaryFailure?: () => Promise<void> | void;
+  /** Readiness backstop, including first-use downloads. Defaults to the host's
+   *  15-minute initial-start allowance. Timeout leaves an explicit retry path. */
+  fallbackStartTimeoutMs?: number;
 }
 
 export class FallbackRouter implements TranslationEngine {
@@ -37,14 +43,24 @@ export class FallbackRouter implements TranslationEngine {
   private readonly fallback: TranslationEngine;
   private active: TranslationEngine;
   private usingFallback = false;
+  private switching: Promise<void> | null = null;
+  private cancelSwitch: (() => void) | null = null;
+  /** Quarantine an unabortable start until its late cleanup finishes. */
+  private fallbackStartup: Promise<void> | null = null;
+  private generation = 0;
+  private stopped = false;
 
   private readonly startOnFallback?: () => boolean;
+  private readonly onPrimaryFailure?: () => Promise<void> | void;
+  private readonly fallbackStartTimeoutMs: number;
 
   constructor(options: FallbackRouterOptions) {
     this.primary = options.primary;
     this.fallback = options.fallback;
     this.active = options.primary;
     this.startOnFallback = options.startOnFallback;
+    this.onPrimaryFailure = options.onPrimaryFailure;
+    this.fallbackStartTimeoutMs = options.fallbackStartTimeoutMs ?? 15 * 60_000;
   }
 
   /** True once the router has switched to the fallback engine. */
@@ -53,6 +69,7 @@ export class FallbackRouter implements TranslationEngine {
   }
 
   async start(): Promise<void> {
+    this.stopped = false;
     // Begin on the fallback if credit is already low at launch (restart-while-
     // below) — this is what re-delivers the recommendation across a process
     // restart, where the accountant's per-crossing event would not re-fire.
@@ -66,6 +83,10 @@ export class FallbackRouter implements TranslationEngine {
   }
 
   async stop(): Promise<void> {
+    this.stopped = true;
+    this.generation += 1;
+    const switching = this.switching;
+    this.cancelSwitch?.();
     // onUsage subscriptions are durable until the caller invokes the unsubscribe
     // returned by onUsage() — NOT cleared here. Both engines keep their listeners
     // across stop(), so accounting (e.g. accountant.attach(router) once) keeps
@@ -77,6 +98,9 @@ export class FallbackRouter implements TranslationEngine {
     // even after credit recovered. Neither shipped engine's stop() rejects today,
     // but the TranslationEngine contract does not forbid it.
     const results = await Promise.allSettled([this.primary.stop(), this.fallback.stop()]);
+    // Cancellation settles the switch without waiting for its underlying
+    // startup. That operation owns cleanup if it ever materializes later.
+    await switching?.catch(() => undefined);
     // Reset routing UNCONDITIONALLY so the NEXT session begins on the primary
     // again, regardless of a partial stop() failure.
     this.active = this.primary;
@@ -87,6 +111,9 @@ export class FallbackRouter implements TranslationEngine {
 
   /** Synchronous force-kill of both tiers' OS children (#66 process teardown). */
   dispose(): void {
+    this.stopped = true;
+    this.generation += 1;
+    this.cancelSwitch?.();
     this.primary.dispose?.();
     this.fallback.dispose?.();
   }
@@ -99,16 +126,97 @@ export class FallbackRouter implements TranslationEngine {
    * Switch the active engine to the fallback. The fallback is started if needed;
    * once active, NEW translate/summarize calls route to it. Idempotent.
    */
-  async switchToFallback(): Promise<void> {
-    if (this.usingFallback) return;
-    if (this.fallback.health().status !== "ready") await this.fallback.start();
-    this.active = this.fallback;
-    this.usingFallback = true;
+  switchToFallback(): Promise<void> {
+    if (this.stopped) return Promise.reject(new Error("engine router stopped"));
+    if (this.usingFallback) return Promise.resolve();
+    if (this.switching) return this.switching;
+    if (this.fallbackStartup) return Promise.reject(new Error("local fallback startup is still stopping"));
+    const generation = this.generation;
+    let cancelled = false;
+    let timer!: ReturnType<typeof setTimeout>;
+    const interrupted = new Promise<never>((_resolve, reject) => {
+      const cancel = (detail: string) => {
+        if (cancelled) return;
+        cancelled = true;
+        reject(new Error(detail));
+        // Kill whatever already exists now; don't let teardown delay the
+        // retained batch's failure. A still-pending start is also reaped below.
+        this.fallback.dispose?.();
+        void this.fallback.stop().catch(() => undefined);
+      };
+      this.cancelSwitch = () => cancel("fallback switch cancelled");
+      timer = setTimeout(() => cancel("local fallback startup timed out"), this.fallbackStartTimeoutMs);
+      timer.unref?.();
+    });
+    const startup = (async () => {
+      try {
+        if (this.fallback.health().status !== "ready") await this.fallback.start();
+      } finally {
+        if (cancelled) {
+          this.fallback.dispose?.();
+          await this.fallback.stop();
+        }
+      }
+    })().finally(() => { this.fallbackStartup = null; });
+    this.fallbackStartup = startup;
+    this.switching = Promise.race([startup, interrupted]).then(() => {
+      if (cancelled || generation !== this.generation) throw new Error("fallback switch cancelled");
+      if (this.fallback.health().status !== "ready") throw new Error("local fallback did not become ready");
+      this.active = this.fallback;
+      this.usingFallback = true;
+    }).finally(() => {
+      clearTimeout(timer);
+      this.cancelSwitch = null;
+      this.switching = null;
+    });
+    return this.switching;
   }
 
   translate(batch: Sentence[], ctx: RollingContext): AsyncIterable<Translation> {
-    // Bind to the active engine at call time → in-flight batches finish on it.
-    return this.active.translate(batch, ctx);
+    // Bind healthy in-flight work at call time. New work during a cold switch
+    // waits for readiness instead of going back to the failed primary.
+    return this.translateOn(this.active, this.switching, this.generation, batch, ctx);
+  }
+
+  private async *translateOn(
+    engine: TranslationEngine,
+    switching: Promise<void> | null,
+    generation: number,
+    batch: Sentence[],
+    ctx: RollingContext,
+  ): AsyncIterable<Translation> {
+    if (switching) {
+      await switching;
+      engine = this.fallback;
+    }
+    if (generation !== this.generation || this.stopped) throw new Error("engine router stopped");
+    try {
+      yield* this.forwardTranslation(engine, batch, ctx);
+    } catch (error) {
+      if (engine !== this.primary || generation !== this.generation || this.stopped) throw error;
+      if (this.primary.health().status === "error") await this.onPrimaryFailure?.();
+      await this.switching;
+      if (!this.usingFallback || generation !== this.generation || this.stopped) throw error;
+      // Snapshots replace the prior partial for the same sentence ids. There is
+      // just one replay; a fallback failure propagates to the explicit retry UI.
+      yield* this.forwardTranslation(this.fallback, batch, ctx);
+    }
+  }
+
+  private async *forwardTranslation(
+    engine: TranslationEngine, batch: Sentence[], ctx: RollingContext,
+  ): AsyncIterable<Translation> {
+    let finalized = false;
+    try {
+      for await (const snapshot of engine.translate(batch, ctx)) {
+        finalized ||= snapshot.done;
+        yield snapshot;
+      }
+    } catch (error) {
+      // A yielded final is already delivered, including on the replay. Never
+      // convert a late stream teardown error into a second failure/completion.
+      if (!finalized) throw error;
+    }
   }
 
   summarize(transcript: string): Promise<MeetingBrief> {
