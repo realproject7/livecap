@@ -254,6 +254,8 @@ export class HostSession {
   /** §8.7 auto-switch toggle: gates both the credit- and health-driven (#135)
    *  fallback to the local tier. */
   private autoSwitch = false;
+  private switchingToLocal: Promise<void> | null = null;
+  private localSwitchEmitted = false;
   /** Archive folder for the periodic orphan-adoption pass (#69). */
   private archiveDir = "";
 
@@ -381,7 +383,10 @@ export class HostSession {
       translationPrimary.onHealthEvent((event) => this.onEngineHealthEvent(event));
       extrasPrimary.onHealthEvent((event) => this.onEngineHealthEvent(event));
       const startOnFallback = () => resolved.autoSwitch && accountant.isBelowThreshold();
-      this.translationRouter = new FallbackRouter({ primary: translationPrimary, fallback: local, startOnFallback });
+      this.translationRouter = new FallbackRouter({
+        primary: translationPrimary, fallback: local, startOnFallback,
+        onPrimaryFailure: () => this.onPrimaryFailure(),
+      });
       this.extrasRouter = new FallbackRouter({ primary: extrasPrimary, fallback: local, startOnFallback });
       translationEngine = this.translationRouter;
       extrasEngine = this.extrasRouter;
@@ -425,7 +430,10 @@ export class HostSession {
       // do, since the quota is per ACCOUNT, not per thread.
       this.codexEngine = translationPrimary;
       const startOnFallback = () => resolved.autoSwitch && accountant.isBelowThreshold();
-      this.translationRouter = new FallbackRouter({ primary: translationPrimary, fallback: local, startOnFallback });
+      this.translationRouter = new FallbackRouter({
+        primary: translationPrimary, fallback: local, startOnFallback,
+        onPrimaryFailure: () => this.onPrimaryFailure(),
+      });
       this.extrasRouter = new FallbackRouter({ primary: extrasPrimary, fallback: local, startOnFallback });
       translationEngine = this.translationRouter;
       extrasEngine = this.extrasRouter;
@@ -467,7 +475,7 @@ export class HostSession {
       } else if (event.type === "engine-switch") {
         // §8.7 auto-switch toggle: when off, the gauge still updates but the
         // session stays on the CLI tier.
-        if (resolved.autoSwitch) this.switchToLocal();
+        if (resolved.autoSwitch) void this.switchToLocal();
       } else {
         this.emit({ type: "status", detail: "credit ledger write failed — accounting paused" });
       }
@@ -497,7 +505,7 @@ export class HostSession {
     // tier; the translation router reflects it.
     if (this.translationRouter?.onFallback) {
       engineLabel = LOCAL_ENGINE_LABEL;
-      this.emit({ type: "engineSwitch", engine: LOCAL_ENGINE_LABEL });
+      this.announceLocalEngine();
     }
 
     // Retention sweep (§8.9): enforced on every session start, so a Settings
@@ -697,14 +705,26 @@ export class HostSession {
       return;
     }
     // degraded
-    if (this.autoSwitch) {
-      this.switchToLocal();
-    } else {
-      this.emit({ type: "status", detail: "translation engine unresponsive" });
-    }
+    void this.onPrimaryFailure();
   }
 
-  private switchToLocal(): void {
+  /** A first hard exit sets health=error before the three-failure degraded
+   *  event. The router holds the unresolved batch while this policy runs. */
+  private async onPrimaryFailure(): Promise<void> {
+    if (this.stopping) return;
+    if (this.autoSwitch) await this.switchToLocal();
+    else this.emit({ type: "status", detail: "translation engine unresponsive" });
+  }
+
+  private announceLocalEngine(): void {
+    if (this.stopping || this.localSwitchEmitted) return;
+    this.localSwitchEmitted = true;
+    this.emit({ type: "engineSwitch", engine: LOCAL_ENGINE_LABEL });
+  }
+
+  private switchToLocal(): Promise<void> {
+    if (this.stopping) return Promise.resolve();
+    if (this.switchingToLocal) return this.switchingToLocal;
     // Switch BOTH lanes to the (single, shared) local engine (#142): if only the
     // translation lane fell back while summary/extras stayed on the CLI, the
     // always-on summary load would keep draining CLI credits — defeating the
@@ -713,12 +733,20 @@ export class HostSession {
     const routers = [this.translationRouter, this.extrasRouter].filter(
       (router): router is FallbackRouter => router !== null && !router.onFallback,
     );
-    if (routers.length === 0) return;
-    void Promise.all(routers.map((router) => router.switchToFallback()))
-      .then(() => this.emit({ type: "engineSwitch", engine: LOCAL_ENGINE_LABEL }))
-      .catch((error: unknown) =>
-        this.emit({ type: "status", detail: `local fallback unavailable (${errorDetail(error)})` }),
-      );
+    if (routers.length === 0) return Promise.resolve();
+    const startedAt = Date.now();
+    this.emit({ type: "status", detail: "starting local fallback…" });
+    this.switchingToLocal = Promise.all(routers.map((router) => router.switchToFallback()))
+      .then(() => {
+        if (this.stopping) return;
+        this.emit({ type: "status", detail: `local fallback ready (${Date.now() - startedAt} ms)` });
+        this.announceLocalEngine();
+      })
+      .catch(() => {
+        if (!this.stopping) this.emit({ type: "status", detail: "local fallback unavailable" });
+      })
+      .finally(() => { this.switchingToLocal = null; });
+    return this.switchingToLocal;
   }
 
   private onCaption(message: Extract<HostInbound, { type: "caption" }>): void {
