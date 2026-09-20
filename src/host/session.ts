@@ -241,6 +241,9 @@ export class HostSession {
   private readonly transcriptLines: string[] = [];
   private sessionCostUsd = 0;
   private startedAtMs = 0;
+  /** Paid-route time only. Local sessions never enter this interval (#219). */
+  private paidMeteringStartedAtMs: number | null = null;
+  private paidMeteringEndedAtMs: number | null = null;
   private summaryRunning = false;
   /** How many transcript lines are already folded into `lastSummary` — the
    *  boundary for the incremental summary delta (#55). */
@@ -354,6 +357,13 @@ export class HostSession {
     // Distinct engines whose usage must be summed — attached once each below so
     // the shared local fallback is never double-counted across the two lanes.
     const metered: UsageMeterable[] = [];
+    const startOnFallback = () => {
+      const fallback = resolved.autoSwitch && accountant.isBelowThreshold();
+      // Preserve the paid-only session's startup-inclusive duration, but only
+      // when a router actually starts its paid route.
+      if (!fallback) this.paidMeteringStartedAtMs ??= this.startedAtMs;
+      return fallback;
+    };
     if (cli) {
       const cwd = join(config.appDataDir, "cli-session");
       mkdirSync(cwd, { recursive: true });
@@ -382,7 +392,6 @@ export class HostSession {
       // watchdog rides inside each ClaudeCliEngine, so it too carries to both.
       translationPrimary.onHealthEvent((event) => this.onEngineHealthEvent(event));
       extrasPrimary.onHealthEvent((event) => this.onEngineHealthEvent(event));
-      const startOnFallback = () => resolved.autoSwitch && accountant.isBelowThreshold();
       this.translationRouter = new FallbackRouter({
         primary: translationPrimary, fallback: local, startOnFallback,
         onPrimaryFailure: () => this.onPrimaryFailure(),
@@ -429,7 +438,6 @@ export class HostSession {
       // The rate-limit reader rides the translation lane's server; either would
       // do, since the quota is per ACCOUNT, not per thread.
       this.codexEngine = translationPrimary;
-      const startOnFallback = () => resolved.autoSwitch && accountant.isBelowThreshold();
       this.translationRouter = new FallbackRouter({
         primary: translationPrimary, fallback: local, startOnFallback,
         onPrimaryFailure: () => this.onPrimaryFailure(),
@@ -738,6 +746,9 @@ export class HostSession {
     this.emit({ type: "status", detail: "starting local fallback…" });
     this.switchingToLocal = Promise.all(routers.map((router) => router.switchToFallback()))
       .then(() => {
+        // Both lanes are ready. Failed or pending switches keep paid time
+        // running, and healthy in-flight paid usage remains attached above.
+        this.paidMeteringEndedAtMs ??= Date.now();
         if (this.stopping) return;
         this.emit({ type: "status", detail: `local fallback ready (${Date.now() - startedAt} ms)` });
         this.announceLocalEngine();
@@ -1195,7 +1206,11 @@ export class HostSession {
       }
     }
 
-    this.accountant?.recordMeetingTime(now - this.startedAtMs);
+    if (this.paidMeteringStartedAtMs !== null) {
+      this.accountant?.recordMeetingTime(
+        (this.paidMeteringEndedAtMs ?? now) - this.paidMeteringStartedAtMs,
+      );
+    }
 
     // NOTE (#82): the engine is intentionally NOT stopped here. The post-meeting
     // review screen (which opens AFTER this `stopped` event) has a Coaching tab
